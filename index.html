@@ -312,11 +312,11 @@
       <input type="file" id="inputImportar" accept=".sqlite,.db,.sqlite3" hidden>
     </div>
     <nav class="tabs" id="tabsNav">
-      <button class="tab-btn" type="button" data-tab="cargarmes">Cargar mes <span class="dot-construccion">🚧</span></button>
+      <button class="tab-btn" type="button" data-tab="cargarmes">Cargar mes</button>
       <button class="tab-btn" type="button" data-tab="ingreso">Ingreso Manual</button>
       <button class="tab-btn" type="button" data-tab="resumen">Resumen Mensual</button>
       <button class="tab-btn" type="button" data-tab="estadocuenta">Estado de Cuenta</button>
-      <button class="tab-btn" type="button" data-tab="categorizar">Categorizar <span class="dot-construccion">🚧</span></button>
+      <button class="tab-btn" type="button" data-tab="categorizar">Categorizar</button>
       <button class="tab-btn" type="button" data-tab="gastosdiarios">Gastos Diarios <span class="dot-construccion">🚧</span></button>
       <button class="tab-btn" type="button" data-tab="paneldiario">Panel Diario <span class="dot-construccion">🚧</span></button>
       <button class="tab-btn" type="button" data-tab="checklist">Checklist Pagos</button>
@@ -326,13 +326,57 @@
 
 <main class="wrap">
 
-  <!-- ======================= CARGAR MES (placeholder) ======================= -->
+  <!-- ======================= CARGAR MES ======================= -->
   <section id="tab-cargarmes" class="tabpanel" hidden>
-    <div class="card placeholder-card">
-      <div class="placeholder-icon">🚧</div>
+    <div class="card">
       <h2>Cargar mes</h2>
-      <p>Esta sección se está construyendo. Acá vas a poder importar el estado de cuenta bancario en PDF (CMR Falabella) y las deudas adicionales del mes, revisar cada movimiento y confirmarlo, igual que en la app de escritorio.</p>
-      <p class="hint">Por ahora, carga los gastos del mes a mano desde la pestaña "Ingreso Manual".</p>
+      <p class="hint" style="margin:6px 0 10px;">Sube el PDF del estado de cuenta (Falabella/CMR o Líder). Se extraen los gastos automáticamente -- revisalos abajo, corregí lo que haga falta y confirmá para guardarlos.</p>
+      <div class="form-grid">
+        <div class="field small">
+          <label>Tipo de PDF</label>
+          <select id="cmTipo">
+            <option value="falabella">Falabella / CMR</option>
+            <option value="lider">Líder</option>
+          </select>
+        </div>
+        <div class="field small">
+          <label>Mes de carga</label>
+          <select id="cmMes"></select>
+        </div>
+        <div class="field small">
+          <label>Año de carga</label>
+          <select id="cmAnio"></select>
+        </div>
+        <div class="field grow">
+          <label>Archivo PDF</label>
+          <input type="file" id="cmArchivo" accept="application/pdf">
+        </div>
+      </div>
+      <div class="note" id="cmMensaje" hidden></div>
+    </div>
+
+    <div class="card" id="cmCardRevision">
+      <div class="sec-head-row">
+        <h2>Gastos detectados (<span id="cmCantidad">0</span>)</h2>
+        <button type="button" class="btn-ghost" id="cmAgregarFila">+ Agregar fila</button>
+      </div>
+      <p class="hint" style="margin-bottom:10px;">Corregí fecha, detalle, monto o cuota si hace falta, escribí quién(es) pagan (separados por espacio) o borrá la fila si no corresponde cargarla.</p>
+      <div class="table-wrap">
+        <table class="data-table" id="cmTabla">
+          <thead>
+            <tr><th>Fecha</th><th>Detalle</th><th>Monto</th><th>Cuota</th><th>Personas</th><th></th></tr>
+          </thead>
+          <tbody id="cmTablaBody">
+            <tr><td colspan="6" class="hint" style="border-top:none;padding:14px 8px;">Sube un PDF arriba, o agregá una fila a mano con "+ Agregar fila".</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="totals-line" id="cmTotales"></div>
+      <div class="form-actions">
+        <button type="button" class="btn-ghost" id="cmDescartar">Descartar todo</button>
+        <button type="button" class="btn-primary" id="cmConfirmar">Confirmar e importar</button>
+      </div>
+      <div class="note" id="cmMensajeConfirmar" hidden></div>
     </div>
   </section>
 
@@ -448,13 +492,19 @@
     </div>
   </section>
 
-  <!-- ======================= CATEGORIZAR (placeholder) ======================= -->
+  <!-- ======================= CATEGORIZAR ======================= -->
   <section id="tab-categorizar" class="tabpanel" hidden>
-    <div class="card placeholder-card">
-      <div class="placeholder-icon">🚧</div>
-      <h2>Categorizar</h2>
-      <p>Esta sección se está construyendo. Acá vas a poder revisar y corregir a qué categoría pertenece cada gasto, con reglas automáticas según palabras clave del detalle.</p>
-      <p class="hint">Por ahora, puedes escribir la categoría directamente al cargar cada gasto en "Ingreso Manual".</p>
+    <div class="card">
+      <div class="sec-head-row">
+        <h2>Categorizar</h2>
+        <div class="form-grid" style="margin:0;">
+          <div class="field small"><select id="catMes"></select></div>
+          <div class="field small"><select id="catAnio"></select></div>
+        </div>
+      </div>
+      <p class="hint" style="margin-bottom:10px;">Gastos sin categoría del mes elegido. Si un gasto con el mismo detalle ya fue categorizado antes, se sugiere esa misma categoría -- podés aceptarla o escribir otra.</p>
+      <div class="note" id="catResumen"></div>
+      <div id="catLista"></div>
     </div>
   </section>
 
@@ -511,6 +561,7 @@
 </div>
 
 <script src="vendor/sql-wasm.js"></script>
+<script src="vendor/pdf.min.js"></script>
 <script>
 (function(){
   "use strict";
@@ -697,6 +748,26 @@
     return lastId();
   }
 
+  // Insercion compartida de un gasto nuevo + su reparto entre personas --
+  // usada tanto por "Ingreso Manual" (alta nueva, no edicion) como por
+  // "Cargar mes" al confirmar la importacion del PDF, para no duplicar esta
+  // logica en dos lados. NO abre transaccion propia -- quien llama debe
+  // envolver la(s) llamada(s) en BEGIN/COMMIT y llamar scheduleSave() despues.
+  function insertarGastoConReparto(fecha, detalle, empresa, categoriaNombre, monto, cuotaTexto, reparto, origen){
+    var d = new Date(fecha + "T00:00:00");
+    var anio = d.getFullYear();
+    var mes = d.getMonth() + 1;
+    var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
+    db.run("INSERT INTO gastos (anio, mes, fecha, detalle, empresa, categoria_id, monto_total, cuota_texto, origen) VALUES (?,?,?,?,?,?,?,?,?)",
+      [anio, mes, fecha, detalle, empresa || null, categoriaId, monto, cuotaTexto || "1", origen || "MANUAL"]);
+    var gastoId = lastId();
+    Object.keys(reparto).forEach(function(nombre){
+      var personaId = obtenerOCrearPersona(nombre);
+      db.run("INSERT INTO gasto_persona (gasto_id, persona_id, monto) VALUES (?,?,?)", [gastoId, personaId, reparto[nombre]]);
+    });
+    return gastoId;
+  }
+
   // ---------------------------------------------------------------- tema
 
   var themeToggle = document.getElementById("themeToggle");
@@ -733,6 +804,7 @@
     if(id==="resumen") renderResumen();
     if(id==="estadocuenta") renderEstadoCuenta();
     if(id==="checklist") renderChecklist();
+    if(id==="categorizar") renderCategorizar();
   }
   document.querySelectorAll(".tab-btn").forEach(function(btn){
     btn.addEventListener("click", function(){ activarTab(btn.dataset.tab); });
@@ -754,7 +826,7 @@
 
   // ---------------------------------------------------------------- selectores de periodo
 
-  var PERIODO_SELECTS = [["ingMes","ingAnio"],["rsMes","rsAnio"],["ecMes","ecAnio"],["chkMes","chkAnio"]];
+  var PERIODO_SELECTS = [["ingMes","ingAnio"],["rsMes","rsAnio"],["ecMes","ecAnio"],["chkMes","chkAnio"],["cmMes","cmAnio"],["catMes","catAnio"]];
 
   function poblarSelectMes(select){
     var actual = select.value;
@@ -930,15 +1002,13 @@
           [anio, mes, fecha, detalle, empresa, categoriaId, monto, cuotas, idAntes]);
         db.run("DELETE FROM gasto_persona WHERE gasto_id=?", [idAntes]);
         gastoId = idAntes;
+        Object.keys(reparto).forEach(function(nombre){
+          var personaId = obtenerOCrearPersona(nombre);
+          db.run("INSERT INTO gasto_persona (gasto_id, persona_id, monto) VALUES (?,?,?)", [gastoId, personaId, reparto[nombre]]);
+        });
       }else{
-        db.run("INSERT INTO gastos (anio, mes, fecha, detalle, empresa, categoria_id, monto_total, cuota_texto, origen) VALUES (?,?,?,?,?,?,?,?,'MANUAL')",
-          [anio, mes, fecha, detalle, empresa, categoriaId, monto, cuotas]);
-        gastoId = lastId();
+        gastoId = insertarGastoConReparto(fecha, detalle, empresa, categoriaNombre, monto, cuotas, reparto, "MANUAL");
       }
-      Object.keys(reparto).forEach(function(nombre){
-        var personaId = obtenerOCrearPersona(nombre);
-        db.run("INSERT INTO gasto_persona (gasto_id, persona_id, monto) VALUES (?,?,?)", [gastoId, personaId, reparto[nombre]]);
-      });
       db.run("COMMIT");
     }catch(e){
       db.run("ROLLBACK");
@@ -1216,6 +1286,481 @@
   document.getElementById("chkPersona").addEventListener("input", renderChecklist);
   document.getElementById("chkMes").addEventListener("change", renderChecklist);
   document.getElementById("chkAnio").addEventListener("change", renderChecklist);
+
+  // ---------------------------------------------------------------- Categorizar
+  // Version simplificada de categorizar_screen.py / categorization.py: en vez de
+  // reglas por palabra clave guardadas en una tabla aparte, se sugiere la
+  // categoria mirando el gasto MAS RECIENTE ya categorizado con el mismo
+  // detalle exacto -- mismo espiritu (reconocer texto repetido), sin agregar
+  // una tabla de reglas nueva al esquema. El usuario siempre puede aceptar la
+  // sugerencia o escribir otra categoria antes de guardar.
+
+  function sugerirCategoriaPara(detalle){
+    var row = dbGet(
+      "SELECT c.nombre AS nombre FROM gastos g JOIN categorias c ON c.id=g.categoria_id " +
+      "WHERE g.detalle = ? COLLATE NOCASE AND g.categoria_id IS NOT NULL ORDER BY g.id DESC LIMIT 1",
+      [detalle]
+    );
+    return row ? row.nombre : "";
+  }
+
+  function renderCategorizar(){
+    var anio = Number(document.getElementById("catAnio").value);
+    var mes = Number(document.getElementById("catMes").value);
+    var cont = document.getElementById("catLista");
+    var resumen = document.getElementById("catResumen");
+    if(!anio || !mes){ cont.innerHTML = ""; resumen.textContent = ""; return; }
+
+    var filas = dbAll(
+      "SELECT id, fecha, detalle, empresa, monto_total FROM gastos WHERE anio=? AND mes=? AND categoria_id IS NULL ORDER BY monto_total DESC",
+      [anio, mes]
+    );
+    if(filas.length === 0){
+      resumen.className = "note ok";
+      resumen.textContent = "Todo categorizado en " + MESES_ES[mes] + " " + anio + " -- no queda nada pendiente.";
+      cont.innerHTML = "";
+      return;
+    }
+    var total = filas.reduce(function(a, f){ return a + f.monto_total; }, 0);
+    resumen.className = "note warn";
+    resumen.textContent = filas.length + " gasto" + (filas.length !== 1 ? "s" : "") + " sin categoría -- " + money(total) + " en total.";
+
+    cont.innerHTML = filas.map(function(f){
+      var sugerida = sugerirCategoriaPara(f.detalle);
+      return "<div class=\"list-row\" data-catid=\"" + f.id + "\">" +
+        "<div class=\"list-row-main\">" +
+          "<span class=\"list-fecha\">" + f.fecha + "</span>" +
+          "<span class=\"list-detalle\">" + escapeHtml(f.detalle) + "</span>" +
+          "<span class=\"list-monto\">" + money(f.monto_total) + "</span>" +
+        "</div>" +
+        "<div class=\"list-row-side\">" +
+          "<input type=\"text\" class=\"cat-input\" list=\"categoriasList\" style=\"width:180px;\" value=\"" + escapeHtml(sugerida) + "\" placeholder=\"Elegir categoría...\">" +
+          "<button type=\"button\" class=\"btn-primary\" data-catguardar=\"" + f.id + "\">Guardar</button>" +
+        "</div>" +
+      "</div>";
+    }).join("");
+
+    cont.querySelectorAll("[data-catguardar]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var id = Number(btn.dataset.catguardar);
+        var fila = cont.querySelector("[data-catid=\"" + id + "\"]");
+        var nombre = fila.querySelector(".cat-input").value.trim();
+        if(!nombre){ alert("Elegí o escribí una categoría antes de guardar."); return; }
+        var categoriaId = obtenerOCrearCategoria(nombre);
+        dbRun("UPDATE gastos SET categoria_id=? WHERE id=?", [categoriaId, id]);
+        refrescarDatalists();
+        renderResumen();
+        renderCategorizar();
+      });
+    });
+  }
+  document.getElementById("catMes").addEventListener("change", renderCategorizar);
+  document.getElementById("catAnio").addEventListener("change", renderCategorizar);
+
+  // ---------------------------------------------------------------- Cargar mes: extraccion de texto de PDF (pdf.js)
+  // No existe una libreria Python (pdfplumber) equivalente en el navegador --
+  // se vendorizo pdf.js (Mozilla) en vendor/ para leer el PDF, y sobre el
+  // texto extraido se aplica la misma heuristica de lineas/regex que
+  // pdf_falabella.py y pdf_lider.py usan sobre el texto de pdfplumber.
+
+  function agruparLineasDePagina(items){
+    // pdf.js entrega cada fragmento de texto con su posicion (x,y), no
+    // lineas ya armadas como pdfplumber.extract_text() -- se agrupan por
+    // cercania vertical (tolerancia de 2px) y se ordenan por x dentro de
+    // cada linea. Heuristica simplificada a proposito: no maneja columnas
+    // multiples ni texto rotado, pero funciona bien para un estado de
+    // cuenta de una sola columna como estos.
+    var grupos = [];
+    items.forEach(function(it){
+      if(!it.str || !it.str.trim()) return;
+      var y = it.transform[5];
+      var x = it.transform[4];
+      var grupo = null;
+      for(var i = 0; i < grupos.length; i++){
+        if(Math.abs(grupos[i].y - y) <= 2){ grupo = grupos[i]; break; }
+      }
+      if(!grupo){ grupo = {y: y, partes: []}; grupos.push(grupo); }
+      grupo.partes.push({x: x, text: it.str});
+    });
+    grupos.sort(function(a, b){ return b.y - a.y; });
+    return grupos.map(function(g){
+      g.partes.sort(function(a, b){ return a.x - b.x; });
+      return g.partes.map(function(p){ return p.text; }).join(" ").replace(/\s+/g, " ").trim();
+    }).filter(function(l){ return l; });
+  }
+
+  function extraerLineasDePdf(pdfDoc){
+    var promesasPaginas = [];
+    for(var p = 1; p <= pdfDoc.numPages; p++){
+      promesasPaginas.push(
+        pdfDoc.getPage(p).then(function(page){
+          return page.getTextContent().then(function(content){ return agruparLineasDePagina(content.items); });
+        })
+      );
+    }
+    return Promise.all(promesasPaginas).then(function(paginas){
+      var todas = [];
+      paginas.forEach(function(l){ todas = todas.concat(l); });
+      return todas;
+    });
+  }
+
+  // Intenta abrir el PDF sin clave, despues con `claveDefecto` (si se paso
+  // una, ej. "5386" para Lider), y si ninguna funciona le pregunta la clave
+  // al usuario -- algunos estados de cuenta (Falabella incluido, no solo
+  // Lider) vienen protegidos con clave segun como se hayan descargado.
+  function extraerLineasPdfProtegido(bytes, claveDefecto){
+    if(typeof pdfjsLib === "undefined"){
+      return Promise.reject(new Error("No se pudo cargar el lector de PDF (vendor/pdf.min.js)."));
+    }
+    pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
+    function intentar(password){
+      var opts = {data: bytes.slice()}; // copia -- pdf.js puede transferir/vaciar el buffer al worker en cada intento
+      if(password) opts.password = password;
+      return pdfjsLib.getDocument(opts).promise;
+    }
+    function pedirClaveManualYReintentar(){
+      var manual = prompt("Este PDF está protegido con clave. Escríbela:");
+      if(!manual) throw new Error("El PDF está protegido con clave -- no se ingresó ninguna.");
+      return intentar(manual);
+    }
+    // Ojo: el segundo intento (con claveDefecto) solo se arma DENTRO del
+    // .catch, nunca antes -- crear esa promesa de entrada y recien
+    // engancharle un .catch mas tarde dispara un falso "unhandledrejection"
+    // (el banner rojo de error) apenas el primer intento sin clave falla.
+    return intentar(null).catch(function(err){
+      if(!err || err.name !== "PasswordException") throw err;
+      if(!claveDefecto) return pedirClaveManualYReintentar();
+      return intentar(claveDefecto).catch(function(err2){
+        if(!err2 || err2.name !== "PasswordException") throw err2;
+        return pedirClaveManualYReintentar();
+      });
+    }).then(extraerLineasDePdf);
+  }
+
+  function extraerLineasPdf(bytes){
+    return extraerLineasPdfProtegido(bytes, null);
+  }
+
+  function extraerLineasPdfConClave(bytes){
+    // El PDF de Lider viene protegido con clave por defecto "5386", igual
+    // que en la app de escritorio (ver pdf_lider.py).
+    return extraerLineasPdfProtegido(bytes, "5386");
+  }
+
+  // ---------------------------------------------------------------- Cargar mes: parser Falabella/CMR
+  // Traduccion directa de las expresiones regulares de pdf_falabella.py --
+  // ver ese archivo para la explicacion completa de cada seccion del PDF.
+  // Simplificacion a proposito: no se valida el "cuadre" contra los totales
+  // que declara el propio PDF (monto_total_facturado, abonos, etc.) -- esa
+  // reconciliacion es solo informativa en la app de escritorio, y aca se
+  // prioriza que el flujo de extraccion + revision funcione de punta a punta.
+
+  var FALABELLA_SECCIONES = ["FALABELLA", "HOMECENTER - SODIMAC", "TOTTUS", "PAT", "COMPRAS NACIONALES", "COMPRAS INTERNACIONALES", "OTROS"];
+  var MESES_ABR_A_NUM = {ene:1, feb:2, mar:3, abr:4, may:5, jun:6, jul:7, ago:8, sep:9, oct:10, nov:11, dic:12};
+
+  var RX_FECHA = "\\d{2}/\\d{2}/\\d{4}";
+  var RX_MONTO = "-?[\\d.]+";
+  var RX_CUOTAS = "\\d{2}/\\d{2}";
+  var RX_PRIMER_CARGO = "[a-zA-Z]{3}-\\d{4}";
+
+  var RX_CARGO_COMPLETO = new RegExp("^(.*?)\\s*(" + RX_FECHA + ")\\s+(.+?)\\s+T\\s+(" + RX_MONTO + ")\\s+(" + RX_MONTO + ")\\s+(" + RX_CUOTAS + ")\\s+(" + RX_PRIMER_CARGO + ")\\s+(" + RX_MONTO + ")\\s*$");
+  var RX_CARGO_SIN_CUOTA = new RegExp("^(.*?)\\s*(" + RX_FECHA + ")\\s+(.+?)\\s+(" + RX_MONTO + ")\\s+(" + RX_MONTO + ")\\s+(" + RX_CUOTAS + ")\\s+(" + RX_PRIMER_CARGO + ")\\s*$");
+  var RX_CARGO_SIN_PRIMER = new RegExp("^(.*?)\\s*(" + RX_FECHA + ")\\s+(.+?)\\s+T\\s+(" + RX_MONTO + ")\\s+(" + RX_MONTO + ")\\s+(" + RX_CUOTAS + ")\\s+(" + RX_MONTO + ")\\s*$");
+  var RX_ABONO = new RegExp("^(.*?)\\s*(" + RX_FECHA + ")\\s+(.+?)\\s+T\\s+(" + RX_MONTO + ")\\s+(" + RX_MONTO + ")\\s+(" + RX_CUOTAS + ")\\s*$");
+  var RX_SECCION_23 = new RegExp("^(" + RX_FECHA + ")\\s+(.+?)\\s+(" + RX_MONTO + ")\\s+(" + RX_MONTO + ")\\s+(" + RX_MONTO + ")\\s*$");
+
+  function aMonto(t){ return parseFloat(String(t).replace(/\./g, "")) || 0; }
+  function fechaISOdesdeDDMMYYYY(txt){
+    var p = txt.split("/");
+    return p[2] + "-" + p[1] + "-" + p[0];
+  }
+  function fechaDesdeMesAnio(mesTexto, anioTexto, diaFallback){
+    var mes = MESES_ABR_A_NUM[String(mesTexto).toLowerCase()];
+    var anio = parseInt(anioTexto, 10);
+    if(!mes || !anio) return null;
+    var dia = Math.min(diaFallback || 1, new Date(anio, mes, 0).getDate());
+    return anio + "-" + String(mes).padStart(2, "0") + "-" + String(dia).padStart(2, "0");
+  }
+
+  function parsearLineaCargoFalabella(linea){
+    var m = RX_CARGO_COMPLETO.exec(linea);
+    if(m){
+      return {
+        lugar: m[1].trim(), fechaCompra: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(),
+        cuotaTexto: m[6], primerCargoMes: m[7].split("-")[0], primerCargoAnio: m[7].split("-")[1],
+        valorCuota: aMonto(m[8]),
+      };
+    }
+    m = RX_CARGO_SIN_CUOTA.exec(linea);
+    if(m){
+      // recien comprado -- todavia no factura cuota este periodo. Se omite
+      // de la lista de gastos detectados (ver parseFalabellaLineas).
+      return {
+        lugar: m[1].trim(), fechaCompra: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(),
+        cuotaTexto: m[6], primerCargoMes: m[7].split("-")[0], primerCargoAnio: m[7].split("-")[1],
+        valorCuota: null,
+      };
+    }
+    m = RX_CARGO_SIN_PRIMER.exec(linea);
+    if(m){
+      return {
+        lugar: m[1].trim(), fechaCompra: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(),
+        cuotaTexto: m[6], primerCargoMes: null, primerCargoAnio: null, valorCuota: aMonto(m[7]),
+      };
+    }
+    m = RX_ABONO.exec(linea);
+    if(m){
+      return {
+        lugar: m[1].trim(), fechaCompra: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(),
+        cuotaTexto: m[6], primerCargoMes: null, primerCargoAnio: null, valorCuota: null,
+      };
+    }
+    return null;
+  }
+
+  function parseFalabellaLineas(lineas){
+    var filas = [];
+    var enDetalle = false, enSeccion23 = false, seccionActual = null;
+    lineas.forEach(function(lineaCruda){
+      var linea = lineaCruda.trim();
+      if(!linea) return;
+
+      if(linea === "2.1 Total Operaciones"){ enDetalle = true; enSeccion23 = false; return; }
+      if(linea.indexOf("2.3") === 0){ enDetalle = false; seccionActual = null; enSeccion23 = true; return; }
+      if(linea.indexOf("2.2") === 0 || linea.indexOf("III.") === 0){ enDetalle = false; seccionActual = null; enSeccion23 = false; return; }
+
+      if(enSeccion23){
+        // "Pago tarjeta cmr" (con forma de RX_ABONO) es un abono -- plata ya
+        // pagada, nunca un gasto a repartir. Cualquier otra linea con 3
+        // montos (RX_SECCION_23, ej. un impuesto mensual) SI es un cargo real.
+        if(RX_ABONO.exec(linea)) return;
+        var mCargo23 = RX_SECCION_23.exec(linea);
+        if(mCargo23){
+          filas.push({fecha: fechaISOdesdeDDMMYYYY(mCargo23[1]), detalle: mCargo23[2].trim(), monto: aMonto(mCargo23[5]), cuota: "01/01", personas: ""});
+        }
+        return;
+      }
+
+      if(!enDetalle) return;
+      if(FALABELLA_SECCIONES.indexOf(linea) !== -1){ seccionActual = linea; return; }
+      if(linea === "Sin Movimientos" || seccionActual === null) return;
+
+      var cargo = parsearLineaCargoFalabella(linea);
+      if(!cargo || cargo.valorCuota === null) return; // sin monto definido para este periodo -- se omite
+
+      var detalleFinal = cargo.detalle + (cargo.lugar ? " (" + cargo.lugar + ")" : "");
+      var fechaFila = cargo.primerCargoMes ? fechaDesdeMesAnio(cargo.primerCargoMes, cargo.primerCargoAnio, 1) : cargo.fechaCompra;
+      filas.push({fecha: fechaFila || cargo.fechaCompra, detalle: detalleFinal, monto: cargo.valorCuota, cuota: cargo.cuotaTexto || "01/01", personas: ""});
+    });
+    return filas;
+  }
+
+  function parseFalabellaDesdeBytes(bytes){
+    return extraerLineasPdf(bytes).then(parseFalabellaLineas);
+  }
+
+  // ---------------------------------------------------------------- Cargar mes: parser Lider
+  // Traduccion directa de pdf_lider.py -- a diferencia de Falabella, aca se
+  // extraen TODOS los cargos de "1. Total Operaciones" sin distinguir
+  // seccion (LIDER / OTROS COMERCIOS se ignoran, todo queda en una lista
+  // plana), igual que hace el dialogo de escritorio.
+
+  var RX_LIDER_CUOTAS = new RegExp("^(.*?)\\s*(" + RX_FECHA + ")\\s+(.+?)\\s+\\(T\\)\\s+\\$?\\s*(" + RX_MONTO + ")\\s+\\$?\\s*(" + RX_MONTO + ")\\s+(" + RX_CUOTAS + ")\\s+\\$?\\s*(" + RX_MONTO + ")\\s*$");
+  var RX_LIDER_SIMPLE = new RegExp("^(.*?)\\s*(" + RX_FECHA + ")\\s+(.+?)\\s+\\(T\\)\\s+\\$?\\s*(" + RX_MONTO + ")\\s*$");
+  var RX_LIDER_SUBTOTAL = new RegExp("^\\$?\\s*" + RX_MONTO + "\\s*$");
+
+  function parsearLineaLider(linea){
+    var m = RX_LIDER_CUOTAS.exec(linea);
+    if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[6]), cuota: m[5]};
+    m = RX_LIDER_SIMPLE.exec(linea);
+    if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[4]), cuota: "01/01"};
+    return null;
+  }
+
+  function parseLiderLineas(lineas){
+    var filas = [];
+    var enPeriodo = false;
+    lineas.forEach(function(lineaCruda){
+      var linea = lineaCruda.trim();
+      if(!linea) return;
+      if(linea === "1. Total Operaciones"){ enPeriodo = true; return; }
+      if(linea.indexOf("2. Productos") === 0 || linea.indexOf("3. Cargos") === 0){ enPeriodo = false; return; }
+      if(!enPeriodo || RX_LIDER_SUBTOTAL.test(linea)) return;
+      var item = parsearLineaLider(linea);
+      if(item){ item.personas = ""; filas.push(item); }
+    });
+    return filas;
+  }
+
+  function parseLiderDesdeBytes(bytes){
+    return extraerLineasPdfConClave(bytes).then(parseLiderLineas);
+  }
+
+  // ---------------------------------------------------------------- Cargar mes: UI de revision + confirmacion
+
+  var cmFilasActuales = [];
+
+  function mostrarMensajeCargarMes(texto, tipo){
+    var el = document.getElementById("cmMensaje");
+    el.hidden = false;
+    el.className = "note " + tipo;
+    el.textContent = texto;
+  }
+
+  function sincronizarFilasCargarMesDesdeDOM(){
+    var trs = document.querySelectorAll("#cmTablaBody tr[data-idx]");
+    var nuevas = [];
+    trs.forEach(function(tr){
+      nuevas.push({
+        fecha: tr.querySelector(".cm-fecha").value,
+        detalle: tr.querySelector(".cm-detalle").value,
+        monto: Number(tr.querySelector(".cm-monto").value) || 0,
+        cuota: tr.querySelector(".cm-cuota").value,
+        personas: tr.querySelector(".cm-personas").value,
+      });
+    });
+    cmFilasActuales = nuevas;
+  }
+
+  function actualizarTotalesCargarMes(){
+    var trs = document.querySelectorAll("#cmTablaBody tr[data-idx]");
+    var total = 0;
+    trs.forEach(function(tr){ total += Number(tr.querySelector(".cm-monto").value) || 0; });
+    document.getElementById("cmCantidad").textContent = trs.length;
+    document.getElementById("cmTotales").innerHTML = "Filas: <b>" + trs.length + "</b> · Total: <b>" + money(total) + "</b>";
+  }
+
+  function renderTablaCargarMes(){
+    var tbody = document.getElementById("cmTablaBody");
+    if(cmFilasActuales.length === 0){
+      tbody.innerHTML = "<tr><td colspan=\"6\" class=\"hint\" style=\"border-top:none;padding:14px 8px;\">Sube un PDF arriba, o agregá una fila a mano con \"+ Agregar fila\".</td></tr>";
+      document.getElementById("cmCantidad").textContent = "0";
+      document.getElementById("cmTotales").innerHTML = "";
+      return;
+    }
+    tbody.innerHTML = cmFilasActuales.map(function(f, i){
+      return "<tr data-idx=\"" + i + "\">" +
+        "<td><input type=\"date\" class=\"cm-fecha\" value=\"" + escapeHtml(f.fecha) + "\"></td>" +
+        "<td><input type=\"text\" class=\"cm-detalle\" value=\"" + escapeHtml(f.detalle) + "\"></td>" +
+        "<td><input type=\"number\" step=\"1\" class=\"cm-monto\" value=\"" + Math.round(f.monto) + "\" style=\"width:110px;\"></td>" +
+        "<td><input type=\"text\" class=\"cm-cuota\" value=\"" + escapeHtml(f.cuota) + "\" style=\"width:70px;\"></td>" +
+        "<td><input type=\"text\" class=\"cm-personas\" list=\"personasList\" value=\"" + escapeHtml(f.personas || "") + "\" placeholder=\"nombres\" style=\"width:150px;\"></td>" +
+        "<td><button type=\"button\" class=\"icon-btn danger\" data-cmdel=\"" + i + "\" title=\"Borrar fila\">✕</button></td>" +
+      "</tr>";
+    }).join("");
+    tbody.querySelectorAll("[data-cmdel]").forEach(function(b){
+      b.addEventListener("click", function(){
+        sincronizarFilasCargarMesDesdeDOM();
+        cmFilasActuales.splice(Number(b.dataset.cmdel), 1);
+        renderTablaCargarMes();
+      });
+    });
+    tbody.querySelectorAll("input").forEach(function(inp){
+      inp.addEventListener("input", actualizarTotalesCargarMes);
+    });
+    actualizarTotalesCargarMes();
+  }
+
+  function procesarPdfCargarMes(file){
+    mostrarMensajeCargarMes("Leyendo PDF...", "warn");
+    var tipo = document.getElementById("cmTipo").value;
+    var reader = new FileReader();
+    reader.onload = function(){
+      var bytes = new Uint8Array(reader.result);
+      var promesa = tipo === "lider" ? parseLiderDesdeBytes(bytes) : parseFalabellaDesdeBytes(bytes);
+      promesa.then(function(filasNuevas){
+        if(filasNuevas.length === 0){
+          mostrarMensajeCargarMes("No se detectó ningún gasto en el PDF -- revisa que sea el archivo correcto, o agregá filas a mano abajo.", "warn");
+        }else{
+          mostrarMensajeCargarMes("Se detectaron " + filasNuevas.length + " gastos. Revisalos abajo antes de confirmar.", "ok");
+        }
+        sincronizarFilasCargarMesDesdeDOM();
+        cmFilasActuales = cmFilasActuales.concat(filasNuevas);
+        renderTablaCargarMes();
+      }).catch(function(err){
+        mostrarMensajeCargarMes("No se pudo leer el PDF: " + (err && err.message ? err.message : err), "bad");
+      });
+    };
+    reader.onerror = function(){ mostrarMensajeCargarMes("No se pudo leer el archivo elegido.", "bad"); };
+    reader.readAsArrayBuffer(file);
+  }
+
+  document.getElementById("cmArchivo").addEventListener("change", function(ev){
+    var file = ev.target.files[0];
+    if(file) procesarPdfCargarMes(file);
+  });
+
+  document.getElementById("cmAgregarFila").addEventListener("click", function(){
+    sincronizarFilasCargarMesDesdeDOM();
+    var mes = Number(document.getElementById("cmMes").value) || (new Date().getMonth() + 1);
+    var anio = Number(document.getElementById("cmAnio").value) || new Date().getFullYear();
+    cmFilasActuales.push({fecha: anio + "-" + String(mes).padStart(2, "0") + "-01", detalle: "", monto: 0, cuota: "1", personas: ""});
+    renderTablaCargarMes();
+  });
+
+  document.getElementById("cmDescartar").addEventListener("click", function(){
+    if(cmFilasActuales.length && !confirm("¿Descartar todas las filas detectadas/agregadas? No se guarda nada.")) return;
+    cmFilasActuales = [];
+    document.getElementById("cmArchivo").value = "";
+    document.getElementById("cmMensaje").hidden = true;
+    document.getElementById("cmMensajeConfirmar").hidden = true;
+    renderTablaCargarMes();
+  });
+
+  document.getElementById("cmConfirmar").addEventListener("click", function(){
+    sincronizarFilasCargarMesDesdeDOM();
+    var msgEl = document.getElementById("cmMensajeConfirmar");
+    if(cmFilasActuales.length === 0){
+      msgEl.hidden = false; msgEl.className = "note bad"; msgEl.textContent = "No hay filas para importar.";
+      return;
+    }
+    var errores = [];
+    cmFilasActuales.forEach(function(f, i){
+      if(!f.fecha) errores.push("Fila " + (i + 1) + ": falta la fecha.");
+      if(!f.detalle || !f.detalle.trim()) errores.push("Fila " + (i + 1) + ": falta el detalle.");
+      if(!f.monto || f.monto <= 0) errores.push("Fila " + (i + 1) + ": el monto debe ser mayor que 0.");
+      var nombres = (f.personas || "").split(/\s+/).filter(Boolean);
+      if(nombres.length === 0) errores.push("Fila " + (i + 1) + ": falta asignar al menos una persona.");
+    });
+    if(errores.length){
+      msgEl.hidden = false; msgEl.className = "note bad";
+      msgEl.textContent = errores.slice(0, 5).join(" ") + (errores.length > 5 ? " (y " + (errores.length - 5) + " más)" : "");
+      return;
+    }
+
+    db.run("BEGIN");
+    try{
+      cmFilasActuales.forEach(function(f){
+        var nombres = f.personas.split(/\s+/).filter(Boolean);
+        var base = Math.floor(f.monto / nombres.length);
+        var resto = Math.round(f.monto - base * nombres.length);
+        var reparto = {};
+        nombres.forEach(function(n, i){ reparto[n] = base + (i < resto ? 1 : 0); });
+        insertarGastoConReparto(f.fecha, f.detalle.trim(), f.detalle.trim(), "", f.monto, f.cuota || "1", reparto, "IMPORTADO_PDF");
+      });
+      db.run("COMMIT");
+    }catch(e){
+      db.run("ROLLBACK");
+      msgEl.hidden = false; msgEl.className = "note bad"; msgEl.textContent = "Error al guardar: " + e.message;
+      return;
+    }
+    scheduleSave();
+
+    var n = cmFilasActuales.length;
+    cmFilasActuales = [];
+    document.getElementById("cmArchivo").value = "";
+    document.getElementById("cmMensaje").hidden = true;
+    renderTablaCargarMes();
+    msgEl.hidden = false; msgEl.className = "note ok"; msgEl.textContent = "Se importaron " + n + " gastos correctamente.";
+
+    refrescarDatalists();
+    refrescarSelectoresPeriodo();
+    renderListaIngreso();
+    renderResumen();
+    renderEstadoCuenta();
+    renderChecklist();
+  });
 
   // ---------------------------------------------------------------- respaldo / restauracion
 
