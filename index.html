@@ -273,6 +273,23 @@
   tr.cm-row-alerta td{ background:color-mix(in srgb, var(--warn) 8%, transparent); }
   .cm-alerta-txt{ font-size:.72rem; color:var(--warn); margin-top:4px; max-width:220px; }
 
+  /* ---------------- "Cargar mes": marca de reparto heredado del mes
+     anterior por matching automatico (ver aplicarMatchingAutomatico) --
+     "ok" = heredado con confianza (fecha+detalle, o detalle+monto
+     aproximado); "ambiguo" = hubo mas de un candidato y se desempato por
+     monto, requiere revision humana (misma idea que cm-alerta-txt). ------ */
+  .cm-heredado-txt{ font-size:.72rem; margin-top:4px; max-width:220px; }
+  .cm-heredado-txt.cm-heredado-ok{ color:var(--ok); }
+  .cm-heredado-txt.cm-heredado-ambiguo{ color:var(--warn); }
+
+  /* ---------------- "Ingreso Manual": comprobador de cobertura ---------- */
+  .cov-filtros{ display:flex; gap:6px; }
+  .cov-filtro-btn{ padding:6px 10px; font-size:.78rem; }
+  .cov-filtro-btn.active{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+  .list-row.cov-falta{ box-shadow:inset 3px 0 0 var(--warn); }
+  .list-row.cov-ok{ box-shadow:inset 3px 0 0 var(--ok); }
+  .cov-agregar-btn{ font-size:.78rem; padding:6px 10px; white-space:normal; text-align:right; }
+
   /* ---------------- checklist de pagos ---------------- */
   .checklist-item{
     display:flex; align-items:center; gap:10px; padding:10px 8px; border-top:1px solid var(--border); cursor:pointer;
@@ -489,6 +506,19 @@
         <button type="button" class="btn-primary" id="gGuardar">Agregar</button>
       </div>
       <div class="note" id="gMensaje" hidden></div>
+    </div>
+
+    <div class="card">
+      <div class="sec-head-row">
+        <h2>Comprobador de cobertura</h2>
+        <div class="cov-filtros" id="covFiltros">
+          <button type="button" class="btn-ghost cov-filtro-btn active" data-covf="todos">Todos</button>
+          <button type="button" class="btn-ghost cov-filtro-btn" data-covf="faltantes">Faltantes</button>
+          <button type="button" class="btn-ghost cov-filtro-btn" data-covf="agregados">Ya agregados</button>
+        </div>
+      </div>
+      <p class="hint" style="margin-bottom:10px;">Deudas fijas y gastos de Ingreso Manual del mes anterior (Deudas Adicionales / Ingreso Manual) -- para ver de un vistazo cuáles ya quedaron cargados este mes y cuáles todavía faltan.</p>
+      <div id="covLista"></div>
     </div>
 
     <div class="card">
@@ -829,12 +859,30 @@
     "  fecha_hora TEXT NOT NULL DEFAULT (datetime('now')),",
     "  deshecho INTEGER NOT NULL DEFAULT 0",
     ");",
+    // Ancla de reconciliacion contra el PDF importado: el total en pesos que
+    // sumaban las filas de origen PDF (Falabella/Lider) confirmadas para ese
+    // anio/mes, guardado EN EL MOMENTO de "Confirmar e importar" (ver
+    // handler de cmConfirmar), antes de que nadie pudiera editar/dividir/
+    // eliminar nada -- misma idea que MesesImportados.monto_conciliado_pdf
+    // del escritorio (family_expenses/app/services/estado_cuenta_service.py:
+    // verificar_cuadre_mes), portada a tabla propia aca porque la web no
+    // tiene una tabla MesesImportados equivalente. Una reimportacion del
+    // mismo mes reemplaza el ancla anterior (UNIQUE anio,mes + upsert).
+    "CREATE TABLE IF NOT EXISTS meses_conciliados (",
+    "  id INTEGER PRIMARY KEY,",
+    "  anio INTEGER NOT NULL,",
+    "  mes INTEGER NOT NULL CHECK (mes BETWEEN 1 AND 12),",
+    "  monto_conciliado_pdf REAL NOT NULL,",
+    "  actualizado_en TEXT NOT NULL DEFAULT (datetime('now')),",
+    "  UNIQUE (anio, mes)",
+    ");",
     "CREATE INDEX IF NOT EXISTS idx_gastos_anio_mes ON gastos(anio, mes);",
     "CREATE INDEX IF NOT EXISTS idx_gasto_persona_gasto ON gasto_persona(gasto_id);",
     "CREATE INDEX IF NOT EXISTS idx_gasto_persona_persona ON gasto_persona(persona_id);",
     "CREATE INDEX IF NOT EXISTS idx_checklist_persona_mes ON checklist_pagos(persona, anio, mes);",
     "CREATE INDEX IF NOT EXISTS idx_gastos_diarios_anio_mes ON gastos_diarios(anio, mes);",
-    "CREATE INDEX IF NOT EXISTS idx_historial_persona_mes ON historial_ajustes(persona, anio, mes);"
+    "CREATE INDEX IF NOT EXISTS idx_historial_persona_mes ON historial_ajustes(persona, anio, mes);",
+    "CREATE INDEX IF NOT EXISTS idx_meses_conciliados_anio_mes ON meses_conciliados(anio, mes);"
   ].join("\n");
 
   // Evolucion defensiva del esquema para instalaciones previas: CREATE
@@ -1372,10 +1420,127 @@
     document.getElementById("ingTotales").innerHTML = "Gastos: <b>" + filas.length + "</b> · Total: <b>" + money(total) + "</b>";
     cont.querySelectorAll("[data-edit]").forEach(function(b){ b.addEventListener("click", function(){ editarGasto(Number(b.dataset.edit)); }); });
     cont.querySelectorAll("[data-del]").forEach(function(b){ b.addEventListener("click", function(){ borrarGasto(Number(b.dataset.del)); }); });
+    renderComprobadorCobertura();
   }
   document.getElementById("ingMes").addEventListener("change", renderListaIngreso);
   document.getElementById("ingAnio").addEventListener("change", renderListaIngreso);
   document.getElementById("ingBuscar").addEventListener("input", renderListaIngreso);
+
+  // ---------------------------------------------------------------- Ingreso Manual: comprobador de cobertura
+  // Puerto de manual_entry_service.checklist_cobertura (ver
+  // family_expenses/app/services/manual_entry_service.py y
+  // gastos_repo.detalles_recurrentes/detalles_presentes_en_mes): compara
+  // cada Detalle DISTINTO de origen MANUAL/IMPORTADO_DEUDAS_ADICIONALES del
+  // mes anterior (deudas fijas / gastos manuales que en general se repiten)
+  // contra lo que YA existe este mes (cualquier origen), para que el
+  // usuario vea de un vistazo que le falta cargar. Reutiliza mesAnteriorDe
+  // (definida mas abajo, junto al matching de "Cargar mes" -- mismo criterio
+  // de rollover diciembre->enero).
+  function checklistCoberturaIngreso(anio, mes){
+    var prev = mesAnteriorDe(anio, mes);
+    var grupos = dbAll(
+      "SELECT g.detalle AS detalle, MIN(g.id) AS gastoId FROM gastos g " +
+      "WHERE g.anio=? AND g.mes=? AND g.origen IN ('MANUAL','IMPORTADO_DEUDAS_ADICIONALES') " +
+      "GROUP BY g.detalle COLLATE NOCASE ORDER BY g.detalle COLLATE NOCASE",
+      [prev.anio, prev.mes]
+    );
+    return grupos.map(function(gr){
+      var base = dbGet("SELECT empresa, monto_total, cuota_texto FROM gastos WHERE id=?", [gr.gastoId]);
+      var nombres = dbAll(
+        "SELECT p.nombre AS nombre FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id WHERE gp.gasto_id=? ORDER BY p.nombre",
+        [gr.gastoId]
+      ).map(function(x){ return x.nombre; });
+      var presente = dbGet(
+        "SELECT id, monto_total FROM gastos WHERE anio=? AND mes=? AND detalle=? COLLATE NOCASE ORDER BY id LIMIT 1",
+        [anio, mes, gr.detalle]
+      );
+      return {
+        detalle: gr.detalle, empresa: base.empresa || gr.detalle, cuota: base.cuota_texto || "1",
+        nombresMesAnterior: nombres, montoMesAnterior: base.monto_total,
+        yaAgregado: !!presente, gastoIdEsteMes: presente ? presente.id : null,
+        montoEsteMes: presente ? presente.monto_total : null,
+      };
+    });
+  }
+
+  // Precarga el formulario de "Agregar gasto" con los datos del mismo
+  // Detalle del mes anterior -- el usuario solo tiene que revisar/ajustar
+  // el monto (puede haber cambiado) y confirmar. Fecha por defecto: dia 1
+  // del mes/año que se esta viendo en Ingreso Manual (no la fecha exacta
+  // del mes pasado, que ya no corresponde).
+  function precargarDesdeCobertura(item){
+    limpiarFormularioGasto();
+    var anio = Number(document.getElementById("ingAnio").value);
+    var mes = Number(document.getElementById("ingMes").value);
+    document.getElementById("gFecha").value = anio + "-" + String(mes).padStart(2, "0") + "-01";
+    document.getElementById("gDetalle").value = item.detalle;
+    document.getElementById("gEmpresa").value = item.empresa || "";
+    document.getElementById("gMonto").value = Math.round(item.montoMesAnterior);
+    document.getElementById("gCuotas").value = item.cuota || "1";
+    document.getElementById("gPersonas").value = item.nombresMesAnterior.join(" ");
+    document.getElementById("tab-ingreso").scrollIntoView({behavior:"smooth", block:"start"});
+    mostrarMensajeGasto("Datos precargados del mes anterior -- revisá el monto antes de guardar.", "warn");
+  }
+
+  var covFiltro = "todos";
+  function renderComprobadorCobertura(){
+    var contEl = document.getElementById("covLista");
+    if(!contEl) return;
+    var anio = Number(document.getElementById("ingAnio").value);
+    var mes = Number(document.getElementById("ingMes").value);
+    if(!anio || !mes){ contEl.innerHTML = ""; return; }
+    var items = checklistCoberturaIngreso(anio, mes);
+    if(items.length === 0){
+      contEl.innerHTML = "<p class=\"hint\">No hay deudas fijas ni gastos manuales del mes anterior para comparar.</p>";
+      return;
+    }
+    var filtrados = items.filter(function(it){
+      if(covFiltro === "agregados") return it.yaAgregado;
+      if(covFiltro === "faltantes") return !it.yaAgregado;
+      return true;
+    });
+    if(filtrados.length === 0){
+      contEl.innerHTML = "<p class=\"hint\">Nada que mostrar con este filtro.</p>";
+      return;
+    }
+    contEl.innerHTML = filtrados.map(function(it, i){
+      if(it.yaAgregado){
+        return "<div class=\"list-row cov-ok\">" +
+          "<div class=\"list-row-main\">" +
+            "<span class=\"list-detalle\">✓ " + escapeHtml(it.detalle) + "</span>" +
+            "<span class=\"list-nombres\">" + escapeHtml(it.nombresMesAnterior.join(", ") || "-") + "</span>" +
+          "</div>" +
+          "<div class=\"list-row-side\">" +
+            "<span class=\"list-monto\">" + money(it.montoEsteMes) + "</span>" +
+            (it.gastoIdEsteMes ? "<button type=\"button\" class=\"icon-btn\" data-covedit=\"" + it.gastoIdEsteMes + "\" title=\"Editar\">✎</button>" : "") +
+          "</div>" +
+        "</div>";
+      }
+      return "<div class=\"list-row cov-falta\">" +
+        "<div class=\"list-row-main\">" +
+          "<span class=\"list-detalle\">⚠ " + escapeHtml(it.detalle) + "</span>" +
+          "<span class=\"list-nombres\">" + escapeHtml(it.nombresMesAnterior.join(", ") || "(sin nombre)") + "</span>" +
+        "</div>" +
+        "<div class=\"list-row-side\">" +
+          "<span class=\"list-monto\">" + money(it.montoMesAnterior) + "</span>" +
+          "<button type=\"button\" class=\"btn-ghost cov-agregar-btn\" data-covagregar=\"" + i + "\">Agregar igual que el mes pasado</button>" +
+        "</div>" +
+      "</div>";
+    }).join("");
+    contEl.querySelectorAll("[data-covedit]").forEach(function(b){
+      b.addEventListener("click", function(){ editarGasto(Number(b.dataset.covedit)); });
+    });
+    contEl.querySelectorAll("[data-covagregar]").forEach(function(b){
+      b.addEventListener("click", function(){ precargarDesdeCobertura(filtrados[Number(b.dataset.covagregar)]); });
+    });
+  }
+  document.getElementById("covFiltros").addEventListener("click", function(ev){
+    var btn = ev.target.closest("[data-covf]");
+    if(!btn) return;
+    covFiltro = btn.dataset.covf;
+    document.querySelectorAll(".cov-filtro-btn").forEach(function(b){ b.classList.toggle("active", b === btn); });
+    renderComprobadorCobertura();
+  });
 
   // ---------------------------------------------------------------- graficos de barra (html/css puro)
 
@@ -1516,6 +1681,33 @@
     telInput.value = nombre ? telefonoDePersona(nombre) : "";
   }
 
+  // Puerto de estado_cuenta_service.verificar_cuadre_mes (ver
+  // family_expenses/app/services/estado_cuenta_service.py): compara lo que
+  // HOY suma el reparto de los gastos de origen IMPORTADO_PDF (Falabella/
+  // Lider) de ese anio/mes contra el ancla guardada en meses_conciliados al
+  // momento de "Confirmar e importar" (ver handler de cmConfirmar). No
+  // bloquea nada -- solo avisa si hay diferencia (mas de $1 de tolerancia
+  // por redondeo), señal de que algo de origen PDF se borro, edito o quedo
+  // mal repartido despues de importar. Deudas Adicionales/Manual quedan
+  // AFUERA a proposito: son datos cargados a mano, con su propia convencion
+  // donde una fila puede representar solo la parte de UNA persona en un
+  // gasto compartido -- comparar eso con este mismo criterio generaria
+  // alertas falsas todo el tiempo.
+  function verificarCuadreMes(anio, mes){
+    var ancla = dbGet("SELECT monto_conciliado_pdf AS monto FROM meses_conciliados WHERE anio=? AND mes=?", [anio, mes]);
+    if(!ancla) return null;
+    var actual = dbGet(
+      "SELECT COALESCE(SUM(gp.monto),0) AS total FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id " +
+      "WHERE g.anio=? AND g.mes=? AND g.origen='IMPORTADO_PDF'",
+      [anio, mes]
+    ).total;
+    var diferencia = actual - ancla.monto;
+    if(Math.abs(diferencia) <= 1) return null;
+    var verbo = diferencia < 0 ? "falta" : "sobra";
+    return "⚠ Este mes no cuadra contra lo importado originalmente: " + verbo + " " + money(Math.abs(diferencia)) +
+      " respecto al PDF confirmado. Puede que algo se haya borrado, editado, o quedado mal repartido -- revisá los movimientos de origen PDF de este mes.";
+  }
+
   function renderEstadoCuenta(){
     var estado = estadoActual();
     var cont = document.getElementById("ecResultado");
@@ -1535,7 +1727,9 @@
     );
     ecItemsActuales = items;
     var total = items.reduce(function(a, it){ return a + it.monto; }, 0);
+    var avisoCuadre = verificarCuadreMes(estado.anio, estado.mes);
     cont.innerHTML =
+      (avisoCuadre ? "<div class=\"note warn\">" + escapeHtml(avisoCuadre) + "</div>" : "") +
       "<div class=\"stat-bar\">" +
         "<div class=\"stat\"><div class=\"k\">Movimientos</div><div class=\"v\">" + items.length + "</div></div>" +
         "<div class=\"stat\"><div class=\"k\">Total " + MESES_ES[estado.mes] + " " + estado.anio + "</div><div class=\"v\">" + money(total) + "</div></div>" +
@@ -3047,6 +3241,112 @@
     return rows.map(function(r){ return r.nombre; });
   }
 
+  // ---------------------------------------------------------------- Cargar mes: matching automatico de personas contra el mes anterior
+  // Puerto de domain/matching.py (ver family_expenses/app/domain/matching.py
+  // -- normalizar()/encontrar_match()): cuando una fila nueva llega SIN
+  // personas asignadas (PDF Falabella/Lider, o Deudas Adicionales sin
+  // Nombre en el Excel), se busca en los gastos YA guardados del mes
+  // INMEDIATAMENTE anterior (misma tabla local, con el mismo rollover
+  // diciembre->enero de mesAnteriorDe) uno que corresponda, para heredar su
+  // reparto de personas sin obligar a escribirlo a mano de nuevo. Nunca
+  // pisa un nombre que la fila ya traiga (ej. Deudas Adicionales con Nombre
+  // en el Excel). Dos estrategias, en orden de confianza:
+  //  1. misma fecha + mismo detalle normalizado -> altisima confianza (es
+  //     la misma compra/cuota continuando). Si hay MAS de un candidato con
+  //     esa fecha+detalle (descripcion generica del banco, ej. "Mp *mercado
+  //     libre", con mas de una compra ese dia) se desempata por el monto
+  //     mas parecido, pero la fila queda marcada como match ambiguo para
+  //     revision humana -- asignar eso en silencio ya causo un bug real
+  //     documentado en el escritorio (una cuota que le correspondia a dos
+  //     personas quedo pegada, entera, a la persona de otro gasto del mismo
+  //     dia).
+  //  2. mismo detalle normalizado + monto dentro de 2% de tolerancia ->
+  //     confianza media, cubre variaciones de fecha o pequeños redondeos.
+  function normalizarDetalleMatch(texto){
+    if(!texto) return "";
+    return String(texto).trim().toLowerCase().replace(/\s+/g, " ");
+  }
+
+  // Un elemento por gasto del anio/mes dado: {gastoId, fecha, detalleNorm,
+  // montoTotal, reparto:[{nombre,monto}]} -- unidad de comparacion para el
+  // matching (equivalente web de GastoHistorico del escritorio).
+  function candidatosGastosParaMatching(anio, mes){
+    var filas = dbAll(
+      "SELECT g.id AS gastoId, g.fecha AS fecha, g.detalle AS detalle, g.monto_total AS montoTotal, " +
+      "p.nombre AS nombre, gp.monto AS monto " +
+      "FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
+      "WHERE g.anio=? AND g.mes=?",
+      [anio, mes]
+    );
+    var porGasto = {};
+    filas.forEach(function(f){
+      if(!porGasto[f.gastoId]){
+        porGasto[f.gastoId] = {
+          gastoId: f.gastoId, fecha: f.fecha, detalleNorm: normalizarDetalleMatch(f.detalle),
+          montoTotal: f.montoTotal, reparto: []
+        };
+      }
+      porGasto[f.gastoId].reparto.push({nombre: f.nombre, monto: f.monto});
+    });
+    return Object.keys(porGasto).map(function(k){ return porGasto[k]; });
+  }
+
+  function encontrarMatchMesAnterior(fecha, detalle, monto, candidatos){
+    var detalleNorm = normalizarDetalleMatch(detalle);
+    var exactos = candidatos.filter(function(c){ return c.detalleNorm === detalleNorm && c.fecha === fecha; });
+    if(exactos.length === 1){
+      return {candidato: exactos[0], razon: "fecha_y_descripcion", ambiguo: false};
+    }
+    if(exactos.length > 1){
+      var mejorExacto = exactos[0];
+      exactos.forEach(function(c){
+        if(Math.abs(c.montoTotal - monto) < Math.abs(mejorExacto.montoTotal - monto)) mejorExacto = c;
+      });
+      return {candidato: mejorExacto, razon: "fecha_y_descripcion", ambiguo: true};
+    }
+    var mejor = null, mejorDiff = null;
+    candidatos.forEach(function(c){
+      if(c.detalleNorm !== detalleNorm || !c.montoTotal) return;
+      var diff = Math.abs(c.montoTotal - monto) / Math.max(Math.abs(c.montoTotal), 1);
+      if(diff <= 0.02 && (mejorDiff === null || diff < mejorDiff)){
+        mejor = {candidato: c, razon: "descripcion_y_monto", ambiguo: false};
+        mejorDiff = diff;
+      }
+    });
+    return mejor;
+  }
+
+  // Aplica el matching EN EL LUGAR a un arreglo de filas de revision de
+  // "Cargar mes" (mismo formato que cmFilasActuales): solo completa
+  // "personas" en las que llegaron vacias, y deja f.heredado
+  // ("automatico" | "aproximado" | "ambiguo") para que la tabla de revision
+  // lo muestre (ver renderTablaCargarMes). Cachea los candidatos por mes
+  // para no repetir la consulta fila a fila.
+  function aplicarMatchingAutomatico(filas){
+    var cache = {};
+    filas.forEach(function(f){
+      var nombresActuales = String(f.personas || "").split(/\s+/).filter(Boolean);
+      if(nombresActuales.length || !f.fecha || !f.detalle) return;
+      var d = new Date(f.fecha + "T00:00:00");
+      if(isNaN(d.getTime())) return;
+      var prev = mesAnteriorDe(d.getFullYear(), d.getMonth() + 1);
+      var key = prev.anio + "-" + prev.mes;
+      if(!(key in cache)) cache[key] = candidatosGastosParaMatching(prev.anio, prev.mes);
+      var resultado = encontrarMatchMesAnterior(f.fecha, f.detalle, f.monto, cache[key]);
+      if(!resultado) return;
+      var vistos = {};
+      var nombres = resultado.candidato.reparto.map(function(r){ return r.nombre; }).filter(function(n){
+        var k = n.toLowerCase();
+        if(vistos[k]) return false;
+        vistos[k] = true;
+        return true;
+      });
+      if(!nombres.length) return;
+      f.personas = nombres.join(" ");
+      f.heredado = resultado.ambiguo ? "ambiguo" : (resultado.razon === "fecha_y_descripcion" ? "automatico" : "aproximado");
+    });
+  }
+
   // Traduce los items ya parseados de Deudas Adicionales al mismo formato
   // de fila que usa la tabla de revision de "Cargar mes" (cmFilasActuales).
   // Regla clave (domain: import_service.py linea ~250): si una celda
@@ -3162,7 +3462,11 @@
     }
     tbody.innerHTML = cmFilasActuales.map(function(f, i){
       var alerta = calcularAlertaPersonas(f.personas, f.nombresMesAnteriorList);
-      return "<tr data-idx=\"" + i + "\"" + (alerta ? " class=\"cm-row-alerta\"" : "") + ">" +
+      var etiquetaHeredado = f.heredado === "automatico" ? {texto: "✓ heredado automáticamente del mes anterior", cls: "cm-heredado-ok"} :
+        f.heredado === "aproximado" ? {texto: "✓ heredado por monto aproximado", cls: "cm-heredado-ok"} :
+        f.heredado === "ambiguo" ? {texto: "⚠ match ambiguo, revisar", cls: "cm-heredado-ambiguo"} : null;
+      var filaNecesitaRevision = alerta || f.heredado === "ambiguo";
+      return "<tr data-idx=\"" + i + "\"" + (filaNecesitaRevision ? " class=\"cm-row-alerta\"" : "") + ">" +
         "<td><input type=\"date\" class=\"cm-fecha\" value=\"" + escapeHtml(f.fecha) + "\"></td>" +
         "<td><input type=\"text\" class=\"cm-detalle\" value=\"" + escapeHtml(f.detalle) + "\"></td>" +
         "<td><input type=\"text\" class=\"cm-empresa\" list=\"empresasList\" value=\"" + escapeHtml(f.empresa || "") + "\" style=\"width:120px;\"></td>" +
@@ -3171,6 +3475,7 @@
         "<td><input type=\"text\" class=\"cm-cuota\" value=\"" + escapeHtml(f.cuota) + "\" style=\"width:70px;\"></td>" +
         "<td><input type=\"text\" class=\"cm-personas\" list=\"personasList\" value=\"" + escapeHtml(f.personas || "") + "\" placeholder=\"nombres\" style=\"width:150px;\">" +
           (alerta ? "<div class=\"cm-alerta-txt\">" + escapeHtml(alerta.texto) + "</div>" : "") +
+          (etiquetaHeredado ? "<div class=\"cm-heredado-txt " + etiquetaHeredado.cls + "\">" + escapeHtml(etiquetaHeredado.texto) + "</div>" : "") +
         "</td>" +
         "<td><button type=\"button\" class=\"icon-btn danger\" data-cmdel=\"" + i + "\" title=\"Borrar fila\">✕</button></td>" +
       "</tr>";
@@ -3192,6 +3497,13 @@
         var tr = inp.closest("tr");
         var idx = Number(tr.dataset.idx);
         var f = cmFilasActuales[idx] || {};
+        // El usuario tomo el control de "Personas" a mano -- la marca de
+        // heredado automatico/aproximado/ambiguo queda obsoleta, se saca.
+        if(f.heredado){
+          f.heredado = null;
+          var divH = tr.querySelector(".cm-heredado-txt");
+          if(divH) divH.remove();
+        }
         var alerta = calcularAlertaPersonas(inp.value, f.nombresMesAnteriorList);
         var div = tr.querySelector(".cm-alerta-txt");
         if(alerta){
@@ -3220,6 +3532,7 @@
         }else{
           mostrarMensajeCargarMes("Se detectaron " + filasNuevas.length + " gastos. Revisalos abajo antes de confirmar.", "ok");
         }
+        aplicarMatchingAutomatico(filasNuevas);
         sincronizarFilasCargarMesDesdeDOM();
         cmFilasActuales = cmFilasActuales.concat(filasNuevas);
         renderTablaCargarMes();
@@ -3249,6 +3562,7 @@
         var filasCrudas = XLSX.utils.sheet_to_json(ws, {header: 1, range: 1, raw: true, defval: null});
         var resultado = leerDeudasAdicionalesDesdeFilas(filasCrudas);
         var filasNuevas = construirFilasDesdeDeudasAdicionales(resultado.items);
+        aplicarMatchingAutomatico(filasNuevas);
 
         sincronizarFilasCargarMesDesdeDOM();
         cmFilasActuales = cmFilasActuales.concat(filasNuevas);
@@ -3318,6 +3632,16 @@
       return;
     }
 
+    // Suma, por anio/mes, el monto de las filas de origen PDF (Falabella/
+    // Lider) que se estan confirmando en esta tanda -- se guarda como el
+    // nuevo "ancla" de reconciliacion en meses_conciliados (ver
+    // verificarCuadreMes) DESPUES de insertarlas, asi que cualquier edicion/
+    // division/eliminacion posterior se compara contra esto, no contra el
+    // PDF crudo. Deudas Adicionales (origen IMPORTADO_DEUDAS_ADICIONALES) y
+    // filas agregadas a mano quedan afuera a proposito -- misma exclusion
+    // que hace verificarCuadreMes.
+    var sumasPdfPorMes = {};
+
     db.run("BEGIN");
     try{
       cmFilasActuales.forEach(function(f){
@@ -3356,7 +3680,22 @@
         // quedando sin categoria, igual que antes, para categorizar despues.
         var empresaFinal = (f.empresa && String(f.empresa).trim()) ? String(f.empresa).trim() : f.detalle.trim();
         var categoriaFinal = f.categoria ? String(f.categoria).trim() : "";
-        insertarGastoConReparto(f.fecha, f.detalle.trim(), empresaFinal, categoriaFinal, f.monto, f.cuota || "1", reparto, f.origen || "IMPORTADO_PDF");
+        var origenFinal = f.origen || "IMPORTADO_PDF";
+        insertarGastoConReparto(f.fecha, f.detalle.trim(), empresaFinal, categoriaFinal, f.monto, f.cuota || "1", reparto, origenFinal);
+
+        if(origenFinal === "IMPORTADO_PDF"){
+          var dFila = new Date(f.fecha + "T00:00:00");
+          var claveMes = dFila.getFullYear() + "-" + (dFila.getMonth() + 1);
+          sumasPdfPorMes[claveMes] = (sumasPdfPorMes[claveMes] || 0) + f.monto;
+        }
+      });
+      Object.keys(sumasPdfPorMes).forEach(function(clave){
+        var partes = clave.split("-");
+        db.run(
+          "INSERT INTO meses_conciliados (anio, mes, monto_conciliado_pdf) VALUES (?,?,?) " +
+          "ON CONFLICT(anio,mes) DO UPDATE SET monto_conciliado_pdf=excluded.monto_conciliado_pdf, actualizado_en=datetime('now')",
+          [Number(partes[0]), Number(partes[1]), sumasPdfPorMes[clave]]
+        );
       });
       db.run("COMMIT");
     }catch(e){
@@ -3925,6 +4264,30 @@
     normalizarTelefonoCl: normalizarTelefonoCl,
     veredictoEstadoCuenta: veredictoEstadoCuenta,
     generarCanvasEstadoCuenta: generarCanvasEstadoCuenta
+  };
+
+  // Mismo criterio que __gfSyncDebug/__gfEcDebug de arriba: expone acceso
+  // directo a la base local y a las piezas nuevas de matching automatico /
+  // comprobador de cobertura / reconciliacion de PDF para poder probarlas
+  // desde headless sin simular un PDF real ni clicks de archivo.
+  window.__gfPruebaDebug = {
+    dbAll: dbAll,
+    dbGet: dbGet,
+    dbRun: dbRun,
+    insertarGastoConReparto: insertarGastoConReparto,
+    mesAnteriorDe: mesAnteriorDe,
+    aplicarMatchingAutomatico: aplicarMatchingAutomatico,
+    candidatosGastosParaMatching: candidatosGastosParaMatching,
+    encontrarMatchMesAnterior: encontrarMatchMesAnterior,
+    checklistCoberturaIngreso: checklistCoberturaIngreso,
+    verificarCuadreMes: verificarCuadreMes,
+    getCmFilas: function(){ return cmFilasActuales; },
+    setCmFilas: function(filas){ cmFilasActuales = filas; renderTablaCargarMes(); },
+    renderTablaCargarMes: renderTablaCargarMes,
+    renderComprobadorCobertura: renderComprobadorCobertura,
+    renderListaIngreso: renderListaIngreso,
+    renderEstadoCuenta: renderEstadoCuenta,
+    exportarDb: function(){ return db.export(); }
   };
 
   // ---------------------------------------------------------------- arranque
