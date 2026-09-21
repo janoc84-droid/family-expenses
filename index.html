@@ -317,8 +317,8 @@
       <button class="tab-btn" type="button" data-tab="resumen">Resumen Mensual</button>
       <button class="tab-btn" type="button" data-tab="estadocuenta">Estado de Cuenta</button>
       <button class="tab-btn" type="button" data-tab="categorizar">Categorizar</button>
-      <button class="tab-btn" type="button" data-tab="gastosdiarios">Gastos Diarios <span class="dot-construccion">🚧</span></button>
-      <button class="tab-btn" type="button" data-tab="paneldiario">Panel Diario <span class="dot-construccion">🚧</span></button>
+      <button class="tab-btn" type="button" data-tab="gastosdiarios">Gastos Diarios</button>
+      <button class="tab-btn" type="button" data-tab="paneldiario">Panel Diario</button>
       <button class="tab-btn" type="button" data-tab="checklist">Checklist Pagos</button>
     </nav>
   </div>
@@ -508,21 +508,109 @@
     </div>
   </section>
 
-  <!-- ======================= GASTOS DIARIOS (placeholder) ======================= -->
+  <!-- ======================= GASTOS DIARIOS ======================= -->
   <section id="tab-gastosdiarios" class="tabpanel" hidden>
-    <div class="card placeholder-card">
-      <div class="placeholder-icon">🚧</div>
-      <h2>Gastos Diarios</h2>
-      <p>Esta sección se está construyendo. Va a ser un registro rápido del día a día (efectivo, colación, salidas chicas), separado del gasto familiar del mes, para ver en qué se te va la plata.</p>
+    <div class="card">
+      <div class="sec-head-row">
+        <h2 id="gdFormTitulo">Agregar gasto diario</h2>
+      </div>
+      <p class="hint" style="margin:6px 0 10px;">Registro rápido del día a día (efectivo, débito, tarjeta chica) -- separado del gasto familiar del mes de "Ingreso Manual".</p>
+      <div class="form-grid">
+        <div class="field small">
+          <label>Fecha</label>
+          <input type="date" id="gdFecha">
+        </div>
+        <div class="field grow">
+          <label>Detalle</label>
+          <input type="text" id="gdDetalle" list="gdDetallesList" placeholder="Ej. Café, Colación, Uber">
+        </div>
+        <div class="field">
+          <label>Categoría (opcional)</label>
+          <input type="text" id="gdCategoria" list="categoriasList" placeholder="Ej. Comida">
+        </div>
+        <div class="field small">
+          <label>Monto</label>
+          <input type="number" id="gdMonto" min="0" step="1" placeholder="0">
+        </div>
+        <div class="field small">
+          <label>Medio de pago</label>
+          <select id="gdMedioPago">
+            <option value="Efectivo">Efectivo</option>
+            <option value="Transferencia">Transferencia</option>
+            <option value="Tarjeta">Tarjeta</option>
+          </select>
+        </div>
+        <div class="field small" id="gdTipoTarjetaField" hidden>
+          <label>Tipo de tarjeta</label>
+          <select id="gdTipoTarjeta">
+            <option value="Débito">Débito</option>
+            <option value="Crédito">Crédito</option>
+          </select>
+        </div>
+        <div class="field" id="gdBancoTarjetaField" hidden>
+          <label>Banco / Tarjeta</label>
+          <input type="text" id="gdBancoTarjeta" list="bancosTarjetaList" placeholder="Ej. CMR Falabella">
+        </div>
+      </div>
+
+      <label class="checkbox-line">
+        <input type="checkbox" id="gdPrescindible">
+        Prescindible (podría vivir sin esto)
+      </label>
+
+      <div class="form-actions">
+        <button type="button" class="btn-ghost" id="gdCancelarEdicion" hidden>Cancelar edición</button>
+        <button type="button" class="btn-ghost" id="gdLimpiar">Limpiar</button>
+        <button type="button" class="btn-primary" id="gdGuardar">Agregar</button>
+      </div>
+      <div class="note" id="gdMensaje" hidden></div>
+    </div>
+
+    <div class="card">
+      <div class="sec-head-row">
+        <h2>Gastos diarios cargados</h2>
+        <div class="form-grid" style="margin:0;">
+          <div class="field small"><select id="gdMes"></select></div>
+          <div class="field small"><select id="gdAnio"></select></div>
+        </div>
+      </div>
+      <input type="text" id="gdBuscar" placeholder="Buscar... (ej. Café, Comida)">
+      <div id="gdLista"></div>
+      <div class="totals-line" id="gdTotales"></div>
     </div>
   </section>
 
-  <!-- ======================= PANEL DIARIO (placeholder) ======================= -->
+  <!-- ======================= PANEL DIARIO ======================= -->
   <section id="tab-paneldiario" class="tabpanel" hidden>
-    <div class="card placeholder-card">
-      <div class="placeholder-icon">🚧</div>
-      <h2>Panel Diario</h2>
-      <p>Esta sección se está construyendo. Va a mostrar gráficos y estadísticas de los Gastos Diarios: cuánto es prescindible, por categoría, por medio de pago, etc.</p>
+    <div class="card">
+      <div class="sec-head-row">
+        <h2>Panel Diario</h2>
+        <div class="form-grid" style="margin:0;">
+          <div class="field small"><select id="pdMes"></select></div>
+          <div class="field small"><select id="pdAnio"></select></div>
+        </div>
+      </div>
+      <p class="hint" style="margin-bottom:10px;">Estadísticas de los Gastos Diarios del mes elegido.</p>
+      <div class="stat-bar">
+        <div class="stat"><div class="k">Total gastado</div><div class="v" id="pdTotal">$ 0</div></div>
+        <div class="stat"><div class="k">N. de movimientos</div><div class="v" id="pdMovs">0</div></div>
+        <div class="stat"><div class="k">Prescindible</div><div class="v" id="pdPrescindible">$ 0</div></div>
+        <div class="stat"><div class="k">% prescindible</div><div class="v" id="pdPctPrescindible">0%</div></div>
+      </div>
+      <div class="charts-grid">
+        <div class="chart-box">
+          <h3>Prescindible vs. no prescindible</h3>
+          <div class="bar-chart" id="pdChartPrescindible"></div>
+        </div>
+        <div class="chart-box">
+          <h3>Por categoría</h3>
+          <div class="bar-chart" id="pdChartCategoria"></div>
+        </div>
+        <div class="chart-box">
+          <h3>Por medio de pago</h3>
+          <div class="bar-chart" id="pdChartMedioPago"></div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -547,6 +635,8 @@
 <datalist id="empresasList"></datalist>
 <datalist id="categoriasList"></datalist>
 <datalist id="personasList"></datalist>
+<datalist id="gdDetallesList"></datalist>
+<datalist id="bancosTarjetaList"></datalist>
 
 <footer class="wrap">
   Los datos se guardan en este navegador (SQLite + IndexedDB), no en internet.
@@ -608,10 +698,35 @@
     "  actualizado_en TEXT NOT NULL DEFAULT (datetime('now')),",
     "  UNIQUE (persona, anio, mes, detalle)",
     ");",
+    // Gastos Diarios: registro rapido del dia a dia (efectivo/debito/tarjeta
+    // chica -- cafe, colacion, bencina), separado a proposito de gastos/
+    // gasto_persona (que son la tarjeta/cuotas familiares del mes). Version
+    // simplificada de GastosDiarios/GastoDiarioPersona (ver
+    // family_expenses/app/repositories/gastos_diarios_repo.py): se
+    // portaron los campos centrales (fecha, detalle, categoria, monto,
+    // prescindible, medio de pago/tarjeta) -- NO se porto el reparto por
+    // persona ('Compartir con'/'Dividir...') ni el plan de cuotas que se
+    // arrastra solo mes a mes, para priorizar el alta/edicion/borrado/
+    // listado central (ver reporte final de esta tarea).
+    "CREATE TABLE IF NOT EXISTS gastos_diarios (",
+    "  id INTEGER PRIMARY KEY,",
+    "  anio INTEGER NOT NULL,",
+    "  mes INTEGER NOT NULL CHECK (mes BETWEEN 1 AND 12),",
+    "  fecha TEXT NOT NULL,",
+    "  detalle TEXT NOT NULL,",
+    "  categoria_id INTEGER REFERENCES categorias(id),",
+    "  monto REAL NOT NULL,",
+    "  prescindible INTEGER NOT NULL DEFAULT 0,",
+    "  medio_pago TEXT,",
+    "  tipo_tarjeta TEXT,",
+    "  banco_tarjeta TEXT,",
+    "  created_at TEXT NOT NULL DEFAULT (datetime('now'))",
+    ");",
     "CREATE INDEX IF NOT EXISTS idx_gastos_anio_mes ON gastos(anio, mes);",
     "CREATE INDEX IF NOT EXISTS idx_gasto_persona_gasto ON gasto_persona(gasto_id);",
     "CREATE INDEX IF NOT EXISTS idx_gasto_persona_persona ON gasto_persona(persona_id);",
-    "CREATE INDEX IF NOT EXISTS idx_checklist_persona_mes ON checklist_pagos(persona, anio, mes);"
+    "CREATE INDEX IF NOT EXISTS idx_checklist_persona_mes ON checklist_pagos(persona, anio, mes);",
+    "CREATE INDEX IF NOT EXISTS idx_gastos_diarios_anio_mes ON gastos_diarios(anio, mes);"
   ].join("\n");
 
   // ---------------------------------------------------------------- utiles
@@ -805,6 +920,8 @@
     if(id==="estadocuenta") renderEstadoCuenta();
     if(id==="checklist") renderChecklist();
     if(id==="categorizar") renderCategorizar();
+    if(id==="gastosdiarios") renderListaGastosDiarios();
+    if(id==="paneldiario") renderPanelDiario();
   }
   document.querySelectorAll(".tab-btn").forEach(function(btn){
     btn.addEventListener("click", function(){ activarTab(btn.dataset.tab); });
@@ -822,20 +939,28 @@
     setDatalist("empresasList", dbAll("SELECT DISTINCT empresa FROM gastos WHERE empresa IS NOT NULL AND empresa<>'' ORDER BY empresa").map(function(r){ return r.empresa; }));
     setDatalist("categoriasList", dbAll("SELECT nombre FROM categorias ORDER BY nombre").map(function(r){ return r.nombre; }));
     setDatalist("personasList", dbAll("SELECT nombre FROM personas ORDER BY nombre").map(function(r){ return r.nombre; }));
+    setDatalist("gdDetallesList", dbAll("SELECT DISTINCT detalle FROM gastos_diarios ORDER BY detalle").map(function(r){ return r.detalle; }));
+    setDatalist("bancosTarjetaList", dbAll("SELECT DISTINCT banco_tarjeta FROM gastos_diarios WHERE banco_tarjeta IS NOT NULL AND banco_tarjeta<>'' ORDER BY banco_tarjeta").map(function(r){ return r.banco_tarjeta; }));
   }
 
   // ---------------------------------------------------------------- selectores de periodo
 
-  var PERIODO_SELECTS = [["ingMes","ingAnio"],["rsMes","rsAnio"],["ecMes","ecAnio"],["chkMes","chkAnio"],["cmMes","cmAnio"],["catMes","catAnio"]];
+  // Tercer elemento opcional: tabla de la que sacar los anios con datos --
+  // "gastos" por defecto (gasto familiar/tarjeta del mes), "gastos_diarios"
+  // para los selectores de Gastos Diarios / Panel Diario (tabla nueva,
+  // separada -- ver SCHEMA_SQL).
+  var PERIODO_SELECTS = [["ingMes","ingAnio"],["rsMes","rsAnio"],["ecMes","ecAnio"],["chkMes","chkAnio"],["cmMes","cmAnio"],["catMes","catAnio"],
+    ["gdMes","gdAnio","gastos_diarios"],["pdMes","pdAnio","gastos_diarios"]];
 
   function poblarSelectMes(select){
     var actual = select.value;
     select.innerHTML = MESES_ES.slice(1).map(function(m, i){ return "<option value=\"" + (i+1) + "\">" + m + "</option>"; }).join("");
     if(actual) select.value = actual;
   }
-  function poblarSelectAnio(select){
+  function poblarSelectAnio(select, tabla){
+    tabla = tabla || "gastos";
     var actual = select.value;
-    var anios = dbAll("SELECT DISTINCT anio FROM gastos ORDER BY anio DESC").map(function(r){ return r.anio; });
+    var anios = dbAll("SELECT DISTINCT anio FROM " + tabla + " ORDER BY anio DESC").map(function(r){ return r.anio; });
     var hoyAnio = new Date().getFullYear();
     if(anios.indexOf(hoyAnio) === -1) anios.push(hoyAnio);
     anios.sort(function(a,b){ return b-a; });
@@ -845,7 +970,7 @@
   function refrescarSelectoresPeriodo(){
     PERIODO_SELECTS.forEach(function(par){
       poblarSelectMes(document.getElementById(par[0]));
-      poblarSelectAnio(document.getElementById(par[1]));
+      poblarSelectAnio(document.getElementById(par[1]), par[2]);
     });
   }
   function inicializarPeriodoADiaDeHoy(){
@@ -1357,6 +1482,242 @@
   document.getElementById("catMes").addEventListener("change", renderCategorizar);
   document.getElementById("catAnio").addEventListener("change", renderCategorizar);
 
+  // ---------------------------------------------------------------- Gastos Diarios
+  // Registro rapido del dia a dia (efectivo/debito/tarjeta chica), separado
+  // a proposito del gasto familiar/tarjeta del mes (gastos/gasto_persona).
+  // Version simplificada de gastos_diarios_screen.py: se portaron
+  // fecha/detalle/categoria/monto/prescindible/medio de pago (con tipo y
+  // banco de tarjeta cuando corresponde) -- alta, edicion, borrado y
+  // listado filtrable por mes, que es el CRUD central de esa pantalla. NO
+  // se porto el reparto por persona ("Compartir con"/"Dividir..." ->
+  // GastoDiarioPersona), el plan de cuotas que se arrastra solo de mes en
+  // mes (domain/installment.py), el comprobador de gastos recurrentes del
+  // mes anterior, ni los filtros por tarjeta/"Sin asignar" -- quedan
+  // afuera de esta pasada (ver reporte final).
+
+  var editingGastoDiarioId = null;
+
+  function etiquetaMedioPago(medioPago, tipoTarjeta, bancoTarjeta){
+    if(medioPago === "Tarjeta" && tipoTarjeta){
+      var etiqueta = "Tarjeta de " + tipoTarjeta;
+      if(bancoTarjeta) etiqueta += " (" + bancoTarjeta + ")";
+      return etiqueta;
+    }
+    return medioPago || "Sin especificar";
+  }
+
+  function insertarGastoDiario(fecha, detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta){
+    var d = new Date(fecha + "T00:00:00");
+    var anio = d.getFullYear();
+    var mes = d.getMonth() + 1;
+    var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
+    dbRun(
+      "INSERT INTO gastos_diarios (anio, mes, fecha, detalle, categoria_id, monto, prescindible, medio_pago, tipo_tarjeta, banco_tarjeta) VALUES (?,?,?,?,?,?,?,?,?,?)",
+      [anio, mes, fecha, detalle, categoriaId, monto, prescindible ? 1 : 0, medioPago || null, tipoTarjeta || null, bancoTarjeta || null]
+    );
+    return lastId();
+  }
+
+  function actualizarGastoDiario(id, fecha, detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta){
+    var d = new Date(fecha + "T00:00:00");
+    var anio = d.getFullYear();
+    var mes = d.getMonth() + 1;
+    var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
+    dbRun(
+      "UPDATE gastos_diarios SET anio=?, mes=?, fecha=?, detalle=?, categoria_id=?, monto=?, prescindible=?, medio_pago=?, tipo_tarjeta=?, banco_tarjeta=? WHERE id=?",
+      [anio, mes, fecha, detalle, categoriaId, monto, prescindible ? 1 : 0, medioPago || null, tipoTarjeta || null, bancoTarjeta || null, id]
+    );
+  }
+
+  function mostrarMensajeGD(texto, tipo){
+    var el = document.getElementById("gdMensaje");
+    el.hidden = false;
+    el.className = "note " + tipo;
+    el.textContent = texto;
+  }
+
+  function actualizarCamposTarjetaGD(){
+    var esTarjeta = document.getElementById("gdMedioPago").value === "Tarjeta";
+    document.getElementById("gdTipoTarjetaField").hidden = !esTarjeta;
+    document.getElementById("gdBancoTarjetaField").hidden = !esTarjeta;
+  }
+  document.getElementById("gdMedioPago").addEventListener("change", actualizarCamposTarjetaGD);
+
+  function limpiarFormularioGD(){
+    editingGastoDiarioId = null;
+    document.getElementById("gdFecha").value = todayISO();
+    document.getElementById("gdDetalle").value = "";
+    document.getElementById("gdCategoria").value = "";
+    document.getElementById("gdMonto").value = "";
+    document.getElementById("gdMedioPago").value = "Efectivo";
+    document.getElementById("gdTipoTarjeta").value = "Débito";
+    document.getElementById("gdBancoTarjeta").value = "";
+    document.getElementById("gdPrescindible").checked = false;
+    actualizarCamposTarjetaGD();
+    document.getElementById("gdFormTitulo").textContent = "Agregar gasto diario";
+    document.getElementById("gdGuardar").textContent = "Agregar";
+    document.getElementById("gdCancelarEdicion").hidden = true;
+    document.getElementById("gdMensaje").hidden = true;
+  }
+
+  function guardarGastoDiario(){
+    var fecha = document.getElementById("gdFecha").value;
+    if(!fecha){ mostrarMensajeGD("Elige una fecha.", "bad"); return; }
+    var detalle = document.getElementById("gdDetalle").value.trim();
+    if(!detalle){ mostrarMensajeGD("Escribe un detalle (ej. Café, Colación).", "bad"); return; }
+    var categoriaNombre = document.getElementById("gdCategoria").value.trim();
+    var monto = Number(document.getElementById("gdMonto").value);
+    if(!monto || monto <= 0){ mostrarMensajeGD("Escribe un monto mayor que 0.", "bad"); return; }
+    var medioPago = document.getElementById("gdMedioPago").value;
+    var tipoTarjeta = medioPago === "Tarjeta" ? document.getElementById("gdTipoTarjeta").value : null;
+    var bancoTarjeta = medioPago === "Tarjeta" ? (document.getElementById("gdBancoTarjeta").value.trim() || null) : null;
+    var prescindible = document.getElementById("gdPrescindible").checked;
+
+    var idAntes = editingGastoDiarioId;
+    if(idAntes){
+      actualizarGastoDiario(idAntes, fecha, detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta);
+    }else{
+      insertarGastoDiario(fecha, detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta);
+    }
+
+    // deja "Gastos Diarios" mirando el mismo periodo del gasto recien
+    // guardado, mismo criterio que guardarGasto() en Ingreso Manual.
+    var d = new Date(fecha + "T00:00:00");
+    document.getElementById("gdMes").value = String(d.getMonth() + 1);
+    document.getElementById("gdAnio").value = String(d.getFullYear());
+    limpiarFormularioGD();
+    refrescarDatalists();
+    refrescarSelectoresPeriodo();
+    renderListaGastosDiarios();
+    renderPanelDiario();
+    mostrarMensajeGD(idAntes ? "Gasto actualizado." : "Gasto agregado.", "ok");
+  }
+
+  function editarGastoDiarioForm(id){
+    var g = dbGet("SELECT * FROM gastos_diarios WHERE id=?", [id]);
+    if(!g) return;
+    editingGastoDiarioId = id;
+    document.getElementById("gdFecha").value = g.fecha;
+    document.getElementById("gdDetalle").value = g.detalle;
+    var cat = g.categoria_id ? dbGet("SELECT nombre FROM categorias WHERE id=?", [g.categoria_id]) : null;
+    document.getElementById("gdCategoria").value = cat ? cat.nombre : "";
+    document.getElementById("gdMonto").value = g.monto;
+    document.getElementById("gdMedioPago").value = g.medio_pago || "Efectivo";
+    document.getElementById("gdTipoTarjeta").value = g.tipo_tarjeta || "Débito";
+    document.getElementById("gdBancoTarjeta").value = g.banco_tarjeta || "";
+    document.getElementById("gdPrescindible").checked = !!g.prescindible;
+    actualizarCamposTarjetaGD();
+    document.getElementById("gdFormTitulo").textContent = "Editar gasto diario";
+    document.getElementById("gdGuardar").textContent = "Guardar cambios";
+    document.getElementById("gdCancelarEdicion").hidden = false;
+    document.getElementById("gdMensaje").hidden = true;
+    document.getElementById("tab-gastosdiarios").scrollIntoView({behavior:"smooth", block:"start"});
+  }
+
+  function borrarGastoDiario(id){
+    if(!confirm("¿Borrar este gasto diario? Esta acción no se puede deshacer.")) return;
+    dbRun("DELETE FROM gastos_diarios WHERE id=?", [id]);
+    refrescarDatalists();
+    renderListaGastosDiarios();
+    renderPanelDiario();
+  }
+
+  document.getElementById("gdGuardar").addEventListener("click", guardarGastoDiario);
+  document.getElementById("gdLimpiar").addEventListener("click", limpiarFormularioGD);
+  document.getElementById("gdCancelarEdicion").addEventListener("click", limpiarFormularioGD);
+
+  function renderListaGastosDiarios(){
+    var anio = Number(document.getElementById("gdAnio").value);
+    var mes = Number(document.getElementById("gdMes").value);
+    var busqueda = document.getElementById("gdBuscar").value.trim().toLowerCase();
+    var filas = dbAll(
+      "SELECT gd.*, COALESCE(c.nombre,'Sin categoría') AS categoria FROM gastos_diarios gd " +
+      "LEFT JOIN categorias c ON c.id=gd.categoria_id WHERE gd.anio=? AND gd.mes=? ORDER BY gd.fecha DESC, gd.id DESC",
+      [anio, mes]
+    );
+    if(busqueda){
+      filas = filas.filter(function(f){
+        return (f.detalle||"").toLowerCase().indexOf(busqueda) >= 0 ||
+               (f.categoria||"").toLowerCase().indexOf(busqueda) >= 0;
+      });
+    }
+    var cont = document.getElementById("gdLista");
+    if(filas.length === 0){
+      cont.innerHTML = "<p class=\"hint\">No hay gastos diarios para este período.</p>";
+    }else{
+      cont.innerHTML = filas.map(function(f){
+        var marca = f.prescindible ? "🔻 " : "";
+        var medio = etiquetaMedioPago(f.medio_pago, f.tipo_tarjeta, f.banco_tarjeta);
+        return "<div class=\"list-row\">" +
+          "<div class=\"list-row-main\">" +
+            "<span class=\"list-fecha\">" + f.fecha + "</span>" +
+            "<span class=\"list-detalle\">" + marca + escapeHtml(f.detalle) + "</span>" +
+            "<span class=\"list-nombres\">" + escapeHtml(f.categoria) + " · " + escapeHtml(medio) + "</span>" +
+          "</div>" +
+          "<div class=\"list-row-side\">" +
+            "<span class=\"list-monto\">" + money(f.monto) + "</span>" +
+            "<button class=\"icon-btn\" data-gdedit=\"" + f.id + "\" title=\"Editar\">✎</button>" +
+            "<button class=\"icon-btn danger\" data-gddel=\"" + f.id + "\" title=\"Borrar\">✕</button>" +
+          "</div>" +
+        "</div>";
+      }).join("");
+    }
+    var total = filas.reduce(function(a, f){ return a + f.monto; }, 0);
+    var totalPrescindible = filas.reduce(function(a, f){ return a + (f.prescindible ? f.monto : 0); }, 0);
+    document.getElementById("gdTotales").innerHTML =
+      "Gastos: <b>" + filas.length + "</b> · Total: <b>" + money(total) + "</b> · Prescindible: <b>" + money(totalPrescindible) + "</b>";
+    cont.querySelectorAll("[data-gdedit]").forEach(function(b){ b.addEventListener("click", function(){ editarGastoDiarioForm(Number(b.dataset.gdedit)); }); });
+    cont.querySelectorAll("[data-gddel]").forEach(function(b){ b.addEventListener("click", function(){ borrarGastoDiario(Number(b.dataset.gddel)); }); });
+  }
+  document.getElementById("gdMes").addEventListener("change", renderListaGastosDiarios);
+  document.getElementById("gdAnio").addEventListener("change", renderListaGastosDiarios);
+  document.getElementById("gdBuscar").addEventListener("input", renderListaGastosDiarios);
+
+  // ---------------------------------------------------------------- Panel Diario
+  // Estadisticas de Gastos Diarios del mes elegido, reutilizando el mismo
+  // grafico de barras CSS de Resumen Mensual (renderBarChart) -- version
+  // simplificada de estadisticas_gastos_diarios_screen.py: se priorizaron
+  // los desgloses que describia el placeholder original de esta pestana
+  // (prescindible vs. no, por categoria, por medio de pago) en vez del
+  // calendario/tendencia con matplotlib de la app de escritorio, que no
+  // tiene un equivalente directo en los graficos CSS ya existentes.
+
+  function renderPanelDiario(){
+    var anio = Number(document.getElementById("pdAnio").value);
+    var mes = Number(document.getElementById("pdMes").value);
+    if(!anio || !mes) return;
+
+    var kp = dbGet(
+      "SELECT COUNT(*) AS n, COALESCE(SUM(monto),0) AS total, " +
+      "COALESCE(SUM(CASE WHEN prescindible=1 THEN monto ELSE 0 END),0) AS prescindible " +
+      "FROM gastos_diarios WHERE anio=? AND mes=?", [anio, mes]
+    );
+    document.getElementById("pdTotal").textContent = money(kp.total);
+    document.getElementById("pdMovs").textContent = kp.n;
+    document.getElementById("pdPrescindible").textContent = money(kp.prescindible);
+    document.getElementById("pdPctPrescindible").textContent = (kp.total > 0 ? Math.round(kp.prescindible / kp.total * 100) : 0) + "%";
+
+    renderBarChart("pdChartPrescindible", [
+      {label:"Prescindible", value: kp.prescindible},
+      {label:"No prescindible", value: kp.total - kp.prescindible}
+    ], true);
+
+    var porCategoria = dbAll(
+      "SELECT COALESCE(c.nombre,'Sin categoría') AS categoria, SUM(gd.monto) AS total FROM gastos_diarios gd " +
+      "LEFT JOIN categorias c ON c.id=gd.categoria_id WHERE gd.anio=? AND gd.mes=? GROUP BY categoria ORDER BY total DESC", [anio, mes]
+    );
+    renderBarChart("pdChartCategoria", porCategoria.map(function(r){ return {label:r.categoria, value:r.total}; }), true);
+
+    var porMedio = dbAll(
+      "SELECT medio_pago, tipo_tarjeta, banco_tarjeta, SUM(monto) AS total FROM gastos_diarios " +
+      "WHERE anio=? AND mes=? GROUP BY medio_pago, tipo_tarjeta, banco_tarjeta", [anio, mes]
+    );
+    var itemsMedio = porMedio.map(function(r){ return {label: etiquetaMedioPago(r.medio_pago, r.tipo_tarjeta, r.banco_tarjeta), value: r.total}; });
+    renderBarChart("pdChartMedioPago", itemsMedio, true);
+  }
+  document.getElementById("pdMes").addEventListener("change", renderPanelDiario);
+  document.getElementById("pdAnio").addEventListener("change", renderPanelDiario);
+
   // ---------------------------------------------------------------- Cargar mes: extraccion de texto de PDF (pdf.js)
   // No existe una libreria Python (pdfplumber) equivalente en el navegador --
   // se vendorizo pdf.js (Mozilla) en vendor/ para leer el PDF, y sobre el
@@ -1819,10 +2180,13 @@
     renderResumen();
     renderEstadoCuenta();
     renderChecklist();
+    renderListaGastosDiarios();
+    renderPanelDiario();
   }
 
   function boot(){
     limpiarFormularioGasto();
+    limpiarFormularioGD();
     refrescarSelectoresPeriodo();
     inicializarPeriodoADiaDeHoy();
     refrescarTodo();
