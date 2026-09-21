@@ -725,6 +725,24 @@
           <div class="bar-chart" id="pdChartMedioPago"></div>
         </div>
       </div>
+
+      <h3 style="font-size:.85rem;color:var(--text-dim);margin:18px 0 8px;">Análisis por persona</h3>
+      <p class="hint" style="margin-bottom:10px;">Cuánto gasta cada persona mes a mes, según lo asignado con "Compartir con"/"Dividir..." en Gastos Diarios. Lo que no quedó asignado a nadie se agrupa como "Sin asignar".</p>
+      <div class="form-grid" style="margin-bottom:10px;">
+        <div class="field grow"><label>Persona</label><select id="pdPersonaSel"></select></div>
+      </div>
+      <div class="stat-bar">
+        <div class="stat"><div class="k">Total del mes elegido</div><div class="v" id="pdPersonaTotalMes">$ 0</div></div>
+        <div class="stat"><div class="k">Promedio (12 meses)</div><div class="v" id="pdPersonaPromedio">$ 0</div></div>
+        <div class="stat"><div class="k">Mes de mayor gasto</div><div class="v" id="pdPersonaMesMax">-</div></div>
+        <div class="stat"><div class="k">Categoría principal</div><div class="v" id="pdPersonaCategoriaTop">-</div></div>
+      </div>
+      <div class="chart-box" style="margin-bottom:14px;">
+        <h3>Tendencia de los últimos 12 meses</h3>
+        <div class="bar-chart" id="pdPersonaTendencia"></div>
+      </div>
+      <h3 style="font-size:.85rem;color:var(--text-dim);margin-bottom:8px;">Todas las personas de este mes (toca una fila para elegirla arriba)</h3>
+      <div id="pdPersonasList"></div>
     </div>
   </section>
 
@@ -3306,9 +3324,201 @@
     );
     var itemsMedio = porMedio.map(function(r){ return {label: etiquetaMedioPago(r.medio_pago, r.tipo_tarjeta, r.banco_tarjeta), value: r.total}; });
     renderBarChart("pdChartMedioPago", itemsMedio, true);
+
+    renderPanelDiarioPersonas(anio, mes);
   }
   document.getElementById("pdMes").addEventListener("change", renderPanelDiario);
   document.getElementById("pdAnio").addEventListener("change", renderPanelDiario);
+
+  // ---------------------------------------------------------------- Panel Diario: analisis por persona
+  // Puerto de estadisticas_gastos_diarios_screen.py (_build_evolucion_persona/
+  // _refrescar_evolucion_persona) y de gastos_diarios_repo.resumen_persona_mes/
+  // resumen_persona_evolucion/resumen_categoria_persona_mes -- "para lo que
+  // realmente se usa a la hora de tomar decisiones financieras" (comentario
+  // textual del original). Lo NO asignado a nadie via "Compartir con"/
+  // "Dividir..." (gasto_diario_persona) se agrupa como pseudo-persona
+  // "Sin asignar", con el mismo criterio en las 3 consultas de abajo, para
+  // que la suma de "todas las personas" de un mes siempre cuadre con el
+  // total real de ese mes.
+
+  function personasConGastoDiario(){
+    var nombres = dbAll("SELECT DISTINCT persona FROM gasto_diario_persona ORDER BY persona COLLATE NOCASE").map(function(r){ return r.persona; });
+    nombres.push("Sin asignar");
+    return nombres;
+  }
+
+  // resumenPersonaMesGD: total de gd.anio/gd.mes agrupado por persona segun
+  // gasto_diario_persona. "Sin asignar" = SUM(gd.monto - reparto_total) de
+  // las filas de ese mes, agregado solo si > 0.01 (evita ruido de redondeo).
+  function resumenPersonaMesGD(anio, mes){
+    var filas = dbAll(
+      "SELECT gd.monto AS monto, COALESCE((SELECT SUM(monto) FROM gasto_diario_persona WHERE gasto_diario_id=gd.id),0) AS reparto_total " +
+      "FROM gastos_diarios gd WHERE gd.anio=? AND gd.mes=?", [anio, mes]
+    );
+    var sinAsignar = 0;
+    filas.forEach(function(f){ sinAsignar += (f.monto - f.reparto_total); });
+
+    var porPersona = dbAll(
+      "SELECT gp.persona AS persona, SUM(gp.monto) AS total FROM gasto_diario_persona gp " +
+      "JOIN gastos_diarios gd ON gd.id=gp.gasto_diario_id " +
+      "WHERE gd.anio=? AND gd.mes=? GROUP BY gp.persona", [anio, mes]
+    );
+    var out = porPersona.map(function(r){ return {persona: r.persona, total: r.total}; });
+    if(sinAsignar > 0.01) out.push({persona: "Sin asignar", total: sinAsignar});
+    out.sort(function(a,b){ return b.total - a.total; });
+    return out;
+  }
+
+  // resumenPersonaEvolucionGD: para 'persona' (o "Sin asignar"), cuanto se
+  // le asigno en cada uno de los ultimos nMeses meses, desde el mes actual
+  // (hoy) hacia atras, devuelto en orden cronologico (mes mas viejo primero).
+  function resumenPersonaEvolucionGD(persona, nMeses){
+    nMeses = nMeses || 12;
+    var hoy = new Date();
+    var anio = hoy.getFullYear(), mes = hoy.getMonth() + 1;
+    var meses = [];
+    for(var i = 0; i < nMeses; i++){
+      meses.push([anio, mes]);
+      mes -= 1;
+      if(mes === 0){ mes = 12; anio -= 1; }
+    }
+    meses.reverse();
+    return meses.map(function(par){
+      var a = par[0], m = par[1];
+      var total;
+      if(persona === "Sin asignar"){
+        var filas = dbAll(
+          "SELECT gd.monto AS monto, COALESCE((SELECT SUM(monto) FROM gasto_diario_persona WHERE gasto_diario_id=gd.id),0) AS reparto_total " +
+          "FROM gastos_diarios gd WHERE gd.anio=? AND gd.mes=?", [a, m]
+        );
+        total = 0;
+        filas.forEach(function(f){ total += (f.monto - f.reparto_total); });
+      }else{
+        var r = dbGet(
+          "SELECT COALESCE(SUM(gp.monto),0) AS total FROM gasto_diario_persona gp " +
+          "JOIN gastos_diarios gd ON gd.id=gp.gasto_diario_id " +
+          "WHERE gp.persona = ? COLLATE NOCASE AND gd.anio=? AND gd.mes=?", [persona, a, m]
+        );
+        total = r.total;
+      }
+      return {etiqueta: MESES_ES[m].slice(0, 3) + " " + a, total: total};
+    });
+  }
+
+  // resumenCategoriaPersonaMesGD: igual desglose por categoria que
+  // pdChartCategoria, pero filtrado solo a lo asignado a 'persona' (o
+  // "Sin asignar") ese mes.
+  function resumenCategoriaPersonaMesGD(persona, anio, mes){
+    if(persona === "Sin asignar"){
+      return dbAll(
+        "SELECT categoria, SUM(monto_persona) AS total FROM (" +
+          "SELECT COALESCE(c.nombre,'Sin categoría') AS categoria, " +
+          "(gd.monto - COALESCE((SELECT SUM(monto) FROM gasto_diario_persona WHERE gasto_diario_id=gd.id),0)) AS monto_persona " +
+          "FROM gastos_diarios gd LEFT JOIN categorias c ON c.id=gd.categoria_id " +
+          "WHERE gd.anio=? AND gd.mes=?" +
+        ") WHERE monto_persona > 0.01 GROUP BY categoria ORDER BY total DESC", [anio, mes]
+      );
+    }
+    return dbAll(
+      "SELECT COALESCE(c.nombre,'Sin categoría') AS categoria, SUM(gp.monto) AS total " +
+      "FROM gasto_diario_persona gp JOIN gastos_diarios gd ON gd.id=gp.gasto_diario_id " +
+      "LEFT JOIN categorias c ON c.id=gd.categoria_id " +
+      "WHERE gp.persona = ? COLLATE NOCASE AND gd.anio=? AND gd.mes=? GROUP BY categoria ORDER BY total DESC", [persona, anio, mes]
+    );
+  }
+
+  // renderTendenciaPersona: mismo estilo visual que renderBarChart (clases
+  // bar-row/bar-head/bar-track/bar-fill), pero SIN reordenar los items --
+  // en una tendencia mes a mes el orden cronologico es el dato.
+  function renderTendenciaPersona(containerId, items){
+    var wrap = document.getElementById(containerId);
+    var max = items.reduce(function(m, it){ return Math.max(m, it.total); }, 0);
+    if(max <= 0){ wrap.innerHTML = "<p class=\"hint\">Sin datos para graficar.</p>"; return; }
+    wrap.innerHTML = items.map(function(it){
+      var pct = it.total > 0 ? Math.max(4, Math.round(it.total / max * 100)) : 0;
+      return "<div class=\"bar-row\">" +
+        "<div class=\"bar-head\"><span class=\"bar-label\">" + escapeHtml(it.etiqueta) + "</span><span class=\"bar-value\">" + money(it.total) + "</span></div>" +
+        "<div class=\"bar-track\"><div class=\"bar-fill\" style=\"width:" + pct + "%;background:var(--accent)\"></div></div>" +
+      "</div>";
+    }).join("");
+  }
+
+  function poblarSelectorPdPersona(){
+    var sel = document.getElementById("pdPersonaSel");
+    var actual = sel.value;
+    var nombres = personasConGastoDiario();
+    sel.innerHTML = nombres.map(function(n){ return "<option value=\"" + escapeHtml(n) + "\">" + escapeHtml(n) + "</option>"; }).join("");
+    sel.value = (actual && nombres.indexOf(actual) !== -1) ? actual : nombres[0];
+  }
+
+  // renderPanelDiarioPersonaDetalle: KPIs + tendencia de la persona elegida
+  // en pdPersonaSel. El total del mes y la categoria principal son del
+  // mes/anio elegidos arriba en Panel Diario (pdMes/pdAnio); el promedio y
+  // el mes de mayor gasto son de los mismos 12 meses del grafico de
+  // tendencia (siempre anclados a hoy), para que numeros y grafico cuenten
+  // siempre la misma historia -- igual criterio que el escritorio.
+  function renderPanelDiarioPersonaDetalle(){
+    var sel = document.getElementById("pdPersonaSel");
+    var persona = sel.value;
+    if(!persona) return;
+    var anio = Number(document.getElementById("pdAnio").value);
+    var mes = Number(document.getElementById("pdMes").value);
+
+    var evolucion = resumenPersonaEvolucionGD(persona, 12);
+    renderTendenciaPersona("pdPersonaTendencia", evolucion);
+
+    var mesRows = resumenPersonaMesGD(anio, mes);
+    var filaMes = mesRows.filter(function(r){ return r.persona === persona; });
+    var totalMes = filaMes.length ? filaMes[0].total : 0;
+    document.getElementById("pdPersonaTotalMes").textContent = money(totalMes);
+
+    var promedio = evolucion.reduce(function(acc, d){ return acc + d.total; }, 0) / (evolucion.length || 1);
+    document.getElementById("pdPersonaPromedio").textContent = money(promedio);
+
+    var conGasto = evolucion.filter(function(d){ return d.total > 0; });
+    if(conGasto.length){
+      var mesMax = conGasto.reduce(function(a, b){ return b.total > a.total ? b : a; });
+      document.getElementById("pdPersonaMesMax").textContent = mesMax.etiqueta + " (" + money(mesMax.total) + ")";
+    }else{
+      document.getElementById("pdPersonaMesMax").textContent = "-";
+    }
+
+    var datosCat = resumenCategoriaPersonaMesGD(persona, anio, mes);
+    if(datosCat.length){
+      document.getElementById("pdPersonaCategoriaTop").textContent = datosCat[0].categoria + " (" + money(datosCat[0].total) + ")";
+    }else{
+      document.getElementById("pdPersonaCategoriaTop").textContent = "-";
+    }
+  }
+
+  // renderPanelDiarioPersonas: arma el selector de persona y la lista de
+  // TODAS las personas del mes elegido (no solo la seleccionada) -- clic en
+  // una fila cambia pdPersonaSel y refresca todo el analisis de arriba,
+  // mismo patron de interaccion que el escritorio.
+  function renderPanelDiarioPersonas(anio, mes){
+    poblarSelectorPdPersona();
+    renderPanelDiarioPersonaDetalle();
+
+    var todas = resumenPersonaMesGD(anio, mes);
+    var cont = document.getElementById("pdPersonasList");
+    if(todas.length === 0){
+      cont.innerHTML = "<p class=\"hint\">Sin gastos diarios registrados este mes.</p>";
+      return;
+    }
+    cont.innerHTML = todas.map(function(r){
+      return "<div class=\"person-row\"><div class=\"person-row-head\" data-persona=\"" + escapeHtml(r.persona) + "\">" +
+        "<span class=\"person-nombre\">" + escapeHtml(r.persona) + "</span>" +
+        "<span class=\"person-total\">" + money(r.total) + "</span>" +
+      "</div></div>";
+    }).join("");
+    cont.querySelectorAll("[data-persona]").forEach(function(row){
+      row.addEventListener("click", function(){
+        document.getElementById("pdPersonaSel").value = row.dataset.persona;
+        renderPanelDiarioPersonaDetalle();
+      });
+    });
+  }
+  document.getElementById("pdPersonaSel").addEventListener("change", renderPanelDiarioPersonaDetalle);
 
   // ---------------------------------------------------------------- Cargar mes: extraccion de texto de PDF (pdf.js)
   // No existe una libreria Python (pdfplumber) equivalente en el navegador --
