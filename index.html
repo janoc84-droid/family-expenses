@@ -628,6 +628,10 @@
           <label>Monto</label>
           <input type="number" id="gdMonto" min="0" step="1" placeholder="0">
         </div>
+        <div class="field small" id="gdCuotasField">
+          <label>Cuotas</label>
+          <input type="number" id="gdCuotas" min="1" step="1" value="1">
+        </div>
         <div class="field small">
           <label>Medio de pago</label>
           <select id="gdMedioPago">
@@ -653,6 +657,7 @@
         <input type="checkbox" id="gdPrescindible">
         Prescindible (podría vivir sin esto)
       </label>
+      <div class="hint" id="gdCuotasHint" hidden style="margin:0 0 10px;"></div>
 
       <div class="form-actions">
         <button type="button" class="btn-ghost" id="gdCancelarEdicion" hidden>Cancelar edición</button>
@@ -673,6 +678,19 @@
       <input type="text" id="gdBuscar" placeholder="Buscar... (ej. Café, Comida)">
       <div id="gdLista"></div>
       <div class="totals-line" id="gdTotales"></div>
+    </div>
+
+    <div class="card">
+      <div class="sec-head-row">
+        <h2>Comprobador de cobertura</h2>
+        <div class="cov-filtros" id="covGDFiltros">
+          <button type="button" class="btn-ghost cov-filtro-btn active" data-covgdf="todos">Todos</button>
+          <button type="button" class="btn-ghost cov-filtro-btn" data-covgdf="faltantes">Faltantes</button>
+          <button type="button" class="btn-ghost cov-filtro-btn" data-covgdf="agregados">Ya agregados</button>
+        </div>
+      </div>
+      <p class="hint" style="margin-bottom:10px;">Compara los gastos diarios recurrentes del mes anterior contra lo que ya cargaste este mes.</p>
+      <div id="covGDLista"></div>
     </div>
   </section>
 
@@ -810,10 +828,13 @@
     // simplificada de GastosDiarios/GastoDiarioPersona (ver
     // family_expenses/app/repositories/gastos_diarios_repo.py): se
     // portaron los campos centrales (fecha, detalle, categoria, monto,
-    // prescindible, medio de pago/tarjeta) -- NO se porto el reparto por
-    // persona ('Compartir con'/'Dividir...') ni el plan de cuotas que se
-    // arrastra solo mes a mes, para priorizar el alta/edicion/borrado/
-    // listado central (ver reporte final de esta tarea).
+    // prescindible, medio de pago/tarjeta), el reparto por persona
+    // ('Compartir con'/'Dividir...' -> gasto_diario_persona, con
+    // pagado/fecha_pago) y el plan de cuotas que se arrastra mes a mes
+    // (monto_total/cuota_texto/cuota_actual/cuotas_totales/grupo_cuota_id,
+    // puerto de domain/installment.py -- ver generarPlanCuotas). NO se
+    // portaron los filtros por tarjeta/"Sin asignar" del escritorio (ver
+    // reporte final de esta tarea).
     "CREATE TABLE IF NOT EXISTS gastos_diarios (",
     "  id INTEGER PRIMARY KEY,",
     "  anio INTEGER NOT NULL,",
@@ -826,7 +847,26 @@
     "  medio_pago TEXT,",
     "  tipo_tarjeta TEXT,",
     "  banco_tarjeta TEXT,",
+    "  monto_total REAL,",
+    "  cuota_texto TEXT,",
+    "  cuota_actual INTEGER,",
+    "  cuotas_totales INTEGER,",
+    "  grupo_cuota_id INTEGER,",
     "  created_at TEXT NOT NULL DEFAULT (datetime('now'))",
+    ");",
+    // Reparto por persona de un Gasto Diario (o de UNA cuota puntual de un
+    // plan de cuotas -- el reparto se aplica cuota por cuota, no al total).
+    // 'persona' es TEXT libre (no FK a personas.id) para que homologarNombrePersonaGD
+    // pueda unificar capitalizacion sin bloquear nombres que todavia no
+    // existen en la tabla personas -- mismo criterio que
+    // homologar_nombre_persona del escritorio.
+    "CREATE TABLE IF NOT EXISTS gasto_diario_persona (",
+    "  id INTEGER PRIMARY KEY,",
+    "  gasto_diario_id INTEGER NOT NULL REFERENCES gastos_diarios(id) ON DELETE CASCADE,",
+    "  persona TEXT NOT NULL,",
+    "  monto REAL NOT NULL,",
+    "  pagado INTEGER NOT NULL DEFAULT 0,",
+    "  fecha_pago TEXT",
     ");",
     // Historial de ajustes de Estado de Cuenta: cada edicion/division/
     // adjunte/eliminacion hecha a mano desde esa pantalla queda registrada
@@ -881,6 +921,7 @@
     "CREATE INDEX IF NOT EXISTS idx_gasto_persona_persona ON gasto_persona(persona_id);",
     "CREATE INDEX IF NOT EXISTS idx_checklist_persona_mes ON checklist_pagos(persona, anio, mes);",
     "CREATE INDEX IF NOT EXISTS idx_gastos_diarios_anio_mes ON gastos_diarios(anio, mes);",
+    "CREATE INDEX IF NOT EXISTS idx_gasto_diario_persona_gasto ON gasto_diario_persona(gasto_diario_id);",
     "CREATE INDEX IF NOT EXISTS idx_historial_persona_mes ON historial_ajustes(persona, anio, mes);",
     "CREATE INDEX IF NOT EXISTS idx_meses_conciliados_anio_mes ON meses_conciliados(anio, mes);"
   ].join("\n");
@@ -904,6 +945,15 @@
     if(!tieneColumna("personas", "telefono")){
       dbRef.run("ALTER TABLE personas ADD COLUMN telefono TEXT");
     }
+    // gastos_diarios.monto_total/cuota_texto/cuota_actual/cuotas_totales/
+    // grupo_cuota_id: plan de cuotas (ver generarPlanCuotas) -- instalaciones
+    // previas ya tenian la tabla gastos_diarios sin estas columnas.
+    ["monto_total REAL", "cuota_texto TEXT", "cuota_actual INTEGER", "cuotas_totales INTEGER", "grupo_cuota_id INTEGER"].forEach(function(def){
+      var nombreCol = def.split(" ")[0];
+      if(!tieneColumna("gastos_diarios", nombreCol)){
+        dbRef.run("ALTER TABLE gastos_diarios ADD COLUMN " + def);
+      }
+    });
   }
 
   // ---------------------------------------------------------------- utiles
@@ -1538,7 +1588,7 @@
     var btn = ev.target.closest("[data-covf]");
     if(!btn) return;
     covFiltro = btn.dataset.covf;
-    document.querySelectorAll(".cov-filtro-btn").forEach(function(b){ b.classList.toggle("active", b === btn); });
+    document.querySelectorAll("#covFiltros .cov-filtro-btn").forEach(function(b){ b.classList.toggle("active", b === btn); });
     renderComprobadorCobertura();
   });
 
@@ -2650,14 +2700,257 @@
   // Version simplificada de gastos_diarios_screen.py: se portaron
   // fecha/detalle/categoria/monto/prescindible/medio de pago (con tipo y
   // banco de tarjeta cuando corresponde) -- alta, edicion, borrado y
-  // listado filtrable por mes, que es el CRUD central de esa pantalla. NO
-  // se porto el reparto por persona ("Compartir con"/"Dividir..." ->
-  // GastoDiarioPersona), el plan de cuotas que se arrastra solo de mes en
-  // mes (domain/installment.py), el comprobador de gastos recurrentes del
-  // mes anterior, ni los filtros por tarjeta/"Sin asignar" -- quedan
-  // afuera de esta pasada (ver reporte final).
+  // listado filtrable por mes (el CRUD central de esa pantalla), el reparto
+  // por persona ("Compartir con"/"Dividir..." -> gasto_diario_persona, con
+  // pagado/fecha_pago), el plan de cuotas que se arrastra mes a mes
+  // (generarPlanCuotas, puerto de domain/installment.py) y el comprobador
+  // de gastos recurrentes del mes anterior (checklistCoberturaDiarios,
+  // puerto de checklist_cobertura_diarios). NO se portaron los filtros por
+  // tarjeta/"Sin asignar" del escritorio -- quedan afuera de esta pasada
+  // (ver reporte final).
 
   var editingGastoDiarioId = null;
+
+  // -------------------------- plan de cuotas (puerto de domain/installment.py)
+  // Avanza N meses desde fechaIso, conservando el mismo dia del mes -- si
+  // ese mes es mas corto, usa su ultimo dia valido (sin desbordar al mes
+  // siguiente). Ej: 31 de enero + 1 mes = 28/29 de febrero (nunca 3 de marzo).
+  function sumarMeses(fechaIso, n){
+    var partes = fechaIso.split("-").map(Number);
+    var anio = partes[0], mes = partes[1], dia = partes[2];
+    var totalMes = (mes - 1) + n;
+    var nuevoAnio = anio + Math.floor(totalMes / 12);
+    var nuevoMes = (totalMes % 12) + 1;
+    var ultimoDia = new Date(nuevoAnio, nuevoMes, 0).getDate();
+    var nuevoDia = Math.min(dia, ultimoDia);
+    return nuevoAnio + "-" + String(nuevoMes).padStart(2, "0") + "-" + String(nuevoDia).padStart(2, "0");
+  }
+
+  // generarPlanCuotas(fechaInicioIso, montoTotal, cuotasTotales, cuotaInicial=1):
+  // una fila por cuota, avanzando un mes por cuota. El monto de cada cuota es
+  // montoTotal/cuotasTotales redondeado a 2 decimales, EXCEPTO la ultima que
+  // absorbe la diferencia de redondeo para que la suma cierre exacto con el
+  // total (mismo criterio que "Dividir..." en el resto de la app).
+  function generarPlanCuotas(fechaInicioIso, montoTotal, cuotasTotales, cuotaInicial){
+    cuotaInicial = cuotaInicial || 1;
+    var montoCuota = Math.round((montoTotal / cuotasTotales) * 100) / 100;
+    var montoUltima = Math.round((montoTotal - montoCuota * (cuotasTotales - 1)) * 100) / 100;
+    var plan = [];
+    for(var n = cuotaInicial; n <= cuotasTotales; n++){
+      var offset = n - cuotaInicial;
+      plan.push({
+        fecha: sumarMeses(fechaInicioIso, offset),
+        monto: (n === cuotasTotales) ? montoUltima : montoCuota,
+        cuotaTexto: String(n).padStart(2, "0") + "/" + String(cuotasTotales).padStart(2, "0"),
+        cuotaActual: n,
+        cuotasTotales: cuotasTotales
+      });
+    }
+    return plan;
+  }
+
+  function insertarGastoDiarioConCuotas(fecha, detalle, categoriaNombre, montoTotal, cuotasTotales, prescindible, medioPago, tipoTarjeta, bancoTarjeta){
+    var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
+    var plan = generarPlanCuotas(fecha, montoTotal, cuotasTotales, 1);
+    var grupoCuotaId = null;
+    var primerId = null;
+    db.run("BEGIN");
+    try{
+      plan.forEach(function(c){
+        var d = new Date(c.fecha + "T00:00:00");
+        db.run(
+          "INSERT INTO gastos_diarios (anio, mes, fecha, detalle, categoria_id, monto, prescindible, medio_pago, tipo_tarjeta, banco_tarjeta, monto_total, cuota_texto, cuota_actual, cuotas_totales, grupo_cuota_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          [d.getFullYear(), d.getMonth() + 1, c.fecha, detalle, categoriaId, c.monto, prescindible ? 1 : 0, medioPago || null, tipoTarjeta || null, bancoTarjeta || null, montoTotal, c.cuotaTexto, c.cuotaActual, c.cuotasTotales, grupoCuotaId]
+        );
+        var nuevoId = lastId();
+        if(primerId === null){ primerId = nuevoId; grupoCuotaId = nuevoId; }
+        db.run("UPDATE gastos_diarios SET grupo_cuota_id=? WHERE id=?", [grupoCuotaId, nuevoId]);
+      });
+      db.run("COMMIT");
+    }catch(e){
+      db.run("ROLLBACK");
+      throw e;
+    }
+    scheduleSave();
+    return primerId;
+  }
+
+  // -------------------------- reparto por persona (gasto_diario_persona)
+  // homologarNombrePersonaGD: si el nombre escrito coincide (sin importar
+  // mayusculas) con una persona ya existente en 'personas' o ya usada antes
+  // en un reparto de gastos diarios, se usa esa MISMA capitalizacion --
+  // evita que "alejandro"/"Alejandro" se traten como personas distintas en
+  // filtros/graficos del Panel Diario. Puerto de homologar_nombre_persona.
+  function homologarNombrePersonaGD(nombre){
+    nombre = String(nombre || "").trim();
+    if(!nombre) return nombre;
+    var row = dbGet("SELECT nombre FROM personas WHERE nombre = ? COLLATE NOCASE", [nombre]);
+    if(row) return row.nombre;
+    var row2 = dbGet("SELECT persona FROM gasto_diario_persona WHERE persona = ? COLLATE NOCASE LIMIT 1", [nombre]);
+    if(row2) return row2.persona;
+    return nombre;
+  }
+
+  function repartoDeGastoDiario(gastoDiarioId){
+    return dbAll("SELECT * FROM gasto_diario_persona WHERE gasto_diario_id=? ORDER BY persona COLLATE NOCASE", [gastoDiarioId]);
+  }
+
+  // dividirGastoDiario: reemplaza el reparto completo de una fila (una
+  // cuota puntual, nunca el total de la compra). Si una persona YA estaba
+  // en el reparto anterior se preserva su pagado/fecha_pago -- no se
+  // resetea al reasignar. 'pagadoNuevos' (opcional) trae el pagado elegido
+  // en el modal para personas que TODAVIA no tenian fila en la base (recien
+  // agregadas en esta misma edicion). NO abre transaccion propia -- quien
+  // llama debe envolver en BEGIN/COMMIT y llamar scheduleSave() despues.
+  function dividirGastoDiario(gastoDiarioId, repartoNuevo, pagadoNuevos){
+    pagadoNuevos = pagadoNuevos || {};
+    var actuales = {};
+    repartoDeGastoDiario(gastoDiarioId).forEach(function(r){ actuales[r.persona.toLowerCase()] = r; });
+    db.run("DELETE FROM gasto_diario_persona WHERE gasto_diario_id=?", [gastoDiarioId]);
+    Object.keys(repartoNuevo).forEach(function(nombreRaw){
+      var nombre = homologarNombrePersonaGD(nombreRaw);
+      var key = nombre.toLowerCase();
+      var previo = actuales[key];
+      var pagado = previo ? !!previo.pagado : !!pagadoNuevos[key];
+      var fechaPago = previo ? previo.fecha_pago : (pagado ? todayISO() : null);
+      db.run("INSERT INTO gasto_diario_persona (gasto_diario_id, persona, monto, pagado, fecha_pago) VALUES (?,?,?,?,?)",
+        [gastoDiarioId, nombre, repartoNuevo[nombreRaw], pagado ? 1 : 0, fechaPago]);
+    });
+  }
+
+  function marcarPagadoRepartoGD(id, pagado){
+    dbRun("UPDATE gasto_diario_persona SET pagado=?, fecha_pago=? WHERE id=?", [pagado ? 1 : 0, pagado ? todayISO() : null, id]);
+  }
+
+  function abrirRepartoGastoDiario(gastoDiarioId){
+    var g = dbGet("SELECT * FROM gastos_diarios WHERE id=?", [gastoDiarioId]);
+    if(!g) return;
+    var entradas = repartoDeGastoDiario(gastoDiarioId).map(function(r){
+      return {id: r.id, nombre: r.persona, monto: r.monto, pagado: !!r.pagado};
+    });
+
+    var esCuota = g.cuotas_totales && g.cuotas_totales > 1;
+    var html =
+      "<h2>Compartir / Dividir</h2>" +
+      "<p class=\"hint\">\"" + escapeHtml(g.detalle) + "\"" + (esCuota ? " (cuota " + escapeHtml(g.cuota_texto || "") + ")" : "") +
+      " -- " + money(g.monto) + (esCuota ? " para ESTA cuota" : "") + ". Elige quién comparte este gasto; por defecto se reparte en partes iguales.</p>" +
+      "<div class=\"form-grid\">" +
+        "<div class=\"field grow\"><label>Persona</label><input type=\"text\" id=\"gdrPersona\" list=\"personasList\" placeholder=\"Nombre...\"></div>" +
+      "</div>" +
+      "<div class=\"form-actions\" style=\"justify-content:flex-start;margin:0 0 10px;\">" +
+        "<button type=\"button\" class=\"btn-ghost\" id=\"gdrAgregar\">+ Agregar</button>" +
+        "<button type=\"button\" class=\"btn-ghost\" id=\"gdrIgualar\">Repartir en partes iguales</button>" +
+      "</div>" +
+      "<div id=\"gdrLista\"></div>" +
+      "<div class=\"note\" id=\"gdrResumen\"></div>" +
+      "<div class=\"note\" id=\"gdrMensaje\" hidden></div>" +
+      "<div class=\"form-actions\">" +
+        "<button type=\"button\" class=\"btn-ghost\" id=\"gdrCancelar\">Cancelar</button>" +
+        "<button type=\"button\" class=\"btn-primary\" id=\"gdrGuardar\">Guardar reparto</button>" +
+      "</div>";
+    abrirModal(html);
+
+    function render(){
+      var listaEl = document.getElementById("gdrLista");
+      if(entradas.length === 0){
+        listaEl.innerHTML = "<p class=\"hint\">Todavía no se repartió -- agrega al menos una persona.</p>";
+      }else{
+        listaEl.innerHTML = entradas.map(function(e, i){
+          return "<div class=\"reparto-row\" data-i=\"" + i + "\">" +
+            "<label class=\"checkbox-line\" style=\"flex:none;margin:0;\"><input type=\"checkbox\" class=\"gdr-pagado\" data-i=\"" + i + "\" " + (e.pagado ? "checked" : "") + "> Pagado</label>" +
+            "<span class=\"reparto-nombre\">" + escapeHtml(e.nombre) + "</span>" +
+            "<input type=\"number\" step=\"1\" class=\"reparto-monto gdr-monto\" data-i=\"" + i + "\" value=\"" + e.monto + "\">" +
+            "<button type=\"button\" class=\"icon-btn danger\" data-quitar=\"" + i + "\" title=\"Quitar\">✕</button>" +
+          "</div>";
+        }).join("");
+        listaEl.querySelectorAll(".gdr-monto").forEach(function(inp){
+          inp.addEventListener("input", function(){
+            entradas[Number(this.dataset.i)].monto = Number(this.value) || 0;
+            actualizarResumen();
+          });
+        });
+        listaEl.querySelectorAll(".gdr-pagado").forEach(function(chk){
+          chk.addEventListener("change", function(){
+            var i = Number(this.dataset.i);
+            entradas[i].pagado = this.checked;
+            if(entradas[i].id){
+              marcarPagadoRepartoGD(entradas[i].id, this.checked);
+              renderListaGastosDiarios();
+              mostrarToast(this.checked ? "Marcado como pagado." : "Marcado como pendiente.", "ok");
+            }
+          });
+        });
+        listaEl.querySelectorAll("[data-quitar]").forEach(function(b){
+          b.addEventListener("click", function(){ entradas.splice(Number(b.dataset.quitar), 1); render(); });
+        });
+      }
+      actualizarResumen();
+    }
+    function actualizarResumen(){
+      var suma = entradas.reduce(function(a, e){ return a + (Number(e.monto) || 0); }, 0);
+      var resto = Math.round((g.monto - suma) * 100) / 100;
+      var el = document.getElementById("gdrResumen");
+      if(Math.abs(resto) < 1){
+        el.className = "note ok"; el.textContent = "Cuadra con el monto de " + (esCuota ? "esta cuota" : "este gasto") + " (" + money(g.monto) + ").";
+      }else if(resto > 0){
+        el.className = "note warn"; el.textContent = "Falta asignar " + money(resto) + ".";
+      }else{
+        el.className = "note bad"; el.textContent = "Asignaste " + money(-resto) + " de más.";
+      }
+    }
+    function igualarEntradas(){
+      if(entradas.length === 0) return;
+      var base = Math.floor(g.monto / entradas.length);
+      var resto = Math.round(g.monto - base * entradas.length);
+      entradas.forEach(function(e, i){ e.monto = base + (i < resto ? 1 : 0); });
+    }
+    document.getElementById("gdrAgregar").addEventListener("click", function(){
+      var msgEl = document.getElementById("gdrMensaje");
+      msgEl.hidden = true;
+      var nombreRaw = document.getElementById("gdrPersona").value.trim();
+      if(!nombreRaw){ msgEl.hidden = false; msgEl.className = "note bad"; msgEl.textContent = "Escribe un nombre."; return; }
+      var nombre = homologarNombrePersonaGD(nombreRaw);
+      if(entradas.some(function(e){ return e.nombre.toLowerCase() === nombre.toLowerCase(); })){
+        msgEl.hidden = false; msgEl.className = "note bad"; msgEl.textContent = nombre + " ya está en el reparto.";
+        return;
+      }
+      entradas.push({id: null, nombre: nombre, monto: 0, pagado: false});
+      // reparto igualitario por defecto -- rebalancea a TODAS las personas
+      // (no solo la nueva), para que agregar una segunda/tercera persona
+      // no deje a las anteriores con el monto viejo (que ya no cuadraria).
+      igualarEntradas();
+      document.getElementById("gdrPersona").value = "";
+      render();
+    });
+    document.getElementById("gdrIgualar").addEventListener("click", function(){ igualarEntradas(); render(); });
+    document.getElementById("gdrCancelar").addEventListener("click", cerrarModal);
+    document.getElementById("gdrGuardar").addEventListener("click", function(){
+      var msgEl = document.getElementById("gdrMensaje");
+      if(entradas.length === 0){ msgEl.hidden = false; msgEl.className = "note bad"; msgEl.textContent = "Agrega al menos una persona, o cierra sin guardar."; return; }
+      var invalido = entradas.some(function(e){ return isNaN(Number(e.monto)); });
+      if(invalido){ msgEl.hidden = false; msgEl.className = "note bad"; msgEl.textContent = "Revisa los montos."; return; }
+      var repartoNuevo = {};
+      var pagadoNuevos = {};
+      entradas.forEach(function(e){
+        repartoNuevo[e.nombre] = Number(e.monto) || 0;
+        if(!e.id) pagadoNuevos[e.nombre.toLowerCase()] = e.pagado;
+      });
+      db.run("BEGIN");
+      try{
+        dividirGastoDiario(gastoDiarioId, repartoNuevo, pagadoNuevos);
+        db.run("COMMIT");
+      }catch(err){
+        db.run("ROLLBACK");
+        msgEl.hidden = false; msgEl.className = "note bad"; msgEl.textContent = "Error: " + err.message;
+        return;
+      }
+      scheduleSave();
+      cerrarModal();
+      renderListaGastosDiarios();
+      mostrarToast("Reparto guardado.", "ok");
+    });
+    render();
+  }
 
   function etiquetaMedioPago(medioPago, tipoTarjeta, bancoTarjeta){
     if(medioPago === "Tarjeta" && tipoTarjeta){
@@ -2715,6 +3008,9 @@
     document.getElementById("gdTipoTarjeta").value = "Débito";
     document.getElementById("gdBancoTarjeta").value = "";
     document.getElementById("gdPrescindible").checked = false;
+    document.getElementById("gdCuotas").value = "1";
+    document.getElementById("gdCuotasField").hidden = false;
+    document.getElementById("gdCuotasHint").hidden = true;
     actualizarCamposTarjetaGD();
     document.getElementById("gdFormTitulo").textContent = "Agregar gasto diario";
     document.getElementById("gdGuardar").textContent = "Agregar";
@@ -2734,10 +3030,14 @@
     var tipoTarjeta = medioPago === "Tarjeta" ? document.getElementById("gdTipoTarjeta").value : null;
     var bancoTarjeta = medioPago === "Tarjeta" ? (document.getElementById("gdBancoTarjeta").value.trim() || null) : null;
     var prescindible = document.getElementById("gdPrescindible").checked;
+    var cuotas = Math.max(1, Math.round(Number(document.getElementById("gdCuotas").value) || 1));
 
     var idAntes = editingGastoDiarioId;
     if(idAntes){
       actualizarGastoDiario(idAntes, fecha, detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta);
+    }else if(cuotas > 1){
+      if(monto <= 0){ mostrarMensajeGD("El monto en cuotas debe ser mayor que 0.", "bad"); return; }
+      insertarGastoDiarioConCuotas(fecha, detalle, categoriaNombre, monto, cuotas, prescindible, medioPago, tipoTarjeta, bancoTarjeta);
     }else{
       insertarGastoDiario(fecha, detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta);
     }
@@ -2752,7 +3052,11 @@
     refrescarSelectoresPeriodo();
     renderListaGastosDiarios();
     renderPanelDiario();
-    mostrarMensajeGD(idAntes ? "Gasto actualizado." : "Gasto agregado.", "ok");
+    if(!idAntes && cuotas > 1){
+      mostrarMensajeGD("Se generaron " + cuotas + " cuotas, una por mes desde " + fecha + ".", "ok");
+    }else{
+      mostrarMensajeGD(idAntes ? "Gasto actualizado." : "Gasto agregado.", "ok");
+    }
   }
 
   function editarGastoDiarioForm(id){
@@ -2769,6 +3073,19 @@
     document.getElementById("gdBancoTarjeta").value = g.banco_tarjeta || "";
     document.getElementById("gdPrescindible").checked = !!g.prescindible;
     actualizarCamposTarjetaGD();
+    // El plan de cuotas se genera solo al CREAR -- al editar una fila que ya
+    // es parte de un plan, el campo se oculta (esta edicion solo toca ESTA
+    // cuota puntual) y se muestra un aviso con el contexto del plan.
+    var hintEl = document.getElementById("gdCuotasHint");
+    if(g.cuotas_totales && g.cuotas_totales > 1){
+      document.getElementById("gdCuotasField").hidden = true;
+      hintEl.hidden = false;
+      hintEl.textContent = "Cuota " + (g.cuota_texto || "") + " de un plan de " + g.cuotas_totales + " cuotas (total de la compra: " +
+        money(g.monto_total) + "). Editar acá solo cambia ESTA cuota -- para modificar el plan completo hay que borrar todas sus filas y volver a cargarlas.";
+    }else{
+      document.getElementById("gdCuotasField").hidden = true;
+      hintEl.hidden = true;
+    }
     document.getElementById("gdFormTitulo").textContent = "Editar gasto diario";
     document.getElementById("gdGuardar").textContent = "Guardar cambios";
     document.getElementById("gdCancelarEdicion").hidden = false;
@@ -2810,14 +3127,20 @@
       cont.innerHTML = filas.map(function(f){
         var marca = f.prescindible ? "🔻 " : "";
         var medio = etiquetaMedioPago(f.medio_pago, f.tipo_tarjeta, f.banco_tarjeta);
+        var cuotaTxt = (f.cuotas_totales && f.cuotas_totales > 1) ?
+          " <span style=\"opacity:.65;font-size:.78rem;\">(cuota " + escapeHtml(f.cuota_texto || "") + ")</span>" : "";
+        var reparto = dbAll("SELECT persona, pagado FROM gasto_diario_persona WHERE gasto_diario_id=? ORDER BY persona COLLATE NOCASE", [f.id]);
+        var repartoTxt = reparto.length ?
+          " · " + reparto.map(function(r){ return (r.pagado ? "✓ " : "⏳ ") + escapeHtml(r.persona); }).join(", ") : "";
         return "<div class=\"list-row\">" +
           "<div class=\"list-row-main\">" +
             "<span class=\"list-fecha\">" + f.fecha + "</span>" +
-            "<span class=\"list-detalle\">" + marca + escapeHtml(f.detalle) + "</span>" +
-            "<span class=\"list-nombres\">" + escapeHtml(f.categoria) + " · " + escapeHtml(medio) + "</span>" +
+            "<span class=\"list-detalle\">" + marca + escapeHtml(f.detalle) + cuotaTxt + "</span>" +
+            "<span class=\"list-nombres\">" + escapeHtml(f.categoria) + " · " + escapeHtml(medio) + repartoTxt + "</span>" +
           "</div>" +
           "<div class=\"list-row-side\">" +
             "<span class=\"list-monto\">" + money(f.monto) + "</span>" +
+            "<button class=\"icon-btn\" data-gdreparto=\"" + f.id + "\" title=\"Compartir / Dividir\">👥</button>" +
             "<button class=\"icon-btn\" data-gdedit=\"" + f.id + "\" title=\"Editar\">✎</button>" +
             "<button class=\"icon-btn danger\" data-gddel=\"" + f.id + "\" title=\"Borrar\">✕</button>" +
           "</div>" +
@@ -2828,12 +3151,119 @@
     var totalPrescindible = filas.reduce(function(a, f){ return a + (f.prescindible ? f.monto : 0); }, 0);
     document.getElementById("gdTotales").innerHTML =
       "Gastos: <b>" + filas.length + "</b> · Total: <b>" + money(total) + "</b> · Prescindible: <b>" + money(totalPrescindible) + "</b>";
+    cont.querySelectorAll("[data-gdreparto]").forEach(function(b){ b.addEventListener("click", function(){ abrirRepartoGastoDiario(Number(b.dataset.gdreparto)); }); });
     cont.querySelectorAll("[data-gdedit]").forEach(function(b){ b.addEventListener("click", function(){ editarGastoDiarioForm(Number(b.dataset.gdedit)); }); });
     cont.querySelectorAll("[data-gddel]").forEach(function(b){ b.addEventListener("click", function(){ borrarGastoDiario(Number(b.dataset.gddel)); }); });
+    renderComprobadorCoberturaGD();
   }
   document.getElementById("gdMes").addEventListener("change", renderListaGastosDiarios);
   document.getElementById("gdAnio").addEventListener("change", renderListaGastosDiarios);
   document.getElementById("gdBuscar").addEventListener("input", renderListaGastosDiarios);
+
+  // ---------------------------------------------------------------- Gastos Diarios: comprobador de cobertura
+  // Puerto de checklist_cobertura_diarios (gastos_diarios_repo.py): compara
+  // cada Detalle DISTINTO de gastos_diarios del mes anterior (lo que se
+  // repite mes a mes -- café, colación, etc.) contra lo que YA existe este
+  // mes, mismo patrón que checklistCoberturaIngreso pero sin filtro de
+  // origen (gastos_diarios no tiene columna 'origen').
+  function checklistCoberturaDiarios(anio, mes){
+    var prev = mesAnteriorDe(anio, mes);
+    var recurrentes = dbAll(
+      "SELECT gd.detalle AS detalle, gd.monto AS monto, COALESCE(c.nombre,'Sin categoría') AS categoria, " +
+      "gd.medio_pago AS medio_pago, gd.tipo_tarjeta AS tipo_tarjeta, gd.banco_tarjeta AS banco_tarjeta " +
+      "FROM gastos_diarios gd LEFT JOIN categorias c ON c.id=gd.categoria_id " +
+      "WHERE gd.id IN (SELECT MAX(id) FROM gastos_diarios WHERE anio=? AND mes=? GROUP BY detalle COLLATE NOCASE) " +
+      "ORDER BY gd.detalle COLLATE NOCASE",
+      [prev.anio, prev.mes]
+    );
+    return recurrentes.map(function(r){
+      var presente = dbGet(
+        "SELECT id, monto FROM gastos_diarios WHERE anio=? AND mes=? AND detalle=? COLLATE NOCASE " +
+        "AND id IN (SELECT MAX(id) FROM gastos_diarios WHERE anio=? AND mes=? GROUP BY detalle COLLATE NOCASE) LIMIT 1",
+        [anio, mes, r.detalle, anio, mes]
+      );
+      return {
+        detalle: r.detalle, categoria: r.categoria, medioPago: r.medio_pago, tipoTarjeta: r.tipo_tarjeta, bancoTarjeta: r.banco_tarjeta,
+        montoMesAnterior: r.monto, yaAgregado: !!presente, gastoIdEsteMes: presente ? presente.id : null, montoEsteMes: presente ? presente.monto : null
+      };
+    });
+  }
+
+  function precargarDesdeCoberturaGD(item){
+    limpiarFormularioGD();
+    var anio = Number(document.getElementById("gdAnio").value);
+    var mes = Number(document.getElementById("gdMes").value);
+    document.getElementById("gdFecha").value = anio + "-" + String(mes).padStart(2, "0") + "-01";
+    document.getElementById("gdDetalle").value = item.detalle;
+    document.getElementById("gdCategoria").value = item.categoria === "Sin categoría" ? "" : item.categoria;
+    document.getElementById("gdMonto").value = Math.round(item.montoMesAnterior);
+    document.getElementById("gdMedioPago").value = item.medioPago || "Efectivo";
+    document.getElementById("gdTipoTarjeta").value = item.tipoTarjeta || "Débito";
+    document.getElementById("gdBancoTarjeta").value = item.bancoTarjeta || "";
+    actualizarCamposTarjetaGD();
+    document.getElementById("tab-gastosdiarios").scrollIntoView({behavior:"smooth", block:"start"});
+    mostrarMensajeGD("Datos precargados del mes anterior -- revisá el monto antes de guardar.", "warn");
+  }
+
+  var covGDFiltro = "todos";
+  function renderComprobadorCoberturaGD(){
+    var contEl = document.getElementById("covGDLista");
+    if(!contEl) return;
+    var anio = Number(document.getElementById("gdAnio").value);
+    var mes = Number(document.getElementById("gdMes").value);
+    if(!anio || !mes){ contEl.innerHTML = ""; return; }
+    var items = checklistCoberturaDiarios(anio, mes);
+    if(items.length === 0){
+      contEl.innerHTML = "<p class=\"hint\">No hay gastos diarios del mes anterior para comparar.</p>";
+      return;
+    }
+    var filtrados = items.filter(function(it){
+      if(covGDFiltro === "agregados") return it.yaAgregado;
+      if(covGDFiltro === "faltantes") return !it.yaAgregado;
+      return true;
+    });
+    if(filtrados.length === 0){
+      contEl.innerHTML = "<p class=\"hint\">Nada que mostrar con este filtro.</p>";
+      return;
+    }
+    contEl.innerHTML = filtrados.map(function(it, i){
+      if(it.yaAgregado){
+        return "<div class=\"list-row cov-ok\">" +
+          "<div class=\"list-row-main\">" +
+            "<span class=\"list-detalle\">✓ " + escapeHtml(it.detalle) + "</span>" +
+            "<span class=\"list-nombres\">" + escapeHtml(it.categoria) + "</span>" +
+          "</div>" +
+          "<div class=\"list-row-side\">" +
+            "<span class=\"list-monto\">" + money(it.montoEsteMes) + "</span>" +
+            (it.gastoIdEsteMes ? "<button type=\"button\" class=\"icon-btn\" data-covgdedit=\"" + it.gastoIdEsteMes + "\" title=\"Editar\">✎</button>" : "") +
+          "</div>" +
+        "</div>";
+      }
+      return "<div class=\"list-row cov-falta\">" +
+        "<div class=\"list-row-main\">" +
+          "<span class=\"list-detalle\">⚠ " + escapeHtml(it.detalle) + "</span>" +
+          "<span class=\"list-nombres\">" + escapeHtml(it.categoria) + "</span>" +
+        "</div>" +
+        "<div class=\"list-row-side\">" +
+          "<span class=\"list-monto\">" + money(it.montoMesAnterior) + "</span>" +
+          "<button type=\"button\" class=\"btn-ghost cov-agregar-btn\" data-covgdagregar=\"" + i + "\">Agregar igual que el mes pasado</button>" +
+        "</div>" +
+      "</div>";
+    }).join("");
+    contEl.querySelectorAll("[data-covgdedit]").forEach(function(b){
+      b.addEventListener("click", function(){ editarGastoDiarioForm(Number(b.dataset.covgdedit)); });
+    });
+    contEl.querySelectorAll("[data-covgdagregar]").forEach(function(b){
+      b.addEventListener("click", function(){ precargarDesdeCoberturaGD(filtrados[Number(b.dataset.covgdagregar)]); });
+    });
+  }
+  document.getElementById("covGDFiltros").addEventListener("click", function(ev){
+    var btn = ev.target.closest("[data-covgdf]");
+    if(!btn) return;
+    covGDFiltro = btn.dataset.covgdf;
+    document.querySelectorAll("#covGDFiltros .cov-filtro-btn").forEach(function(b){ b.classList.toggle("active", b === btn); });
+    renderComprobadorCoberturaGD();
+  });
 
   // ---------------------------------------------------------------- Panel Diario
   // Estadisticas de Gastos Diarios del mes elegido, reutilizando el mismo
@@ -4287,7 +4717,18 @@
     renderComprobadorCobertura: renderComprobadorCobertura,
     renderListaIngreso: renderListaIngreso,
     renderEstadoCuenta: renderEstadoCuenta,
-    exportarDb: function(){ return db.export(); }
+    exportarDb: function(){ return db.export(); },
+    generarPlanCuotas: generarPlanCuotas,
+    insertarGastoDiarioConCuotas: insertarGastoDiarioConCuotas,
+    dividirGastoDiario: dividirGastoDiario,
+    marcarPagadoRepartoGD: marcarPagadoRepartoGD,
+    repartoDeGastoDiario: repartoDeGastoDiario,
+    homologarNombrePersonaGD: homologarNombrePersonaGD,
+    checklistCoberturaDiarios: checklistCoberturaDiarios,
+    renderComprobadorCoberturaGD: renderComprobadorCoberturaGD,
+    renderListaGastosDiarios: renderListaGastosDiarios,
+    guardarGastoDiario: guardarGastoDiario,
+    editarGastoDiarioForm: editarGastoDiarioForm
   };
 
   // ---------------------------------------------------------------- arranque
