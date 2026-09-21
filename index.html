@@ -267,6 +267,12 @@
   table.data-table td.money{ text-align:right; color:var(--accent-strong); font-weight:700; }
   table.data-table td.center{ text-align:center; }
 
+  /* ---------------- "Cargar mes": fila que necesita revision (sin
+     asignar, o alerta de nombre perdido vs. el mes anterior) ---------- */
+  tr.cm-row-alerta{ box-shadow:inset 3px 0 0 var(--warn); }
+  tr.cm-row-alerta td{ background:color-mix(in srgb, var(--warn) 8%, transparent); }
+  .cm-alerta-txt{ font-size:.72rem; color:var(--warn); margin-top:4px; max-width:220px; }
+
   /* ---------------- checklist de pagos ---------------- */
   .checklist-item{
     display:flex; align-items:center; gap:10px; padding:10px 8px; border-top:1px solid var(--border); cursor:pointer;
@@ -352,7 +358,7 @@
   <section id="tab-cargarmes" class="tabpanel" hidden>
     <div class="card">
       <h2>Cargar mes</h2>
-      <p class="hint" style="margin:6px 0 10px;">Sube el PDF del estado de cuenta (Falabella/CMR o Líder). Se extraen los gastos automáticamente -- revisalos abajo, corregí lo que haga falta y confirmá para guardarlos.</p>
+      <p class="hint" style="margin:6px 0 10px;">Sube el PDF del estado de cuenta (Falabella/CMR o Líder) y/o la planilla "Deudas Adicionales.xlsx" con los gastos fijos del mes. Se extraen los gastos automáticamente de ambas fuentes -- revisalos juntos abajo, corregí lo que haga falta y confirmá para guardarlos.</p>
       <div class="form-grid">
         <div class="field small">
           <label>Tipo de PDF</label>
@@ -373,6 +379,10 @@
           <label>Archivo PDF</label>
           <input type="file" id="cmArchivo" accept="application/pdf">
         </div>
+        <div class="field grow">
+          <label>Subir Deudas Adicionales.xlsx</label>
+          <input type="file" id="cmArchivoDeudas" accept=".xlsx">
+        </div>
       </div>
       <div class="note" id="cmMensaje" hidden></div>
     </div>
@@ -382,14 +392,14 @@
         <h2>Gastos detectados (<span id="cmCantidad">0</span>)</h2>
         <button type="button" class="btn-ghost" id="cmAgregarFila">+ Agregar fila</button>
       </div>
-      <p class="hint" style="margin-bottom:10px;">Corregí fecha, detalle, monto o cuota si hace falta, escribí quién(es) pagan (separados por espacio) o borrá la fila si no corresponde cargarla.</p>
+      <p class="hint" style="margin-bottom:10px;">Corregí fecha, detalle, empresa, categoría, monto o cuota si hace falta, escribí quién(es) pagan (separados por espacio) o borrá la fila si no corresponde cargarla. Las filas marcadas en naranja necesitan revisión (sin nadie asignado, o alguien que aparecía el mes pasado y ya no).</p>
       <div class="table-wrap">
         <table class="data-table" id="cmTabla">
           <thead>
-            <tr><th>Fecha</th><th>Detalle</th><th>Monto</th><th>Cuota</th><th>Personas</th><th></th></tr>
+            <tr><th>Fecha</th><th>Detalle</th><th>Empresa</th><th>Categoría</th><th>Monto</th><th>Cuota</th><th>Personas</th><th></th></tr>
           </thead>
           <tbody id="cmTablaBody">
-            <tr><td colspan="6" class="hint" style="border-top:none;padding:14px 8px;">Sube un PDF arriba, o agregá una fila a mano con "+ Agregar fila".</td></tr>
+            <tr><td colspan="8" class="hint" style="border-top:none;padding:14px 8px;">Sube un PDF y/o el Excel de Deudas Adicionales arriba, o agregá una fila a mano con "+ Agregar fila".</td></tr>
           </tbody>
         </table>
       </div>
@@ -677,6 +687,7 @@
 
 <script src="vendor/sql-wasm.js"></script>
 <script src="vendor/pdf.min.js"></script>
+<script src="vendor/xlsx.full.min.js"></script>
 <script>
 (function(){
   "use strict";
@@ -1123,7 +1134,7 @@
     var empresa = document.getElementById("gEmpresa").value.trim() || detalle;
     var categoriaNombre = document.getElementById("gCategoria").value.trim();
     var monto = Number(document.getElementById("gMonto").value);
-    if(!monto || monto <= 0){ mostrarMensajeGasto("Escribe un monto mayor que 0.", "bad"); return; }
+    if(document.getElementById("gMonto").value.trim() === "" || isNaN(monto) || monto === 0){ mostrarMensajeGasto("Escribe un monto (puede ser negativo, ej. un descuento o abono, pero no puede estar vacío o en cero).", "bad"); return; }
     var cuotas = document.getElementById("gCuotas").value.trim() || "1";
     var nombres = nombresDesdeCampo();
     if(nombres.length === 0){ mostrarMensajeGasto("Escribe al menos una persona.", "bad"); return; }
@@ -1598,7 +1609,7 @@
     if(!detalle){ mostrarMensajeGD("Escribe un detalle (ej. Café, Colación).", "bad"); return; }
     var categoriaNombre = document.getElementById("gdCategoria").value.trim();
     var monto = Number(document.getElementById("gdMonto").value);
-    if(!monto || monto <= 0){ mostrarMensajeGD("Escribe un monto mayor que 0.", "bad"); return; }
+    if(document.getElementById("gdMonto").value.trim() === "" || isNaN(monto) || monto === 0){ mostrarMensajeGD("Escribe un monto (puede ser negativo, ej. un descuento o abono, pero no puede estar vacío o en cero).", "bad"); return; }
     var medioPago = document.getElementById("gdMedioPago").value;
     var tipoTarjeta = medioPago === "Tarjeta" ? document.getElementById("gdTipoTarjeta").value : null;
     var bancoTarjeta = medioPago === "Tarjeta" ? (document.getElementById("gdBancoTarjeta").value.trim() || null) : null;
@@ -1989,6 +2000,163 @@
     return extraerLineasPdfConClave(bytes).then(parseLiderLineas);
   }
 
+  // ---------------------------------------------------------------- Cargar mes: parser "Deudas Adicionales.xlsx"
+  // Traduccion directa de app/importers/deudas_adicionales.py -- mismas 14
+  // columnas (encabezados en fila 1, datos desde fila 2): mes_adeudado,
+  // fecha_compra, descripcion, titular, monto, cuotas, valor_cuota,
+  // valor_unitario, nombre, detalle, empresa, (3 columnas sin usar). Se
+  // usa SheetJS (vendor/xlsx.full.min.js) solo para leer las celdas -- el
+  // parseo tolerante de fechas/montos/cuotas es el mismo criterio del
+  // importador de escritorio, a mano, para no depender de que SheetJS
+  // adivine el tipo de cada celda igual que openpyxl.
+
+  var EXCEL_EPOCH_UTC_MS = Date.UTC(1899, 11, 30); // mismo epoch que openpyxl/Excel (1899-12-30)
+
+  function parsearFechaDeuda(valor){
+    if(valor instanceof Date && !isNaN(valor.getTime())){
+      return valor.getFullYear() + "-" + String(valor.getMonth()+1).padStart(2,"0") + "-" + String(valor.getDate()).padStart(2,"0");
+    }
+    if(typeof valor === "number" && isFinite(valor)){
+      var d = new Date(EXCEL_EPOCH_UTC_MS + Math.round(valor) * 86400000);
+      return d.getUTCFullYear() + "-" + String(d.getUTCMonth()+1).padStart(2,"0") + "-" + String(d.getUTCDate()).padStart(2,"0");
+    }
+    if(valor !== null && valor !== undefined && String(valor).trim() !== ""){
+      var texto = String(valor).trim();
+      var m = texto.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);          // dd/mm/aaaa
+      if(m) return m[3] + "-" + m[2] + "-" + m[1];
+      m = texto.match(/^(\d{4})-(\d{2})-(\d{2})$/);                 // aaaa-mm-dd
+      if(m) return m[1] + "-" + m[2] + "-" + m[3];
+      m = texto.match(/^(\d{2})-(\d{2})-(\d{4})$/);                 // dd-mm-aaaa
+      if(m) return m[3] + "-" + m[2] + "-" + m[1];
+    }
+    return null;
+  }
+
+  function parsearMontoDeuda(valor){
+    if(valor === null || valor === undefined || valor === "") return null;
+    if(typeof valor === "number") return isFinite(valor) ? valor : null;
+    var texto = String(valor).trim().replace(/\./g, "").replace(",", ".");
+    if(texto === "") return null;
+    var n = parseFloat(texto);
+    return isFinite(n) ? n : null;
+  }
+
+  // Version minima de domain/installment.py:parse_cuota -- aca solo hace
+  // falta el texto (la tabla de revision, igual que el flujo de PDF, solo
+  // muestra/guarda cuota_texto tal cual vino, sin recalcular cuota
+  // actual/total).
+  function parsearCuotaTextoDeuda(valor){
+    if(valor === null || valor === undefined || valor === "") return "";
+    return String(valor).trim();
+  }
+
+  // Filas crudas: array de arrays (SheetJS header:1), YA sin la fila de
+  // encabezados (range:1 al leer). fila 1 = encabezados => filaExcel = idx+2.
+  function leerDeudasAdicionalesDesdeFilas(filasCrudas){
+    var avisos = [];
+    var items = [];
+    filasCrudas.forEach(function(row, idx){
+      var filaExcel = idx + 2;
+      row = row || [];
+      var col = function(i){ return i < row.length ? row[i] : null; };
+      var fechaCompraRaw = col(1), descripcion = col(2), montoRaw = col(4),
+          cuotasRaw = col(5), valorCuotaRaw = col(6), valorUnitarioRaw = col(7),
+          nombreRaw = col(8), detalleRaw = col(9), empresaRaw = col(10);
+
+      var descripcionVacia = descripcion === null || descripcion === undefined || String(descripcion).trim() === "";
+      var valorUnitarioVacio = valorUnitarioRaw === null || valorUnitarioRaw === undefined || String(valorUnitarioRaw).trim() === "";
+      if(descripcionVacia && valorUnitarioVacio) return; // fila vacia de relleno
+
+      var fechaISO = parsearFechaDeuda(fechaCompraRaw);
+      if(!fechaISO){
+        avisos.push("Fila " + filaExcel + ": no se pudo interpretar la fecha, se omite la fila.");
+        return;
+      }
+
+      var monto = parsearMontoDeuda(montoRaw);
+      var valorCuota = parsearMontoDeuda(valorCuotaRaw);
+      var valorUnitario = parsearMontoDeuda(valorUnitarioRaw);
+      if(monto === null || valorUnitario === null){
+        avisos.push("Fila " + filaExcel + ": sin Monto o Valor unitario, se omite.");
+        return;
+      }
+      var nombre = String(nombreRaw == null ? "" : nombreRaw).trim();
+      if(!nombre){
+        avisos.push("Fila " + filaExcel + ": sin Nombre asignado (" + (descripcion || "sin descripción") + "), revisar a mano.");
+      }
+
+      items.push({
+        fechaCompra: fechaISO,
+        descripcion: String(descripcion == null ? "" : descripcion).trim(),
+        monto: monto,
+        cuotaTexto: parsearCuotaTextoDeuda(cuotasRaw),
+        valorCuota: valorCuota !== null ? valorCuota : monto,
+        valorUnitario: valorUnitario,
+        nombre: nombre,
+        detalle: String(detalleRaw == null ? "" : detalleRaw).trim(),
+        empresa: String(empresaRaw == null ? "" : empresaRaw).trim(),
+        filaExcel: filaExcel,
+      });
+    });
+    return {items: items, avisos: avisos};
+  }
+
+  // Mismo mes anterior que usa domain/recurring_check.py via mes_anterior()
+  // del escritorio: diciembre -> enero cambia de anio.
+  function mesAnteriorDe(anio, mes){
+    return mes === 1 ? {anio: anio - 1, mes: 12} : {anio: anio, mes: mes - 1};
+  }
+
+  // Nombres que pagaron un gasto con el MISMO detalle en un mes/anio dado,
+  // ya guardado en la base local -- usado para la alerta de "nombre
+  // perdido" (ver calcularAlertaPersonas).
+  function nombresPorDetalleMes(detalle, anio, mes){
+    if(!detalle) return [];
+    var rows = dbAll(
+      "SELECT DISTINCT p.nombre AS nombre FROM gasto_persona gp " +
+      "JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
+      "WHERE g.detalle = ? COLLATE NOCASE AND g.anio=? AND g.mes=?",
+      [detalle, anio, mes]
+    );
+    return rows.map(function(r){ return r.nombre; });
+  }
+
+  // Traduce los items ya parseados de Deudas Adicionales al mismo formato
+  // de fila que usa la tabla de revision de "Cargar mes" (cmFilasActuales).
+  // Regla clave (domain: import_service.py linea ~250): si una celda
+  // "Nombre" trae VARIOS nombres separados por espacio, CADA UNO recibe el
+  // mismo valor_unitario como monto individual -- no se divide entre
+  // ellos, se replica -- por eso se arma "repartoExplicito" aparte en vez
+  // de dejar que el reparto en partes iguales de siempre lo divida.
+  function construirFilasDesdeDeudasAdicionales(items){
+    return items.map(function(item){
+      var nombres = item.nombre ? item.nombre.split(/\s+/).filter(Boolean) : [];
+      var repartoExplicito = null;
+      if(nombres.length){
+        repartoExplicito = {};
+        nombres.forEach(function(n){ repartoExplicito[n] = item.valorUnitario; });
+      }
+      var detalleFinal = item.detalle || item.descripcion || "";
+      var d = new Date(item.fechaCompra + "T00:00:00");
+      var prev = mesAnteriorDe(d.getFullYear(), d.getMonth() + 1);
+      var nombresMesAnteriorList = nombres.length ? nombresPorDetalleMes(detalleFinal, prev.anio, prev.mes) : [];
+      var categoriaSugerida = sugerirCategoriaPara(detalleFinal) || "Otros";
+
+      return {
+        fecha: item.fechaCompra,
+        detalle: detalleFinal,
+        empresa: item.empresa,
+        categoria: categoriaSugerida,
+        monto: item.monto,
+        cuota: item.cuotaTexto || "1",
+        personas: nombres.join(" "),
+        repartoExplicito: repartoExplicito,
+        origen: "IMPORTADO_DEUDAS_ADICIONALES",
+        nombresMesAnteriorList: nombresMesAnteriorList,
+      };
+    });
+  }
+
   // ---------------------------------------------------------------- Cargar mes: UI de revision + confirmacion
 
   var cmFilasActuales = [];
@@ -2000,19 +2168,54 @@
     el.textContent = texto;
   }
 
+  // Lee del DOM los campos editables, pero conserva los campos que la
+  // fila ya traia y que no tienen input propio (repartoExplicito, origen,
+  // nombresMesAnteriorList -- vienen de Deudas Adicionales) fusionando por
+  // indice: cada <tr data-idx> corresponde 1 a 1 con cmFilasActuales[idx]
+  // en el momento de llamar esta funcion, porque renderTablaCargarMes
+  // siempre redibuja la tabla completa a partir de cmFilasActuales justo
+  // despues de cualquier cambio estructural (agregar/borrar fila, cargar
+  // un archivo nuevo).
   function sincronizarFilasCargarMesDesdeDOM(){
     var trs = document.querySelectorAll("#cmTablaBody tr[data-idx]");
     var nuevas = [];
-    trs.forEach(function(tr){
-      nuevas.push({
+    trs.forEach(function(tr, i){
+      var base = cmFilasActuales[i] || {};
+      nuevas.push(Object.assign({}, base, {
         fecha: tr.querySelector(".cm-fecha").value,
         detalle: tr.querySelector(".cm-detalle").value,
+        empresa: tr.querySelector(".cm-empresa").value,
+        categoria: tr.querySelector(".cm-categoria").value,
         monto: Number(tr.querySelector(".cm-monto").value) || 0,
         cuota: tr.querySelector(".cm-cuota").value,
         personas: tr.querySelector(".cm-personas").value,
-      });
+      }));
     });
     cmFilasActuales = nuevas;
+  }
+
+  // Misma regla que domain/recurring_check.py:detectar_nombres_perdidos --
+  // si el set de nombres ACTUAL de la fila es subconjunto ESTRICTO del set
+  // de nombres que pagaron el mismo Detalle el mes anterior, es una alerta
+  // (no bloquea, solo avisa). Sin nombres asignados es "sin asignar", una
+  // alerta distinta y mas urgente (esa si bloquea "Confirmar e importar",
+  // ver validacion mas abajo). Se recalcula a partir del texto ACTUAL del
+  // campo Personas (no de un flag guardado en el parseo) para que la
+  // alerta se actualice sola si el usuario corrige el nombre a mano.
+  function calcularAlertaPersonas(personasTexto, nombresMesAnteriorList){
+    var actuales = String(personasTexto || "").split(/\s+/).filter(Boolean);
+    if(actuales.length === 0) return {texto: "⚠ sin asignar -- revisar manualmente"};
+    if(nombresMesAnteriorList && nombresMesAnteriorList.length){
+      var actualesLower = actuales.map(function(n){ return n.toLowerCase(); });
+      var prevLower = nombresMesAnteriorList.map(function(n){ return n.toLowerCase(); });
+      var esSubconjuntoEstricto = actualesLower.length < prevLower.length &&
+        actualesLower.every(function(n){ return prevLower.indexOf(n) !== -1; });
+      if(esSubconjuntoEstricto){
+        var perdidos = nombresMesAnteriorList.filter(function(n){ return actualesLower.indexOf(n.toLowerCase()) === -1; });
+        return {texto: "⚠ el mes pasado también aparecía: " + perdidos.join(", ")};
+      }
+    }
+    return null;
   }
 
   function actualizarTotalesCargarMes(){
@@ -2026,18 +2229,23 @@
   function renderTablaCargarMes(){
     var tbody = document.getElementById("cmTablaBody");
     if(cmFilasActuales.length === 0){
-      tbody.innerHTML = "<tr><td colspan=\"6\" class=\"hint\" style=\"border-top:none;padding:14px 8px;\">Sube un PDF arriba, o agregá una fila a mano con \"+ Agregar fila\".</td></tr>";
+      tbody.innerHTML = "<tr><td colspan=\"8\" class=\"hint\" style=\"border-top:none;padding:14px 8px;\">Sube un PDF y/o el Excel de Deudas Adicionales arriba, o agregá una fila a mano con \"+ Agregar fila\".</td></tr>";
       document.getElementById("cmCantidad").textContent = "0";
       document.getElementById("cmTotales").innerHTML = "";
       return;
     }
     tbody.innerHTML = cmFilasActuales.map(function(f, i){
-      return "<tr data-idx=\"" + i + "\">" +
+      var alerta = calcularAlertaPersonas(f.personas, f.nombresMesAnteriorList);
+      return "<tr data-idx=\"" + i + "\"" + (alerta ? " class=\"cm-row-alerta\"" : "") + ">" +
         "<td><input type=\"date\" class=\"cm-fecha\" value=\"" + escapeHtml(f.fecha) + "\"></td>" +
         "<td><input type=\"text\" class=\"cm-detalle\" value=\"" + escapeHtml(f.detalle) + "\"></td>" +
+        "<td><input type=\"text\" class=\"cm-empresa\" list=\"empresasList\" value=\"" + escapeHtml(f.empresa || "") + "\" style=\"width:120px;\"></td>" +
+        "<td><input type=\"text\" class=\"cm-categoria\" list=\"categoriasList\" value=\"" + escapeHtml(f.categoria || "") + "\" style=\"width:120px;\"></td>" +
         "<td><input type=\"number\" step=\"1\" class=\"cm-monto\" value=\"" + Math.round(f.monto) + "\" style=\"width:110px;\"></td>" +
         "<td><input type=\"text\" class=\"cm-cuota\" value=\"" + escapeHtml(f.cuota) + "\" style=\"width:70px;\"></td>" +
-        "<td><input type=\"text\" class=\"cm-personas\" list=\"personasList\" value=\"" + escapeHtml(f.personas || "") + "\" placeholder=\"nombres\" style=\"width:150px;\"></td>" +
+        "<td><input type=\"text\" class=\"cm-personas\" list=\"personasList\" value=\"" + escapeHtml(f.personas || "") + "\" placeholder=\"nombres\" style=\"width:150px;\">" +
+          (alerta ? "<div class=\"cm-alerta-txt\">" + escapeHtml(alerta.texto) + "</div>" : "") +
+        "</td>" +
         "<td><button type=\"button\" class=\"icon-btn danger\" data-cmdel=\"" + i + "\" title=\"Borrar fila\">✕</button></td>" +
       "</tr>";
     }).join("");
@@ -2050,6 +2258,25 @@
     });
     tbody.querySelectorAll("input").forEach(function(inp){
       inp.addEventListener("input", actualizarTotalesCargarMes);
+    });
+    // Alerta reactiva: al tocar "Personas" a mano, se recalcula sin
+    // redibujar toda la tabla (evita perder el foco/cursor del input).
+    tbody.querySelectorAll(".cm-personas").forEach(function(inp){
+      inp.addEventListener("input", function(){
+        var tr = inp.closest("tr");
+        var idx = Number(tr.dataset.idx);
+        var f = cmFilasActuales[idx] || {};
+        var alerta = calcularAlertaPersonas(inp.value, f.nombresMesAnteriorList);
+        var div = tr.querySelector(".cm-alerta-txt");
+        if(alerta){
+          if(!div){ div = document.createElement("div"); div.className = "cm-alerta-txt"; inp.parentNode.appendChild(div); }
+          div.textContent = alerta.texto;
+          tr.classList.add("cm-row-alerta");
+        }else{
+          if(div) div.remove();
+          tr.classList.remove("cm-row-alerta");
+        }
+      });
     });
     actualizarTotalesCargarMes();
   }
@@ -2078,16 +2305,59 @@
     reader.readAsArrayBuffer(file);
   }
 
+  function procesarExcelDeudasCargarMes(file){
+    mostrarMensajeCargarMes("Leyendo Deudas Adicionales.xlsx...", "warn");
+    if(typeof XLSX === "undefined"){
+      mostrarMensajeCargarMes("No se pudo cargar el lector de Excel (vendor/xlsx.full.min.js).", "bad");
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function(){
+      try{
+        var bytes = new Uint8Array(reader.result);
+        var wb = XLSX.read(bytes, {type: "array", cellDates: true});
+        var ws = wb.Sheets[wb.SheetNames[0]];
+        // header:1 -> filas como array de valores (no objetos por encabezado,
+        // que rompe si dos columnas repiten nombre); range:1 -> arranca en la
+        // fila 2 (la 1, indice 0, son los encabezados).
+        var filasCrudas = XLSX.utils.sheet_to_json(ws, {header: 1, range: 1, raw: true, defval: null});
+        var resultado = leerDeudasAdicionalesDesdeFilas(filasCrudas);
+        var filasNuevas = construirFilasDesdeDeudasAdicionales(resultado.items);
+
+        sincronizarFilasCargarMesDesdeDOM();
+        cmFilasActuales = cmFilasActuales.concat(filasNuevas);
+        renderTablaCargarMes();
+
+        var msg = filasNuevas.length === 0
+          ? "No se detectó ningún gasto en el Excel -- revisa que sea el archivo correcto."
+          : "Se detectaron " + filasNuevas.length + " gastos en Deudas Adicionales. Revisalos abajo antes de confirmar.";
+        if(resultado.avisos.length){
+          msg += " " + resultado.avisos.slice(0, 4).join(" ") + (resultado.avisos.length > 4 ? " (y " + (resultado.avisos.length - 4) + " avisos más)" : "");
+        }
+        mostrarMensajeCargarMes(msg, resultado.avisos.length ? "warn" : "ok");
+      }catch(e){
+        mostrarMensajeCargarMes("No se pudo leer el Excel: " + (e && e.message ? e.message : e), "bad");
+      }
+    };
+    reader.onerror = function(){ mostrarMensajeCargarMes("No se pudo leer el archivo elegido.", "bad"); };
+    reader.readAsArrayBuffer(file);
+  }
+
   document.getElementById("cmArchivo").addEventListener("change", function(ev){
     var file = ev.target.files[0];
     if(file) procesarPdfCargarMes(file);
+  });
+
+  document.getElementById("cmArchivoDeudas").addEventListener("change", function(ev){
+    var file = ev.target.files[0];
+    if(file) procesarExcelDeudasCargarMes(file);
   });
 
   document.getElementById("cmAgregarFila").addEventListener("click", function(){
     sincronizarFilasCargarMesDesdeDOM();
     var mes = Number(document.getElementById("cmMes").value) || (new Date().getMonth() + 1);
     var anio = Number(document.getElementById("cmAnio").value) || new Date().getFullYear();
-    cmFilasActuales.push({fecha: anio + "-" + String(mes).padStart(2, "0") + "-01", detalle: "", monto: 0, cuota: "1", personas: ""});
+    cmFilasActuales.push({fecha: anio + "-" + String(mes).padStart(2, "0") + "-01", detalle: "", empresa: "", categoria: "", monto: 0, cuota: "1", personas: ""});
     renderTablaCargarMes();
   });
 
@@ -2095,6 +2365,7 @@
     if(cmFilasActuales.length && !confirm("¿Descartar todas las filas detectadas/agregadas? No se guarda nada.")) return;
     cmFilasActuales = [];
     document.getElementById("cmArchivo").value = "";
+    document.getElementById("cmArchivoDeudas").value = "";
     document.getElementById("cmMensaje").hidden = true;
     document.getElementById("cmMensajeConfirmar").hidden = true;
     renderTablaCargarMes();
@@ -2111,7 +2382,7 @@
     cmFilasActuales.forEach(function(f, i){
       if(!f.fecha) errores.push("Fila " + (i + 1) + ": falta la fecha.");
       if(!f.detalle || !f.detalle.trim()) errores.push("Fila " + (i + 1) + ": falta el detalle.");
-      if(!f.monto || f.monto <= 0) errores.push("Fila " + (i + 1) + ": el monto debe ser mayor que 0.");
+      if(f.monto === null || f.monto === undefined || f.monto === "" || isNaN(f.monto) || f.monto === 0) errores.push("Fila " + (i + 1) + ": falta el monto (puede ser negativo, ej. un descuento o abono, pero no puede estar vacío o en cero).");
       var nombres = (f.personas || "").split(/\s+/).filter(Boolean);
       if(nombres.length === 0) errores.push("Fila " + (i + 1) + ": falta asignar al menos una persona.");
     });
@@ -2125,11 +2396,41 @@
     try{
       cmFilasActuales.forEach(function(f){
         var nombres = f.personas.split(/\s+/).filter(Boolean);
-        var base = Math.floor(f.monto / nombres.length);
-        var resto = Math.round(f.monto - base * nombres.length);
         var reparto = {};
-        nombres.forEach(function(n, i){ reparto[n] = base + (i < resto ? 1 : 0); });
-        insertarGastoConReparto(f.fecha, f.detalle.trim(), f.detalle.trim(), "", f.monto, f.cuota || "1", reparto, "IMPORTADO_PDF");
+        // Filas de Deudas Adicionales con varios nombres en una celda
+        // (ej. "Ana Beto") traen un reparto EXPLICITO: cada nombre recibe
+        // el mismo valor_unitario tal cual, no se divide el monto entre
+        // ellos (ver construirFilasDesdeDeudasAdicionales). Ese reparto
+        // solo se usa si los nombres actuales del campo Personas siguen
+        // siendo exactamente los mismos que trajo el Excel -- si el
+        // usuario corrigio/agrego/saco un nombre a mano, se recae en el
+        // reparto en partes iguales de siempre (mismo criterio que el PDF).
+        var explicito = f.repartoExplicito;
+        var explicitoAplica = false;
+        if(explicito){
+          var clavesExplicito = Object.keys(explicito);
+          explicitoAplica = clavesExplicito.length === nombres.length && nombres.every(function(n){
+            return clavesExplicito.some(function(k){ return k.toLowerCase() === n.toLowerCase(); });
+          });
+        }
+        if(explicitoAplica){
+          nombres.forEach(function(n){
+            var clave = Object.keys(explicito).filter(function(k){ return k.toLowerCase() === n.toLowerCase(); })[0];
+            reparto[n] = explicito[clave];
+          });
+        }else{
+          var base = Math.floor(f.monto / nombres.length);
+          var resto = Math.round(f.monto - base * nombres.length);
+          nombres.forEach(function(n, i){ reparto[n] = base + (i < resto ? 1 : 0); });
+        }
+        // empresa: si la fila no trae una explicita (caso del PDF, que no
+        // distingue empresa de detalle), se mantiene el comportamiento de
+        // siempre -- se repite el detalle. categoria: solo se guarda si la
+        // fila trae una (Deudas Adicionales trae la sugerida); el PDF sigue
+        // quedando sin categoria, igual que antes, para categorizar despues.
+        var empresaFinal = (f.empresa && String(f.empresa).trim()) ? String(f.empresa).trim() : f.detalle.trim();
+        var categoriaFinal = f.categoria ? String(f.categoria).trim() : "";
+        insertarGastoConReparto(f.fecha, f.detalle.trim(), empresaFinal, categoriaFinal, f.monto, f.cuota || "1", reparto, f.origen || "IMPORTADO_PDF");
       });
       db.run("COMMIT");
     }catch(e){
@@ -2142,6 +2443,7 @@
     var n = cmFilasActuales.length;
     cmFilasActuales = [];
     document.getElementById("cmArchivo").value = "";
+    document.getElementById("cmArchivoDeudas").value = "";
     document.getElementById("cmMensaje").hidden = true;
     renderTablaCargarMes();
     msgEl.hidden = false; msgEl.className = "note ok"; msgEl.textContent = "Se importaron " + n + " gastos correctamente.";
