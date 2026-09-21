@@ -1,0 +1,1320 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Gastos Familiares</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%233fa9f5'/%3E%3Ctext x='50' y='68' font-size='60' text-anchor='middle' fill='%231e1e1e' font-family='Segoe UI, sans-serif'%3E$%3C/text%3E%3C/svg%3E">
+<style>
+  /* Paleta oscura (modo por defecto): misma paleta que usa la app de
+     escritorio (ver family_expenses/app/gui/theme.py) -- esta web es
+     "dark-mode-first", igual que la app de escritorio (que no tiene modo
+     claro). El modo claro es una derivacion razonable, pensada para quien
+     prefiera pantalla clara, no el diseno principal. */
+  :root{
+    --bg:#1e1e1e;
+    --surface:#252526;
+    --surface-2:#2b2c2d;
+    --surface-3:#343536;
+    --border:#3d3d3f;
+    --text:#ffffff;
+    --text-dim:#b8b8b8;
+    --accent:#3fa9f5;
+    --accent-strong:#3fa9f5;
+    --accent-ink:#08202f;
+    --ok:#3fcf8e;
+    --ok-ink:#042318;
+    --bad:#e5484d;
+    --bad-ink:#2a0708;
+    --warn:#f5a623;
+    --warn-ink:#2a1900;
+  }
+  /* Modo claro: se activa si el sistema prefiere claro (y no se eligio modo
+     oscuro a mano con el boton de tema), o al elegirlo a mano. Mismo acento
+     azul que el modo oscuro (--accent); --accent-strong se oscurece un poco
+     solo para que el texto/numeros en azul se lean bien sobre fondo claro. */
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --bg:#f4f6f8;
+      --surface:#ffffff;
+      --surface-2:#eef1f5;
+      --surface-3:#e3e8ed;
+      --border:#d7dee4;
+      --text:#1c1e21;
+      --text-dim:#5b6570;
+      --accent:#3fa9f5;
+      --accent-strong:#1d7ec9;
+      --accent-ink:#ffffff;
+      --ok:#1f9d64;
+      --ok-ink:#ffffff;
+      --bad:#c8323a;
+      --bad-ink:#ffffff;
+      --warn:#a8660a;
+      --warn-ink:#ffffff;
+    }
+  }
+  /* boton de tema: fuerza un modo aunque el sistema prefiera el otro */
+  :root[data-theme="light"]{
+    --bg:#f4f6f8;
+    --surface:#ffffff;
+    --surface-2:#eef1f5;
+    --surface-3:#e3e8ed;
+    --border:#d7dee4;
+    --text:#1c1e21;
+    --text-dim:#5b6570;
+    --accent:#3fa9f5;
+    --accent-strong:#1d7ec9;
+    --accent-ink:#ffffff;
+    --ok:#1f9d64;
+    --ok-ink:#ffffff;
+    --bad:#c8323a;
+    --bad-ink:#ffffff;
+    --warn:#a8660a;
+    --warn-ink:#ffffff;
+  }
+  :root[data-theme="dark"]{
+    --bg:#1e1e1e;
+    --surface:#252526;
+    --surface-2:#2b2c2d;
+    --surface-3:#343536;
+    --border:#3d3d3f;
+    --text:#ffffff;
+    --text-dim:#b8b8b8;
+    --accent:#3fa9f5;
+    --accent-strong:#3fa9f5;
+    --accent-ink:#08202f;
+    --ok:#3fcf8e;
+    --ok-ink:#042318;
+    --bad:#e5484d;
+    --bad-ink:#2a0708;
+    --warn:#f5a623;
+    --warn-ink:#2a1900;
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,"Noto Sans",Arial,sans-serif;
+    -webkit-tap-highlight-color:transparent;
+    padding-bottom:56px;
+    transition:background-color .2s ease, color .2s ease;
+  }
+  h1,h2,h3{ margin:0; }
+  p{ margin:0; }
+  .wrap{ max-width:920px; margin:0 auto; padding-inline:16px; }
+  .hint{ font-size:.82rem; color:var(--text-dim); }
+
+  /* ---------------- header ---------------- */
+  header{
+    position:sticky; top:0; z-index:15;
+    background:var(--bg);
+    border-bottom:1px solid var(--border);
+    padding-block:10px 8px;
+  }
+  .brand-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+  .brand{ display:flex; align-items:center; gap:8px; }
+  .brand-logo{ font-size:1.3rem; }
+  .brand h1{ font-size:1.2rem; }
+  .brand-right{ display:flex; align-items:center; gap:8px; }
+  .theme-btn{
+    background:var(--surface-2); border:1px solid var(--border); color:var(--text);
+    width:32px; height:32px; border-radius:999px; font-size:.95rem; cursor:pointer;
+    display:flex; align-items:center; justify-content:center; flex:none;
+  }
+  .data-tools{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+
+  /* ---------------- botones ---------------- */
+  button{ font-family:inherit; }
+  .btn-primary, .btn-ghost, .btn-danger{
+    border-radius:8px; padding:9px 14px; font-size:.88rem; font-weight:600; cursor:pointer; border:1px solid transparent;
+  }
+  .btn-primary{ background:var(--accent); color:var(--accent-ink); }
+  .btn-primary:hover{ filter:brightness(1.06); }
+  .btn-ghost{ background:var(--surface-2); border-color:var(--border); color:var(--text-dim); }
+  .btn-ghost:hover{ border-color:var(--accent); color:var(--text); }
+  .btn-danger{ background:var(--bad); color:var(--bad-ink); }
+  .btn-danger:hover{ filter:brightness(1.08); }
+
+  /* ---------------- navegacion de pestanas ---------------- */
+  nav.tabs{
+    display:flex; gap:6px; overflow-x:auto; padding-block:10px;
+    -ms-overflow-style:none; scrollbar-width:thin;
+  }
+  .tab-btn{
+    flex:none; background:var(--surface-2); border:1px solid var(--border); color:var(--text-dim);
+    padding:8px 14px; border-radius:999px; font-size:.85rem; font-weight:600; cursor:pointer; white-space:nowrap;
+  }
+  .tab-btn.active{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+  .tab-btn .dot-construccion{ opacity:.7; margin-left:2px; }
+
+  main{ padding-top:6px; }
+  .tabpanel[hidden]{ display:none; }
+
+  /* ---------------- tarjetas ---------------- */
+  .card{
+    background:var(--surface); border:1px solid var(--border); border-radius:14px;
+    padding:16px; margin-bottom:16px;
+  }
+  .sec-head-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
+  .card h2{ font-size:1.05rem; }
+  .card > p.hint{ margin-bottom:10px; }
+
+  /* ---------------- formularios ---------------- */
+  .form-grid{ display:flex; flex-wrap:wrap; gap:12px; margin-bottom:10px; }
+  .field{ display:flex; flex-direction:column; gap:4px; flex:1 1 150px; }
+  .field.grow{ flex:2 1 220px; }
+  .field.small{ flex:0 1 110px; }
+  .field label{ font-size:.7rem; color:var(--text-dim); text-transform:uppercase; letter-spacing:.5px; }
+  input[type=text], input[type=number], input[type=date], input[type=file], select{
+    background:var(--surface-2); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:9px 10px; font-size:.92rem; width:100%; font-variant-numeric:tabular-nums;
+  }
+  input:focus, select:focus{ outline:2px solid var(--accent); outline-offset:1px; }
+  .checkbox-line{ display:flex; align-items:center; gap:8px; font-size:.85rem; color:var(--text-dim); margin:6px 0 10px; cursor:pointer; }
+  .checkbox-line input{ width:16px; height:16px; }
+  .form-actions{ display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; margin-top:6px; }
+
+  .reparto-box{ background:var(--surface-2); border:1px dashed var(--border); border-radius:10px; padding:10px; margin-bottom:10px; }
+  .reparto-row{ display:flex; align-items:center; gap:10px; padding:5px 2px; }
+  .reparto-nombre{ flex:1; font-size:.9rem; }
+  .reparto-monto{ width:110px; }
+
+  .note{ font-size:.82rem; padding:8px 10px; border-radius:8px; background:var(--surface-2); margin-top:4px; }
+  .note.ok{ color:var(--ok); }
+  .note.bad{ color:var(--bad); }
+  .note.warn{ color:var(--warn); }
+
+  /* ---------------- listas de gastos ---------------- */
+  .list-row{
+    display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;
+    padding:10px 8px; border-top:1px solid var(--border);
+  }
+  .list-row:first-child{ border-top:none; }
+  .list-row-main{ display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; flex:1 1 220px; }
+  .list-fecha{ color:var(--text-dim); font-size:.8rem; font-variant-numeric:tabular-nums; }
+  .list-detalle{ font-weight:600; }
+  .list-nombres{ color:var(--text-dim); font-size:.82rem; }
+  .list-row-side{ display:flex; align-items:center; gap:6px; }
+  .list-monto{ font-weight:700; color:var(--accent-strong); font-variant-numeric:tabular-nums; }
+  .icon-btn{
+    background:var(--surface-2); border:1px solid var(--border); color:var(--text-dim);
+    width:30px; height:30px; border-radius:7px; cursor:pointer; font-size:.9rem;
+  }
+  .icon-btn:hover{ color:var(--text); border-color:var(--accent); }
+  .icon-btn.danger:hover{ color:var(--bad); border-color:var(--bad); }
+  .totals-line{ margin-top:10px; padding-top:10px; border-top:1px solid var(--border); font-size:.85rem; color:var(--text-dim); }
+  .totals-line b{ color:var(--text); }
+  #ingBuscar, #chkPersona, #ecPersona{ margin-bottom:10px; }
+
+  /* ---------------- kpis / stat cards ---------------- */
+  .stat-bar{ display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; margin-bottom:14px; }
+  .stat{ background:var(--surface-2); border:1px solid var(--border); border-radius:10px; padding:10px 12px; }
+  .stat .k{ font-size:.68rem; text-transform:uppercase; letter-spacing:1px; color:var(--text-dim); }
+  .stat .v{ font-size:1.25rem; font-weight:700; color:var(--accent-strong); font-variant-numeric:tabular-nums; }
+
+  /* ---------------- graficos de barra (css puro) ---------------- */
+  .bar-chart{ display:flex; flex-direction:column; gap:12px; }
+  .bar-row{ display:flex; flex-direction:column; gap:4px; }
+  .bar-head{ display:flex; justify-content:space-between; gap:10px; align-items:baseline; }
+  .bar-label{ font-size:.85rem; font-weight:600; overflow-wrap:anywhere; }
+  .bar-value{ font-size:.82rem; font-weight:700; color:var(--accent-strong); white-space:nowrap; flex:none; font-variant-numeric:tabular-nums; }
+  .bar-track{ background:var(--surface-2); border-radius:6px; height:16px; overflow:hidden; }
+  .bar-fill{ height:100%; border-radius:6px; background:var(--accent); }
+  .charts-grid{ display:flex; flex-wrap:wrap; gap:16px; margin-bottom:14px; }
+  .charts-grid .chart-box{ flex:1 1 260px; }
+  .chart-box h3{ font-size:.85rem; color:var(--text-dim); margin-bottom:8px; font-weight:600; }
+
+  /* ---------------- personas expandibles (resumen mensual) ---------------- */
+  .person-row{ border:1px solid var(--border); border-radius:10px; margin-bottom:8px; overflow:hidden; }
+  .person-row-head{
+    display:flex; align-items:center; gap:8px; padding:10px 12px; cursor:pointer; background:var(--surface-2);
+  }
+  .person-row-head:hover{ background:var(--surface-3); }
+  .person-toggle{ color:var(--text-dim); flex:none; }
+  .person-nombre{ flex:1; font-weight:600; }
+  .person-total{ font-weight:700; color:var(--accent-strong); font-variant-numeric:tabular-nums; }
+  .person-detail{ padding:8px 10px; }
+
+  /* ---------------- tablas ---------------- */
+  .table-wrap{ overflow-x:auto; }
+  table.data-table{ width:100%; border-collapse:collapse; font-size:.86rem; }
+  table.data-table th{
+    text-align:left; font-size:.66rem; text-transform:uppercase; letter-spacing:.5px; color:var(--text-dim);
+    padding:6px 8px; border-bottom:1px solid var(--border);
+  }
+  table.data-table td{ padding:7px 8px; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; }
+  table.data-table td.money{ text-align:right; color:var(--accent-strong); font-weight:700; }
+  table.data-table td.center{ text-align:center; }
+
+  /* ---------------- checklist de pagos ---------------- */
+  .checklist-item{
+    display:flex; align-items:center; gap:10px; padding:10px 8px; border-top:1px solid var(--border); cursor:pointer;
+  }
+  .checklist-item:first-child{ border-top:none; }
+  .checklist-item input{ width:18px; height:18px; flex:none; }
+  .checklist-detalle{ flex:1; }
+  .checklist-monto{ font-weight:700; color:var(--accent-strong); font-variant-numeric:tabular-nums; }
+
+  /* ---------------- pantallas "en construccion" ---------------- */
+  .placeholder-card{ text-align:center; padding:34px 20px; }
+  .placeholder-icon{ font-size:2.2rem; margin-bottom:10px; }
+  .placeholder-card h2{ margin-bottom:8px; }
+  .placeholder-card p{ max-width:440px; margin:0 auto 8px; color:var(--text-dim); font-size:.9rem; }
+
+  /* ---------------- pantalla de carga inicial ---------------- */
+  .loading-screen{
+    position:fixed; inset:0; background:var(--bg); z-index:50;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .loading-screen[hidden]{ display:none; }
+  .loading-box{ text-align:center; color:var(--text-dim); }
+  .spinner{
+    width:34px; height:34px; border-radius:50%; margin:0 auto 12px;
+    border:3px solid var(--surface-3); border-top-color:var(--accent);
+    animation:spin 0.8s linear infinite;
+  }
+  @keyframes spin{ to{ transform:rotate(360deg); } }
+
+  /* ---------------- aviso de error (la app se autoreporta) ---------------- */
+  #fatalBanner{
+    background:var(--bad); color:var(--bad-ink); padding:10px 16px; font-size:.85rem;
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+  }
+  #fatalBanner[hidden]{ display:none; }
+  #fatalBanner button{ background:transparent; border:1px solid var(--bad-ink); color:var(--bad-ink); border-radius:6px; padding:2px 8px; cursor:pointer; flex:none; }
+
+  footer{ text-align:center; color:var(--text-dim); font-size:.76rem; padding:20px 16px 0; }
+</style>
+</head>
+<body>
+
+<div id="fatalBanner" hidden role="alert">
+  <span id="fatalBannerText"></span>
+  <button type="button" id="fatalBannerClose">Cerrar</button>
+</div>
+
+<header>
+  <div class="wrap">
+    <div class="brand-row">
+      <div class="brand">
+        <span class="brand-logo">🏠</span>
+        <h1>Gastos Familiares</h1>
+      </div>
+      <div class="brand-right">
+        <button id="themeToggle" class="theme-btn" type="button" title="Cambiar tema">🌙</button>
+      </div>
+    </div>
+    <div class="data-tools">
+      <button id="btnExportar" class="btn-ghost" type="button">⬇ Descargar copia de la base</button>
+      <button id="btnImportarTrigger" class="btn-ghost" type="button">⬆ Restaurar desde un archivo</button>
+      <input type="file" id="inputImportar" accept=".sqlite,.db,.sqlite3" hidden>
+    </div>
+    <nav class="tabs" id="tabsNav">
+      <button class="tab-btn" type="button" data-tab="cargarmes">Cargar mes <span class="dot-construccion">🚧</span></button>
+      <button class="tab-btn" type="button" data-tab="ingreso">Ingreso Manual</button>
+      <button class="tab-btn" type="button" data-tab="resumen">Resumen Mensual</button>
+      <button class="tab-btn" type="button" data-tab="estadocuenta">Estado de Cuenta</button>
+      <button class="tab-btn" type="button" data-tab="categorizar">Categorizar <span class="dot-construccion">🚧</span></button>
+      <button class="tab-btn" type="button" data-tab="gastosdiarios">Gastos Diarios <span class="dot-construccion">🚧</span></button>
+      <button class="tab-btn" type="button" data-tab="paneldiario">Panel Diario <span class="dot-construccion">🚧</span></button>
+      <button class="tab-btn" type="button" data-tab="checklist">Checklist Pagos</button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- ======================= CARGAR MES (placeholder) ======================= -->
+  <section id="tab-cargarmes" class="tabpanel" hidden>
+    <div class="card placeholder-card">
+      <div class="placeholder-icon">🚧</div>
+      <h2>Cargar mes</h2>
+      <p>Esta sección se está construyendo. Acá vas a poder importar el estado de cuenta bancario en PDF (CMR Falabella) y las deudas adicionales del mes, revisar cada movimiento y confirmarlo, igual que en la app de escritorio.</p>
+      <p class="hint">Por ahora, carga los gastos del mes a mano desde la pestaña "Ingreso Manual".</p>
+    </div>
+  </section>
+
+  <!-- ======================= INGRESO MANUAL ======================= -->
+  <section id="tab-ingreso" class="tabpanel" hidden>
+    <div class="card">
+      <div class="sec-head-row">
+        <h2 id="formGastoTitulo">Agregar gasto</h2>
+      </div>
+      <div class="form-grid">
+        <div class="field small">
+          <label>Fecha</label>
+          <input type="date" id="gFecha">
+        </div>
+        <div class="field grow">
+          <label>Detalle</label>
+          <input type="text" id="gDetalle" list="detallesList" placeholder="Ej. Agua, Luz, Supermercado">
+        </div>
+        <div class="field grow">
+          <label>Empresa (opcional)</label>
+          <input type="text" id="gEmpresa" list="empresasList" placeholder="Ej. Aguas Andinas">
+        </div>
+        <div class="field">
+          <label>Categoría (opcional)</label>
+          <input type="text" id="gCategoria" list="categoriasList" placeholder="Ej. Servicios">
+        </div>
+        <div class="field small">
+          <label>Monto total</label>
+          <input type="number" id="gMonto" min="0" step="1" placeholder="0">
+        </div>
+        <div class="field small">
+          <label>Cuotas (ej. 1 o 3/12)</label>
+          <input type="text" id="gCuotas" value="1">
+        </div>
+        <div class="field grow">
+          <label>Personas (separadas por espacio)</label>
+          <input type="text" id="gPersonas" list="personasList" placeholder="Ej. Alejandro Pame">
+        </div>
+      </div>
+
+      <label class="checkbox-line">
+        <input type="checkbox" id="gRepartoManualChk">
+        Repartir montos distintos por persona (si no, se reparte en partes iguales)
+      </label>
+      <div class="reparto-box" id="gRepartoManualBox" hidden>
+        <div id="gRepartoRows"></div>
+        <div class="note" id="gRepartoResumen"></div>
+      </div>
+
+      <div class="form-actions">
+        <button type="button" class="btn-ghost" id="gCancelarEdicion" hidden>Cancelar edición</button>
+        <button type="button" class="btn-ghost" id="gLimpiar">Limpiar</button>
+        <button type="button" class="btn-primary" id="gGuardar">Agregar</button>
+      </div>
+      <div class="note" id="gMensaje" hidden></div>
+    </div>
+
+    <div class="card">
+      <div class="sec-head-row">
+        <h2>Gastos cargados</h2>
+        <div class="form-grid" style="margin:0;">
+          <div class="field small"><select id="ingMes"></select></div>
+          <div class="field small"><select id="ingAnio"></select></div>
+        </div>
+      </div>
+      <input type="text" id="ingBuscar" placeholder="Buscar... (ej. Agua, Nino)">
+      <div id="ingLista"></div>
+      <div class="totals-line" id="ingTotales"></div>
+    </div>
+  </section>
+
+  <!-- ======================= RESUMEN MENSUAL ======================= -->
+  <section id="tab-resumen" class="tabpanel" hidden>
+    <div class="card">
+      <div class="sec-head-row">
+        <h2>Resumen Mensual</h2>
+        <div class="form-grid" style="margin:0;">
+          <div class="field small"><select id="rsMes"></select></div>
+          <div class="field small"><select id="rsAnio"></select></div>
+        </div>
+      </div>
+      <div class="stat-bar">
+        <div class="stat"><div class="k">Total gastado</div><div class="v" id="rsTotal">$ 0</div></div>
+        <div class="stat"><div class="k">N. de movimientos</div><div class="v" id="rsMovs">0</div></div>
+        <div class="stat"><div class="k">Promedio por movimiento</div><div class="v" id="rsProm">$ 0</div></div>
+      </div>
+      <div class="charts-grid">
+        <div class="chart-box">
+          <h3>Total por persona</h3>
+          <div class="bar-chart" id="rsChartPersona"></div>
+        </div>
+        <div class="chart-box">
+          <h3>Distribución por categoría</h3>
+          <div class="bar-chart" id="rsChartCategoria"></div>
+        </div>
+      </div>
+      <h3 style="font-size:.85rem;color:var(--text-dim);margin-bottom:8px;">Cuánto se le cobra a cada persona (toca una fila para ver el detalle)</h3>
+      <div id="rsPersonasList"></div>
+    </div>
+  </section>
+
+  <!-- ======================= ESTADO DE CUENTA ======================= -->
+  <section id="tab-estadocuenta" class="tabpanel" hidden>
+    <div class="card">
+      <h2>Estado de Cuenta</h2>
+      <p class="hint" style="margin:6px 0 10px;">El detalle itemizado de lo que le corresponde pagar a una persona en un mes.</p>
+      <div class="form-grid">
+        <div class="field grow"><label>Persona</label><input type="text" id="ecPersona" list="personasList" placeholder="Nombre..."></div>
+        <div class="field small"><label>Mes</label><select id="ecMes"></select></div>
+        <div class="field small"><label>Año</label><select id="ecAnio"></select></div>
+      </div>
+      <div id="ecResultado"></div>
+    </div>
+  </section>
+
+  <!-- ======================= CATEGORIZAR (placeholder) ======================= -->
+  <section id="tab-categorizar" class="tabpanel" hidden>
+    <div class="card placeholder-card">
+      <div class="placeholder-icon">🚧</div>
+      <h2>Categorizar</h2>
+      <p>Esta sección se está construyendo. Acá vas a poder revisar y corregir a qué categoría pertenece cada gasto, con reglas automáticas según palabras clave del detalle.</p>
+      <p class="hint">Por ahora, puedes escribir la categoría directamente al cargar cada gasto en "Ingreso Manual".</p>
+    </div>
+  </section>
+
+  <!-- ======================= GASTOS DIARIOS (placeholder) ======================= -->
+  <section id="tab-gastosdiarios" class="tabpanel" hidden>
+    <div class="card placeholder-card">
+      <div class="placeholder-icon">🚧</div>
+      <h2>Gastos Diarios</h2>
+      <p>Esta sección se está construyendo. Va a ser un registro rápido del día a día (efectivo, colación, salidas chicas), separado del gasto familiar del mes, para ver en qué se te va la plata.</p>
+    </div>
+  </section>
+
+  <!-- ======================= PANEL DIARIO (placeholder) ======================= -->
+  <section id="tab-paneldiario" class="tabpanel" hidden>
+    <div class="card placeholder-card">
+      <div class="placeholder-icon">🚧</div>
+      <h2>Panel Diario</h2>
+      <p>Esta sección se está construyendo. Va a mostrar gráficos y estadísticas de los Gastos Diarios: cuánto es prescindible, por categoría, por medio de pago, etc.</p>
+    </div>
+  </section>
+
+  <!-- ======================= CHECKLIST PAGOS ======================= -->
+  <section id="tab-checklist" class="tabpanel" hidden>
+    <div class="card">
+      <h2>Checklist Pagos</h2>
+      <p class="hint" style="margin:6px 0 10px;">Marca lo que ya pagaste de tu bolsillo este mes -- es un tilde manual, independiente de si el gasto ya está cargado en el sistema.</p>
+      <div class="form-grid">
+        <div class="field grow"><label>Persona</label><input type="text" id="chkPersona" list="personasList" placeholder="Nombre..."></div>
+        <div class="field small"><label>Mes</label><select id="chkMes"></select></div>
+        <div class="field small"><label>Año</label><select id="chkAnio"></select></div>
+      </div>
+      <div class="note" id="chkResumen"></div>
+      <div id="chkLista"></div>
+    </div>
+  </section>
+
+</main>
+
+<datalist id="detallesList"></datalist>
+<datalist id="empresasList"></datalist>
+<datalist id="categoriasList"></datalist>
+<datalist id="personasList"></datalist>
+
+<footer class="wrap">
+  Los datos se guardan en este navegador (SQLite + IndexedDB), no en internet.
+  Descarga una copia de seguridad de vez en cuando (botón "Descargar copia de la base" arriba) para no perder nada si cambias de navegador o de equipo.
+</footer>
+
+<div class="loading-screen" id="appLoading">
+  <div class="loading-box">
+    <div class="spinner"></div>
+    <p>Cargando la base de datos local…</p>
+  </div>
+</div>
+
+<script src="vendor/sql-wasm.js"></script>
+<script>
+(function(){
+  "use strict";
+
+  var MESES_ES = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio",
+                   "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+
+  var SCHEMA_SQL = [
+    "CREATE TABLE IF NOT EXISTS personas (",
+    "  id INTEGER PRIMARY KEY,",
+    "  nombre TEXT NOT NULL COLLATE NOCASE UNIQUE",
+    ");",
+    "CREATE TABLE IF NOT EXISTS categorias (",
+    "  id INTEGER PRIMARY KEY,",
+    "  nombre TEXT NOT NULL COLLATE NOCASE UNIQUE",
+    ");",
+    "CREATE TABLE IF NOT EXISTS gastos (",
+    "  id INTEGER PRIMARY KEY,",
+    "  anio INTEGER NOT NULL,",
+    "  mes INTEGER NOT NULL CHECK (mes BETWEEN 1 AND 12),",
+    "  fecha TEXT NOT NULL,",
+    "  detalle TEXT NOT NULL,",
+    "  empresa TEXT,",
+    "  categoria_id INTEGER REFERENCES categorias(id),",
+    "  monto_total REAL NOT NULL,",
+    "  cuota_texto TEXT NOT NULL DEFAULT '1',",
+    "  origen TEXT NOT NULL DEFAULT 'MANUAL',",
+    "  created_at TEXT NOT NULL DEFAULT (datetime('now'))",
+    ");",
+    "CREATE TABLE IF NOT EXISTS gasto_persona (",
+    "  id INTEGER PRIMARY KEY,",
+    "  gasto_id INTEGER NOT NULL REFERENCES gastos(id) ON DELETE CASCADE,",
+    "  persona_id INTEGER NOT NULL REFERENCES personas(id),",
+    "  monto REAL NOT NULL,",
+    "  UNIQUE (gasto_id, persona_id)",
+    ");",
+    "CREATE TABLE IF NOT EXISTS checklist_pagos (",
+    "  id INTEGER PRIMARY KEY,",
+    "  persona TEXT NOT NULL,",
+    "  anio INTEGER NOT NULL,",
+    "  mes INTEGER NOT NULL,",
+    "  detalle TEXT NOT NULL,",
+    "  pagado INTEGER NOT NULL DEFAULT 0,",
+    "  actualizado_en TEXT NOT NULL DEFAULT (datetime('now')),",
+    "  UNIQUE (persona, anio, mes, detalle)",
+    ");",
+    "CREATE INDEX IF NOT EXISTS idx_gastos_anio_mes ON gastos(anio, mes);",
+    "CREATE INDEX IF NOT EXISTS idx_gasto_persona_gasto ON gasto_persona(gasto_id);",
+    "CREATE INDEX IF NOT EXISTS idx_gasto_persona_persona ON gasto_persona(persona_id);",
+    "CREATE INDEX IF NOT EXISTS idx_checklist_persona_mes ON checklist_pagos(persona, anio, mes);"
+  ].join("\n");
+
+  // ---------------------------------------------------------------- utiles
+
+  function escapeHtml(s){
+    return String(s==null ? "" : s).replace(/[&<>"']/g, function(c){
+      return {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c];
+    });
+  }
+  function money(n){
+    n = Number(n);
+    if(!isFinite(n)) n = 0;
+    return "$ " + Math.round(n).toLocaleString("es-CL");
+  }
+  function todayISO(){
+    var d = new Date();
+    var m = String(d.getMonth()+1).padStart(2,"0");
+    var day = String(d.getDate()).padStart(2,"0");
+    return d.getFullYear() + "-" + m + "-" + day;
+  }
+
+  function mostrarErrorFatal(msg){
+    var banner = document.getElementById("fatalBanner");
+    var text = document.getElementById("fatalBannerText");
+    text.textContent = "⚠ Ocurrió un problema: " + msg;
+    banner.hidden = false;
+    try{ console.error(msg); }catch(e){}
+  }
+  document.getElementById("fatalBannerClose").addEventListener("click", function(){
+    document.getElementById("fatalBanner").hidden = true;
+  });
+  window.addEventListener("error", function(ev){
+    mostrarErrorFatal((ev.error && ev.error.message) || ev.message || "Error desconocido. Revisa la consola del navegador (F12) para más detalle.");
+  });
+  window.addEventListener("unhandledrejection", function(ev){
+    var reason = ev.reason;
+    mostrarErrorFatal((reason && reason.message) || String(reason));
+  });
+
+  // ---------------------------------------------------------------- IndexedDB
+  // Guarda el binario completo de la base SQLite (sql.js) en IndexedDB, para
+  // que los datos persistan entre sesiones sin ningun servidor -- todo vive
+  // en este navegador. Patron estandar de sql.js: al abrir, se busca el
+  // binario guardado; si no hay, se crea una base nueva vacia.
+
+  var IDB_NAME = "family_expenses_store";
+  var IDB_STORE = "kv";
+  var IDB_KEY = "sqlite_db";
+
+  function idbOpen(){
+    return new Promise(function(resolve, reject){
+      if(!window.indexedDB){ reject(new Error("Este navegador no soporta IndexedDB.")); return; }
+      var req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = function(){ req.result.createObjectStore(IDB_STORE); };
+      req.onsuccess = function(){ resolve(req.result); };
+      req.onerror = function(){ reject(req.error); };
+    });
+  }
+  function idbGet(key){
+    return idbOpen().then(function(conn){
+      return new Promise(function(resolve, reject){
+        var tx = conn.transaction(IDB_STORE, "readonly");
+        var req = tx.objectStore(IDB_STORE).get(key);
+        req.onsuccess = function(){ resolve(req.result || null); };
+        req.onerror = function(){ reject(req.error); };
+      });
+    });
+  }
+  function idbSet(key, value){
+    return idbOpen().then(function(conn){
+      return new Promise(function(resolve, reject){
+        var tx = conn.transaction(IDB_STORE, "readwrite");
+        tx.objectStore(IDB_STORE).put(value, key);
+        tx.oncomplete = function(){ resolve(); };
+        tx.onerror = function(){ reject(tx.error); };
+      });
+    });
+  }
+
+  var saveTimer = null;
+  function scheduleSave(){
+    if(saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushSave, 350);
+  }
+  function flushSave(){
+    saveTimer = null;
+    try{
+      var bytes = db.export();
+      idbSet(IDB_KEY, bytes).catch(function(e){ mostrarErrorFatal("No se pudo guardar en IndexedDB: " + e.message); });
+    }catch(e){
+      mostrarErrorFatal("No se pudo exportar la base para guardarla: " + e.message);
+    }
+  }
+
+  // ---------------------------------------------------------------- sql.js
+
+  var SQL = null;
+  var db = null;
+
+  function dbAll(sql, params){
+    var stmt = db.prepare(sql);
+    if(params) stmt.bind(params);
+    var rows = [];
+    while(stmt.step()) rows.push(stmt.getAsObject());
+    stmt.free();
+    return rows;
+  }
+  function dbGet(sql, params){
+    var rows = dbAll(sql, params);
+    return rows.length ? rows[0] : null;
+  }
+  function dbRun(sql, params){
+    db.run(sql, params || []);
+    scheduleSave();
+  }
+  function lastId(){
+    return db.exec("SELECT last_insert_rowid() AS id")[0].values[0][0];
+  }
+
+  function obtenerOCrearPersona(nombre){
+    nombre = String(nombre||"").trim();
+    if(!nombre) return null;
+    var row = dbGet("SELECT id FROM personas WHERE nombre = ? COLLATE NOCASE", [nombre]);
+    if(row) return row.id;
+    dbRun("INSERT INTO personas (nombre) VALUES (?)", [nombre]);
+    return lastId();
+  }
+  function obtenerOCrearCategoria(nombre){
+    nombre = String(nombre||"").trim();
+    if(!nombre) return null;
+    var row = dbGet("SELECT id FROM categorias WHERE nombre = ? COLLATE NOCASE", [nombre]);
+    if(row) return row.id;
+    dbRun("INSERT INTO categorias (nombre) VALUES (?)", [nombre]);
+    return lastId();
+  }
+
+  // ---------------------------------------------------------------- tema
+
+  var themeToggle = document.getElementById("themeToggle");
+  function systemPrefersLight(){
+    return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
+  }
+  function temaActual(){
+    var attr = document.documentElement.getAttribute("data-theme");
+    if(attr) return attr;
+    return systemPrefersLight() ? "light" : "dark";
+  }
+  function aplicarTema(theme){
+    document.documentElement.setAttribute("data-theme", theme);
+    themeToggle.textContent = theme==="dark" ? "☀️" : "🌙";
+    themeToggle.title = theme==="dark" ? "Cambiar a modo claro" : "Cambiar a modo oscuro";
+    try{ localStorage.setItem("gf_themePref", theme); }catch(e){}
+  }
+  var temaGuardado = null;
+  try{ temaGuardado = localStorage.getItem("gf_themePref"); }catch(e){}
+  aplicarTema(temaGuardado || temaActual());
+  themeToggle.addEventListener("click", function(){
+    aplicarTema(temaActual()==="dark" ? "light" : "dark");
+  });
+
+  // ---------------------------------------------------------------- pestanas
+
+  var TAB_IDS = ["cargarmes","ingreso","resumen","estadocuenta","categorizar","gastosdiarios","paneldiario","checklist"];
+  function activarTab(id){
+    if(TAB_IDS.indexOf(id) === -1) id = "ingreso";
+    document.querySelectorAll(".tabpanel").forEach(function(p){ p.hidden = (p.id !== "tab-" + id); });
+    document.querySelectorAll(".tab-btn").forEach(function(b){ b.classList.toggle("active", b.dataset.tab === id); });
+    try{ localStorage.setItem("gf_lastTab", id); }catch(e){}
+    if(id==="ingreso") renderListaIngreso();
+    if(id==="resumen") renderResumen();
+    if(id==="estadocuenta") renderEstadoCuenta();
+    if(id==="checklist") renderChecklist();
+  }
+  document.querySelectorAll(".tab-btn").forEach(function(btn){
+    btn.addEventListener("click", function(){ activarTab(btn.dataset.tab); });
+  });
+
+  // ---------------------------------------------------------------- datalists
+
+  function setDatalist(id, values){
+    document.getElementById(id).innerHTML = values.map(function(v){
+      return "<option value=\"" + escapeHtml(v) + "\">";
+    }).join("");
+  }
+  function refrescarDatalists(){
+    setDatalist("detallesList", dbAll("SELECT DISTINCT detalle FROM gastos ORDER BY detalle").map(function(r){ return r.detalle; }));
+    setDatalist("empresasList", dbAll("SELECT DISTINCT empresa FROM gastos WHERE empresa IS NOT NULL AND empresa<>'' ORDER BY empresa").map(function(r){ return r.empresa; }));
+    setDatalist("categoriasList", dbAll("SELECT nombre FROM categorias ORDER BY nombre").map(function(r){ return r.nombre; }));
+    setDatalist("personasList", dbAll("SELECT nombre FROM personas ORDER BY nombre").map(function(r){ return r.nombre; }));
+  }
+
+  // ---------------------------------------------------------------- selectores de periodo
+
+  var PERIODO_SELECTS = [["ingMes","ingAnio"],["rsMes","rsAnio"],["ecMes","ecAnio"],["chkMes","chkAnio"]];
+
+  function poblarSelectMes(select){
+    var actual = select.value;
+    select.innerHTML = MESES_ES.slice(1).map(function(m, i){ return "<option value=\"" + (i+1) + "\">" + m + "</option>"; }).join("");
+    if(actual) select.value = actual;
+  }
+  function poblarSelectAnio(select){
+    var actual = select.value;
+    var anios = dbAll("SELECT DISTINCT anio FROM gastos ORDER BY anio DESC").map(function(r){ return r.anio; });
+    var hoyAnio = new Date().getFullYear();
+    if(anios.indexOf(hoyAnio) === -1) anios.push(hoyAnio);
+    anios.sort(function(a,b){ return b-a; });
+    select.innerHTML = anios.map(function(a){ return "<option value=\"" + a + "\">" + a + "</option>"; }).join("");
+    if(actual) select.value = actual;
+  }
+  function refrescarSelectoresPeriodo(){
+    PERIODO_SELECTS.forEach(function(par){
+      poblarSelectMes(document.getElementById(par[0]));
+      poblarSelectAnio(document.getElementById(par[1]));
+    });
+  }
+  function inicializarPeriodoADiaDeHoy(){
+    var hoy = new Date();
+    PERIODO_SELECTS.forEach(function(par){
+      document.getElementById(par[0]).value = String(hoy.getMonth()+1);
+      document.getElementById(par[1]).value = String(hoy.getFullYear());
+    });
+  }
+
+  // ---------------------------------------------------------------- reparto (division del monto entre personas)
+
+  var editingGastoId = null;
+  var repartoManualValores = {}; // nombreLower -> monto
+
+  function nombresDesdeCampo(){
+    var raw = document.getElementById("gPersonas").value;
+    var vistos = {};
+    var out = [];
+    raw.split(/\s+/).forEach(function(n){
+      n = n.trim();
+      if(!n) return;
+      var k = n.toLowerCase();
+      if(vistos[k]) return;
+      vistos[k] = true;
+      out.push(n);
+    });
+    return out;
+  }
+
+  function actualizarCajaReparto(){
+    var checked = document.getElementById("gRepartoManualChk").checked;
+    var box = document.getElementById("gRepartoManualBox");
+    box.hidden = !checked;
+    if(!checked) return;
+    var nombres = nombresDesdeCampo();
+    var monto = Number(document.getElementById("gMonto").value) || 0;
+    var rowsEl = document.getElementById("gRepartoRows");
+    if(nombres.length === 0){
+      rowsEl.innerHTML = "<p class=\"hint\">Escribe al menos un nombre en \"Personas\" primero.</p>";
+      document.getElementById("gRepartoResumen").textContent = "";
+      return;
+    }
+    nombres.forEach(function(n){
+      var key = n.toLowerCase();
+      if(!(key in repartoManualValores)) repartoManualValores[key] = Math.round(monto / nombres.length);
+    });
+    rowsEl.innerHTML = nombres.map(function(n){
+      var key = n.toLowerCase();
+      return "<div class=\"reparto-row\" data-key=\"" + escapeHtml(key) + "\">" +
+        "<span class=\"reparto-nombre\">" + escapeHtml(n) + "</span>" +
+        "<input type=\"number\" step=\"1\" class=\"reparto-monto\" value=\"" + repartoManualValores[key] + "\">" +
+        "</div>";
+    }).join("");
+    rowsEl.querySelectorAll(".reparto-row").forEach(function(row){
+      var key = row.dataset.key;
+      row.querySelector(".reparto-monto").addEventListener("input", function(){
+        repartoManualValores[key] = Number(this.value) || 0;
+        actualizarResumenReparto(nombres, monto);
+      });
+    });
+    actualizarResumenReparto(nombres, monto);
+  }
+  function actualizarResumenReparto(nombres, monto){
+    var suma = nombres.reduce(function(acc, n){ return acc + (repartoManualValores[n.toLowerCase()] || 0); }, 0);
+    var resto = Math.round(monto - suma);
+    var el = document.getElementById("gRepartoResumen");
+    if(Math.abs(resto) < 1){
+      el.className = "note ok"; el.textContent = "Cuadra con el monto total.";
+    }else if(resto > 0){
+      el.className = "note warn"; el.textContent = "Falta asignar " + money(resto) + ".";
+    }else{
+      el.className = "note bad"; el.textContent = "Asignaste " + money(-resto) + " de más.";
+    }
+  }
+  document.getElementById("gPersonas").addEventListener("input", function(){
+    if(document.getElementById("gRepartoManualChk").checked) actualizarCajaReparto();
+  });
+  document.getElementById("gMonto").addEventListener("input", function(){
+    if(document.getElementById("gRepartoManualChk").checked) actualizarCajaReparto();
+  });
+  document.getElementById("gRepartoManualChk").addEventListener("change", function(){
+    repartoManualValores = {};
+    actualizarCajaReparto();
+  });
+
+  // ---------------------------------------------------------------- Ingreso Manual: guardar / editar / borrar
+
+  function mostrarMensajeGasto(texto, tipo){
+    var el = document.getElementById("gMensaje");
+    el.hidden = false;
+    el.className = "note " + tipo;
+    el.textContent = texto;
+  }
+
+  function limpiarFormularioGasto(){
+    editingGastoId = null;
+    document.getElementById("gFecha").value = todayISO();
+    document.getElementById("gDetalle").value = "";
+    document.getElementById("gEmpresa").value = "";
+    document.getElementById("gCategoria").value = "";
+    document.getElementById("gMonto").value = "";
+    document.getElementById("gCuotas").value = "1";
+    document.getElementById("gPersonas").value = "";
+    document.getElementById("gRepartoManualChk").checked = false;
+    repartoManualValores = {};
+    actualizarCajaReparto();
+    document.getElementById("formGastoTitulo").textContent = "Agregar gasto";
+    document.getElementById("gGuardar").textContent = "Agregar";
+    document.getElementById("gCancelarEdicion").hidden = true;
+    document.getElementById("gMensaje").hidden = true;
+  }
+
+  function guardarGasto(){
+    var fecha = document.getElementById("gFecha").value;
+    if(!fecha){ mostrarMensajeGasto("Elige una fecha.", "bad"); return; }
+    var detalle = document.getElementById("gDetalle").value.trim();
+    if(!detalle){ mostrarMensajeGasto("Escribe un detalle (ej. Agua, Luz).", "bad"); return; }
+    var empresa = document.getElementById("gEmpresa").value.trim() || detalle;
+    var categoriaNombre = document.getElementById("gCategoria").value.trim();
+    var monto = Number(document.getElementById("gMonto").value);
+    if(!monto || monto <= 0){ mostrarMensajeGasto("Escribe un monto mayor que 0.", "bad"); return; }
+    var cuotas = document.getElementById("gCuotas").value.trim() || "1";
+    var nombres = nombresDesdeCampo();
+    if(nombres.length === 0){ mostrarMensajeGasto("Escribe al menos una persona.", "bad"); return; }
+
+    var reparto = {};
+    var manual = document.getElementById("gRepartoManualChk").checked;
+    if(manual){
+      var suma = 0;
+      nombres.forEach(function(n){ suma += repartoManualValores[n.toLowerCase()] || 0; });
+      if(Math.abs(monto - suma) > 1){
+        mostrarMensajeGasto("El reparto manual no cuadra con el monto total -- ajusta los montos de cada persona.", "bad");
+        return;
+      }
+      nombres.forEach(function(n){ reparto[n] = repartoManualValores[n.toLowerCase()] || 0; });
+    }else{
+      var base = Math.floor(monto / nombres.length);
+      var resto = Math.round(monto - base * nombres.length);
+      nombres.forEach(function(n, i){ reparto[n] = base + (i < resto ? 1 : 0); });
+    }
+
+    var d = new Date(fecha + "T00:00:00");
+    var anio = d.getFullYear();
+    var mes = d.getMonth() + 1;
+    var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
+    var idAntes = editingGastoId;
+
+    db.run("BEGIN");
+    try{
+      var gastoId;
+      if(idAntes){
+        db.run("UPDATE gastos SET anio=?, mes=?, fecha=?, detalle=?, empresa=?, categoria_id=?, monto_total=?, cuota_texto=? WHERE id=?",
+          [anio, mes, fecha, detalle, empresa, categoriaId, monto, cuotas, idAntes]);
+        db.run("DELETE FROM gasto_persona WHERE gasto_id=?", [idAntes]);
+        gastoId = idAntes;
+      }else{
+        db.run("INSERT INTO gastos (anio, mes, fecha, detalle, empresa, categoria_id, monto_total, cuota_texto, origen) VALUES (?,?,?,?,?,?,?,?,'MANUAL')",
+          [anio, mes, fecha, detalle, empresa, categoriaId, monto, cuotas]);
+        gastoId = lastId();
+      }
+      Object.keys(reparto).forEach(function(nombre){
+        var personaId = obtenerOCrearPersona(nombre);
+        db.run("INSERT INTO gasto_persona (gasto_id, persona_id, monto) VALUES (?,?,?)", [gastoId, personaId, reparto[nombre]]);
+      });
+      db.run("COMMIT");
+    }catch(e){
+      db.run("ROLLBACK");
+      throw e;
+    }
+    scheduleSave();
+
+    // deja "Ingreso Manual" mirando el mismo periodo del gasto recien
+    // guardado -- se fija ANTES de refrescarSelectoresPeriodo() para que
+    // esa funcion (que preserva el valor actual del <select> al repoblar
+    // las opciones) conserve este periodo en vez del que hubiera antes.
+    document.getElementById("ingMes").value = String(mes);
+    document.getElementById("ingAnio").value = String(anio);
+    limpiarFormularioGasto();
+    refrescarDatalists();
+    refrescarSelectoresPeriodo();
+    renderListaIngreso();
+    renderResumen();
+    renderEstadoCuenta();
+    renderChecklist();
+    mostrarMensajeGasto(idAntes ? "Gasto actualizado." : "Gasto agregado.", "ok");
+  }
+
+  function editarGasto(id){
+    var g = dbGet("SELECT * FROM gastos WHERE id=?", [id]);
+    if(!g) return;
+    editingGastoId = id;
+    document.getElementById("gFecha").value = g.fecha;
+    document.getElementById("gDetalle").value = g.detalle;
+    document.getElementById("gEmpresa").value = g.empresa || "";
+    var cat = g.categoria_id ? dbGet("SELECT nombre FROM categorias WHERE id=?", [g.categoria_id]) : null;
+    document.getElementById("gCategoria").value = cat ? cat.nombre : "";
+    document.getElementById("gMonto").value = g.monto_total;
+    document.getElementById("gCuotas").value = g.cuota_texto || "1";
+    var reparto = dbAll(
+      "SELECT p.nombre AS nombre, gp.monto AS monto FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id WHERE gp.gasto_id=?",
+      [id]
+    );
+    document.getElementById("gPersonas").value = reparto.map(function(r){ return r.nombre; }).join(" ");
+    repartoManualValores = {};
+    reparto.forEach(function(r){ repartoManualValores[r.nombre.toLowerCase()] = r.monto; });
+    document.getElementById("gRepartoManualChk").checked = true;
+    actualizarCajaReparto();
+    document.getElementById("formGastoTitulo").textContent = "Editar gasto";
+    document.getElementById("gGuardar").textContent = "Guardar cambios";
+    document.getElementById("gCancelarEdicion").hidden = false;
+    document.getElementById("gMensaje").hidden = true;
+    document.getElementById("tab-ingreso").scrollIntoView({behavior:"smooth", block:"start"});
+  }
+
+  function borrarGasto(id){
+    if(!confirm("¿Borrar este gasto? Esta acción no se puede deshacer.")) return;
+    dbRun("DELETE FROM gastos WHERE id=?", [id]);
+    refrescarDatalists();
+    renderListaIngreso();
+    renderResumen();
+    renderEstadoCuenta();
+    renderChecklist();
+  }
+
+  document.getElementById("gGuardar").addEventListener("click", guardarGasto);
+  document.getElementById("gLimpiar").addEventListener("click", limpiarFormularioGasto);
+  document.getElementById("gCancelarEdicion").addEventListener("click", limpiarFormularioGasto);
+
+  function renderListaIngreso(){
+    var anio = Number(document.getElementById("ingAnio").value);
+    var mes = Number(document.getElementById("ingMes").value);
+    var busqueda = document.getElementById("ingBuscar").value.trim().toLowerCase();
+    var filas = dbAll(
+      "SELECT g.*, (SELECT GROUP_CONCAT(p.nombre, ', ') FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id WHERE gp.gasto_id=g.id) AS nombres " +
+      "FROM gastos g WHERE g.anio=? AND g.mes=? ORDER BY g.fecha DESC, g.id DESC",
+      [anio, mes]
+    );
+    if(busqueda){
+      filas = filas.filter(function(f){
+        return (f.detalle||"").toLowerCase().indexOf(busqueda) >= 0 ||
+               (f.empresa||"").toLowerCase().indexOf(busqueda) >= 0 ||
+               (f.nombres||"").toLowerCase().indexOf(busqueda) >= 0;
+      });
+    }
+    var cont = document.getElementById("ingLista");
+    if(filas.length === 0){
+      cont.innerHTML = "<p class=\"hint\">No hay gastos cargados para este período.</p>";
+    }else{
+      cont.innerHTML = filas.map(function(f){
+        return "<div class=\"list-row\">" +
+          "<div class=\"list-row-main\">" +
+            "<span class=\"list-fecha\">" + f.fecha + "</span>" +
+            "<span class=\"list-detalle\">" + escapeHtml(f.detalle) + "</span>" +
+            "<span class=\"list-nombres\">" + escapeHtml(f.nombres || "(sin nombre)") + "</span>" +
+          "</div>" +
+          "<div class=\"list-row-side\">" +
+            "<span class=\"list-monto\">" + money(f.monto_total) + "</span>" +
+            "<button class=\"icon-btn\" data-edit=\"" + f.id + "\" title=\"Editar\">✎</button>" +
+            "<button class=\"icon-btn danger\" data-del=\"" + f.id + "\" title=\"Borrar\">✕</button>" +
+          "</div>" +
+        "</div>";
+      }).join("");
+    }
+    var total = filas.reduce(function(a, f){ return a + f.monto_total; }, 0);
+    document.getElementById("ingTotales").innerHTML = "Gastos: <b>" + filas.length + "</b> · Total: <b>" + money(total) + "</b>";
+    cont.querySelectorAll("[data-edit]").forEach(function(b){ b.addEventListener("click", function(){ editarGasto(Number(b.dataset.edit)); }); });
+    cont.querySelectorAll("[data-del]").forEach(function(b){ b.addEventListener("click", function(){ borrarGasto(Number(b.dataset.del)); }); });
+  }
+  document.getElementById("ingMes").addEventListener("change", renderListaIngreso);
+  document.getElementById("ingAnio").addEventListener("change", renderListaIngreso);
+  document.getElementById("ingBuscar").addEventListener("input", renderListaIngreso);
+
+  // ---------------------------------------------------------------- graficos de barra (html/css puro)
+
+  var PALETA = ["#3fa9f5","#3fcf8e","#f5a623","#e5484d","#9b7fe8","#5ac8c8","#e88fd0","#c9d14a"];
+  function renderBarChart(containerId, items, multicolor){
+    var wrap = document.getElementById(containerId);
+    var conValor = items.filter(function(it){ return it.value > 0; });
+    if(conValor.length === 0){ wrap.innerHTML = "<p class=\"hint\">Sin datos para graficar.</p>"; return; }
+    conValor.sort(function(a,b){ return b.value - a.value; });
+    var max = conValor[0].value;
+    wrap.innerHTML = conValor.map(function(it, i){
+      var pct = max > 0 ? Math.max(4, Math.round(it.value / max * 100)) : 0;
+      var color = multicolor ? PALETA[i % PALETA.length] : "var(--accent)";
+      return "<div class=\"bar-row\">" +
+        "<div class=\"bar-head\"><span class=\"bar-label\">" + escapeHtml(it.label) + "</span><span class=\"bar-value\">" + money(it.value) + "</span></div>" +
+        "<div class=\"bar-track\"><div class=\"bar-fill\" style=\"width:" + pct + "%;background:" + color + "\"></div></div>" +
+      "</div>";
+    }).join("");
+  }
+
+  function renderTablaItems(items){
+    if(items.length === 0) return "<p class=\"hint\">Sin movimientos.</p>";
+    var filas = items.map(function(it){
+      return "<tr><td>" + it.fecha + "</td><td>" + escapeHtml(it.detalle) + "</td><td>" + escapeHtml(it.empresa||"") +
+        "</td><td class=\"center\">" + escapeHtml(it.cuota||"-") + "</td><td class=\"money\">" + money(it.monto) + "</td></tr>";
+    }).join("");
+    return "<div class=\"table-wrap\"><table class=\"data-table\"><thead><tr><th>Fecha</th><th>Detalle</th><th>Empresa</th><th>Cuota</th><th>Monto</th></tr></thead><tbody>" +
+      filas + "</tbody></table></div>";
+  }
+
+  // ---------------------------------------------------------------- Resumen Mensual
+
+  function renderResumen(){
+    var anio = Number(document.getElementById("rsAnio").value);
+    var mes = Number(document.getElementById("rsMes").value);
+    if(!anio || !mes) return;
+
+    var kp = dbGet("SELECT COUNT(*) AS n, COALESCE(SUM(monto_total),0) AS total FROM gastos WHERE anio=? AND mes=?", [anio, mes]);
+    document.getElementById("rsTotal").textContent = money(kp.total);
+    document.getElementById("rsMovs").textContent = kp.n;
+    document.getElementById("rsProm").textContent = money(kp.n ? kp.total / kp.n : 0);
+
+    var porPersona = dbAll(
+      "SELECT p.nombre AS nombre, SUM(gp.monto) AS total FROM gasto_persona gp " +
+      "JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
+      "WHERE g.anio=? AND g.mes=? GROUP BY p.nombre ORDER BY total DESC", [anio, mes]
+    );
+    renderBarChart("rsChartPersona", porPersona.map(function(r){ return {label:r.nombre, value:r.total}; }), false);
+
+    var porCategoria = dbAll(
+      "SELECT COALESCE(c.nombre,'Sin categoría') AS categoria, SUM(gp.monto) AS total FROM gasto_persona gp " +
+      "JOIN gastos g ON g.id=gp.gasto_id LEFT JOIN categorias c ON c.id=g.categoria_id " +
+      "WHERE g.anio=? AND g.mes=? GROUP BY categoria ORDER BY total DESC", [anio, mes]
+    );
+    renderBarChart("rsChartCategoria", porCategoria.map(function(r){ return {label:r.categoria, value:r.total}; }), true);
+
+    var cont = document.getElementById("rsPersonasList");
+    if(porPersona.length === 0){
+      cont.innerHTML = "<p class=\"hint\">Sin movimientos para este período.</p>";
+      return;
+    }
+    cont.innerHTML = porPersona.map(function(r){
+      return "<div class=\"person-row\" data-nombre=\"" + escapeHtml(r.nombre) + "\">" +
+        "<div class=\"person-row-head\">" +
+          "<span class=\"person-toggle\">▸</span><span class=\"person-nombre\">" + escapeHtml(r.nombre) + "</span>" +
+          "<span class=\"person-total\">" + money(r.total) + "</span>" +
+        "</div>" +
+        "<div class=\"person-detail\" hidden></div>" +
+      "</div>";
+    }).join("");
+    cont.querySelectorAll(".person-row-head").forEach(function(head){
+      head.addEventListener("click", function(){
+        var row = head.parentElement;
+        var detail = row.querySelector(".person-detail");
+        var toggle = row.querySelector(".person-toggle");
+        if(!detail.hidden){ detail.hidden = true; toggle.textContent = "▸"; return; }
+        var nombre = row.dataset.nombre;
+        var items = dbAll(
+          "SELECT g.fecha AS fecha, g.detalle AS detalle, g.empresa AS empresa, g.cuota_texto AS cuota, gp.monto AS monto " +
+          "FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
+          "WHERE p.nombre=? COLLATE NOCASE AND g.anio=? AND g.mes=? ORDER BY g.fecha", [nombre, anio, mes]
+        );
+        detail.innerHTML = renderTablaItems(items);
+        detail.hidden = false;
+        toggle.textContent = "▾";
+      });
+    });
+  }
+  document.getElementById("rsMes").addEventListener("change", renderResumen);
+  document.getElementById("rsAnio").addEventListener("change", renderResumen);
+
+  // ---------------------------------------------------------------- Estado de Cuenta
+
+  function renderEstadoCuenta(){
+    var nombre = document.getElementById("ecPersona").value.trim();
+    var anio = Number(document.getElementById("ecAnio").value);
+    var mes = Number(document.getElementById("ecMes").value);
+    var cont = document.getElementById("ecResultado");
+    if(!nombre || !anio || !mes){
+      cont.innerHTML = "<p class=\"hint\">Escribe o elige una persona para ver su estado de cuenta.</p>";
+      return;
+    }
+    var items = dbAll(
+      "SELECT g.fecha AS fecha, g.detalle AS detalle, g.empresa AS empresa, g.cuota_texto AS cuota, gp.monto AS monto " +
+      "FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
+      "WHERE p.nombre=? COLLATE NOCASE AND g.anio=? AND g.mes=? ORDER BY g.fecha", [nombre, anio, mes]
+    );
+    var total = items.reduce(function(a, it){ return a + it.monto; }, 0);
+    cont.innerHTML =
+      "<div class=\"stat-bar\">" +
+        "<div class=\"stat\"><div class=\"k\">Movimientos</div><div class=\"v\">" + items.length + "</div></div>" +
+        "<div class=\"stat\"><div class=\"k\">Total " + MESES_ES[mes] + " " + anio + "</div><div class=\"v\">" + money(total) + "</div></div>" +
+      "</div>" + renderTablaItems(items);
+  }
+  document.getElementById("ecPersona").addEventListener("input", renderEstadoCuenta);
+  document.getElementById("ecMes").addEventListener("change", renderEstadoCuenta);
+  document.getElementById("ecAnio").addEventListener("change", renderEstadoCuenta);
+
+  // ---------------------------------------------------------------- Checklist Pagos
+
+  function renderChecklist(){
+    var nombre = document.getElementById("chkPersona").value.trim();
+    var anio = Number(document.getElementById("chkAnio").value);
+    var mes = Number(document.getElementById("chkMes").value);
+    var cont = document.getElementById("chkLista");
+    var resumen = document.getElementById("chkResumen");
+    if(!nombre || !anio || !mes){
+      cont.innerHTML = "<p class=\"hint\">Elige una persona para ver su checklist.</p>";
+      resumen.textContent = "";
+      return;
+    }
+    var items = dbAll(
+      "SELECT g.detalle AS detalle, g.empresa AS empresa, gp.monto AS monto FROM gasto_persona gp " +
+      "JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
+      "WHERE p.nombre=? COLLATE NOCASE AND g.anio=? AND g.mes=? ORDER BY g.detalle", [nombre, anio, mes]
+    );
+    if(items.length === 0){
+      cont.innerHTML = "<p class=\"hint\">No hay gastos cargados para " + escapeHtml(nombre) + " en " + MESES_ES[mes] + " " + anio + ".</p>";
+      resumen.textContent = "";
+      return;
+    }
+    var estados = dbAll("SELECT detalle, pagado FROM checklist_pagos WHERE persona=? COLLATE NOCASE AND anio=? AND mes=?", [nombre, anio, mes]);
+    var estadoPorDetalle = {};
+    estados.forEach(function(e){ estadoPorDetalle[e.detalle] = !!e.pagado; });
+
+    var pagados = 0;
+    cont.innerHTML = items.map(function(it){
+      var pagado = !!estadoPorDetalle[it.detalle];
+      if(pagado) pagados++;
+      return "<label class=\"checklist-item\">" +
+        "<input type=\"checkbox\" data-detalle=\"" + escapeHtml(it.detalle) + "\" " + (pagado ? "checked" : "") + ">" +
+        "<span class=\"checklist-detalle\">" + escapeHtml(it.detalle) + (it.empresa && it.empresa !== it.detalle ? " <span class=\"hint\">(" + escapeHtml(it.empresa) + ")</span>" : "") + "</span>" +
+        "<span class=\"checklist-monto\">" + money(it.monto) + "</span>" +
+      "</label>";
+    }).join("");
+    resumen.textContent = pagados + " de " + items.length + " pagados.";
+    cont.querySelectorAll("input[type=checkbox]").forEach(function(cb){
+      cb.addEventListener("change", function(){
+        dbRun(
+          "INSERT INTO checklist_pagos (persona, anio, mes, detalle, pagado) VALUES (?,?,?,?,?) " +
+          "ON CONFLICT(persona,anio,mes,detalle) DO UPDATE SET pagado=excluded.pagado, actualizado_en=datetime('now')",
+          [nombre, anio, mes, cb.dataset.detalle, cb.checked ? 1 : 0]
+        );
+        renderChecklist();
+      });
+    });
+  }
+  document.getElementById("chkPersona").addEventListener("input", renderChecklist);
+  document.getElementById("chkMes").addEventListener("change", renderChecklist);
+  document.getElementById("chkAnio").addEventListener("change", renderChecklist);
+
+  // ---------------------------------------------------------------- respaldo / restauracion
+
+  document.getElementById("btnExportar").addEventListener("click", function(){
+    try{
+      var bytes = db.export();
+      var blob = new Blob([bytes], {type:"application/x-sqlite3"});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = "gastos-familiares-" + todayISO() + ".sqlite";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+    }catch(e){
+      mostrarErrorFatal("No se pudo generar la copia de seguridad: " + e.message);
+    }
+  });
+  document.getElementById("btnImportarTrigger").addEventListener("click", function(){
+    document.getElementById("inputImportar").click();
+  });
+  document.getElementById("inputImportar").addEventListener("change", function(ev){
+    var file = ev.target.files[0];
+    if(!file){ return; }
+    if(!confirm("Esto reemplaza TODOS los datos actuales por los del archivo elegido. ¿Continuar?")){
+      ev.target.value = "";
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function(){
+      try{
+        var bytes = new Uint8Array(reader.result);
+        var nuevaDb = new SQL.Database(bytes);
+        nuevaDb.run("PRAGMA foreign_keys = ON");
+        nuevaDb.run(SCHEMA_SQL);
+        db = nuevaDb;
+        scheduleSave();
+        refrescarTodo();
+        alert("Datos restaurados correctamente.");
+      }catch(err){
+        mostrarErrorFatal("No se pudo leer el archivo como una base de datos válida: " + err.message);
+      }
+      ev.target.value = "";
+    };
+    reader.onerror = function(){ mostrarErrorFatal("No se pudo leer el archivo elegido."); };
+    reader.readAsArrayBuffer(file);
+  });
+
+  // ---------------------------------------------------------------- arranque
+
+  function refrescarTodo(){
+    refrescarDatalists();
+    refrescarSelectoresPeriodo();
+    renderListaIngreso();
+    renderResumen();
+    renderEstadoCuenta();
+    renderChecklist();
+  }
+
+  function boot(){
+    limpiarFormularioGasto();
+    refrescarSelectoresPeriodo();
+    inicializarPeriodoADiaDeHoy();
+    refrescarTodo();
+
+    var lastTab = null;
+    try{ lastTab = localStorage.getItem("gf_lastTab"); }catch(e){}
+    activarTab(lastTab || "ingreso");
+
+    document.getElementById("appLoading").hidden = true;
+  }
+
+  if(typeof initSqlJs !== "function"){
+    mostrarErrorFatal("No se pudo cargar el motor de base de datos (vendor/sql-wasm.js). Verifica que la carpeta 'vendor' esté junto a este archivo.");
+  }else{
+    initSqlJs({ locateFile: function(file){ return "vendor/" + file; } }).then(function(SQLNS){
+      SQL = SQLNS;
+      return idbGet(IDB_KEY);
+    }).then(function(saved){
+      if(saved){
+        db = new SQL.Database(new Uint8Array(saved));
+      }else{
+        db = new SQL.Database();
+      }
+      db.run("PRAGMA foreign_keys = ON");
+      db.run(SCHEMA_SQL);
+      scheduleSave();
+      boot();
+    }).catch(function(err){
+      mostrarErrorFatal(
+        "No se pudo iniciar la base de datos local (" + (err && err.message ? err.message : err) + "). " +
+        "Prueba recargar la página; si el problema sigue, puede que el navegador esté bloqueando WebAssembly o IndexedDB " +
+        "(revisa que no estés en una ventana privada muy restrictiva)."
+      );
+      document.getElementById("appLoading").hidden = true;
+    });
+  }
+})();
+</script>
+</body>
+</html>
