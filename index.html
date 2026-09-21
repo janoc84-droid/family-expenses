@@ -282,6 +282,31 @@
   .checklist-detalle{ flex:1; }
   .checklist-monto{ font-weight:700; color:var(--accent-strong); font-variant-numeric:tabular-nums; }
 
+  /* ---------------- Estado de Cuenta: acciones por movimiento + historial ---------------- */
+  .ec-row-acciones{ display:flex; gap:4px; flex-wrap:nowrap; justify-content:flex-end; }
+  .ec-toolbar{ display:flex; justify-content:flex-end; margin-bottom:10px; }
+  .modal-overlay{
+    position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:200;
+    display:flex; align-items:flex-start; justify-content:center;
+    padding:40px 16px; overflow-y:auto;
+  }
+  .modal-overlay[hidden]{ display:none; }
+  .modal-box{
+    background:var(--surface); border:1px solid var(--border); border-radius:14px;
+    padding:18px; max-width:480px; width:100%;
+  }
+  .modal-box h2{ font-size:1.05rem; margin-bottom:6px; }
+  .modal-box .form-grid{ margin-top:10px; }
+  .historial-item{
+    background:var(--surface-2); border:1px solid var(--border); border-radius:8px;
+    padding:8px 10px; margin-bottom:6px; display:flex; align-items:center; gap:10px; justify-content:space-between;
+  }
+  .historial-item p{ font-size:.82rem; color:var(--text-dim); }
+  .division-row{
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    background:var(--surface-2); border-radius:6px; padding:6px 8px; margin-bottom:4px;
+  }
+
   /* ---------------- pantallas "en construccion" ---------------- */
   .placeholder-card{ text-align:center; padding:34px 20px; }
   .placeholder-icon{ font-size:2.2rem; margin-bottom:10px; }
@@ -520,6 +545,9 @@
         <div class="field small"><label>Mes</label><select id="ecMes"></select></div>
         <div class="field small"><label>Año</label><select id="ecAnio"></select></div>
       </div>
+      <div class="ec-toolbar">
+        <button type="button" class="btn-ghost" id="ecBtnHistorial">🕘 Historial de ajustes...</button>
+      </div>
       <div id="ecResultado"></div>
     </div>
   </section>
@@ -678,6 +706,10 @@
 
 <div id="toastContainer" aria-live="polite"></div>
 
+<div class="modal-overlay" id="modalOverlay" hidden>
+  <div class="modal-box" id="modalBox"></div>
+</div>
+
 <div class="loading-screen" id="appLoading">
   <div class="loading-box">
     <div class="spinner"></div>
@@ -758,11 +790,43 @@
     "  banco_tarjeta TEXT,",
     "  created_at TEXT NOT NULL DEFAULT (datetime('now'))",
     ");",
+    // Historial de ajustes de Estado de Cuenta: cada edicion/division/
+    // adjunte/eliminacion hecha a mano desde esa pantalla queda registrada
+    // aca, para poder deshacerla despues si fue un error (ver
+    // family_expenses/app/repositories/historial_repo.py -- misma idea
+    // portada a la web). "tipo" es uno de EDICION_MANUAL (se sobreescribio
+    // el monto de una persona en gasto_persona.monto), REASIGNACION_PERSONA
+    // (se agrego el mismo monto a otra persona sin tocar el original, boton
+    // "Adjuntar a..."), EDICION_CAMPO (se corrigio fecha/detalle/empresa/
+    // cuota del gasto real, afecta a todos los que lo comparten),
+    // ELIMINACION (se borro un movimiento puntual, snapshot_json guarda
+    // como recrearlo) o DIVISION_GASTO (se partio el monto de una persona
+    // entre ella y una o mas personas nuevas, snapshot_json guarda el
+    // reparto para deshacerlo). "deshecho" queda reservado para filtrar el
+    // listado (ver listarHistorial) -- al deshacer un ajuste la fila se
+    // borra directo, mismo criterio que el escritorio.
+    "CREATE TABLE IF NOT EXISTS historial_ajustes (",
+    "  id INTEGER PRIMARY KEY,",
+    "  persona TEXT NOT NULL,",
+    "  anio INTEGER NOT NULL,",
+    "  mes INTEGER NOT NULL,",
+    "  detalle TEXT,",
+    "  tipo TEXT NOT NULL,",
+    "  gasto_id INTEGER,",
+    "  valor_anterior TEXT,",
+    "  valor_nuevo TEXT,",
+    "  persona_nueva TEXT,",
+    "  campo TEXT,",
+    "  snapshot_json TEXT,",
+    "  fecha_hora TEXT NOT NULL DEFAULT (datetime('now')),",
+    "  deshecho INTEGER NOT NULL DEFAULT 0",
+    ");",
     "CREATE INDEX IF NOT EXISTS idx_gastos_anio_mes ON gastos(anio, mes);",
     "CREATE INDEX IF NOT EXISTS idx_gasto_persona_gasto ON gasto_persona(gasto_id);",
     "CREATE INDEX IF NOT EXISTS idx_gasto_persona_persona ON gasto_persona(persona_id);",
     "CREATE INDEX IF NOT EXISTS idx_checklist_persona_mes ON checklist_pagos(persona, anio, mes);",
-    "CREATE INDEX IF NOT EXISTS idx_gastos_diarios_anio_mes ON gastos_diarios(anio, mes);"
+    "CREATE INDEX IF NOT EXISTS idx_gastos_diarios_anio_mes ON gastos_diarios(anio, mes);",
+    "CREATE INDEX IF NOT EXISTS idx_historial_persona_mes ON historial_ajustes(persona, anio, mes);"
   ].join("\n");
 
   // ---------------------------------------------------------------- utiles
@@ -1376,30 +1440,574 @@
 
   // ---------------------------------------------------------------- Estado de Cuenta
 
-  function renderEstadoCuenta(){
+  // Estado de Cuenta itemizado: a diferencia de renderTablaItems (solo
+  // lectura, reusada en Resumen Mensual), esta tabla lleva gasto_id por fila
+  // y botones de accion (Editar/Dividir/Adjuntar/Eliminar) -- ver
+  // "Estado de Cuenta: edicion/division/adjunte/eliminacion + historial"
+  // mas abajo, puerto de family_expenses/app/gui/screens/estado_cuenta_screen.py
+  // (_editar_item/_abrir_dividir_compra/_adjuntar/_eliminar) y de
+  // repositories/historial_repo.py (registrar_ajuste/eliminar_ajuste_y_deshacer).
+  var ecItemsActuales = [];
+
+  function estadoActual(){
     var nombre = document.getElementById("ecPersona").value.trim();
     var anio = Number(document.getElementById("ecAnio").value);
     var mes = Number(document.getElementById("ecMes").value);
+    if(!nombre || !anio || !mes) return null;
+    return {nombre: nombre, anio: anio, mes: mes};
+  }
+  function buscarItemEc(gastoId){
+    var encontrados = ecItemsActuales.filter(function(it){ return it.gastoId === gastoId; });
+    return encontrados.length ? encontrados[0] : null;
+  }
+
+  function renderTablaEstadoCuenta(items){
+    if(items.length === 0) return "<p class=\"hint\">Sin movimientos.</p>";
+    var filas = items.map(function(it){
+      return "<tr><td>" + it.fecha + "</td><td>" + escapeHtml(it.detalle) + "</td><td>" + escapeHtml(it.empresa||"") +
+        "</td><td class=\"center\">" + escapeHtml(it.cuota||"-") + "</td><td class=\"money\">" + money(it.monto) + "</td>" +
+        "<td><div class=\"ec-row-acciones\">" +
+          "<button type=\"button\" class=\"icon-btn\" data-ec-editar=\"" + it.gastoId + "\" title=\"Editar\">✎</button>" +
+          "<button type=\"button\" class=\"icon-btn\" data-ec-dividir=\"" + it.gastoId + "\" title=\"Dividir...\">⑂</button>" +
+          "<button type=\"button\" class=\"icon-btn\" data-ec-adjuntar=\"" + it.gastoId + "\" title=\"Adjuntar a...\">↪</button>" +
+          "<button type=\"button\" class=\"icon-btn danger\" data-ec-eliminar=\"" + it.gastoId + "\" title=\"Eliminar\">✕</button>" +
+        "</div></td></tr>";
+    }).join("");
+    return "<div class=\"table-wrap\"><table class=\"data-table\"><thead><tr><th>Fecha</th><th>Detalle</th><th>Empresa</th><th>Cuota</th><th>Monto</th><th></th></tr></thead><tbody>" +
+      filas + "</tbody></table></div>";
+  }
+
+  function renderEstadoCuenta(){
+    var estado = estadoActual();
     var cont = document.getElementById("ecResultado");
-    if(!nombre || !anio || !mes){
+    if(!estado){
       cont.innerHTML = "<p class=\"hint\">Escribe o elige una persona para ver su estado de cuenta.</p>";
+      ecItemsActuales = [];
       return;
     }
     var items = dbAll(
-      "SELECT g.fecha AS fecha, g.detalle AS detalle, g.empresa AS empresa, g.cuota_texto AS cuota, gp.monto AS monto " +
+      "SELECT g.id AS gastoId, g.fecha AS fecha, g.detalle AS detalle, g.empresa AS empresa, g.cuota_texto AS cuota, " +
+      "gp.monto AS monto, g.origen AS origen " +
       "FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
-      "WHERE p.nombre=? COLLATE NOCASE AND g.anio=? AND g.mes=? ORDER BY g.fecha", [nombre, anio, mes]
+      "WHERE p.nombre=? COLLATE NOCASE AND g.anio=? AND g.mes=? ORDER BY g.fecha",
+      [estado.nombre, estado.anio, estado.mes]
     );
+    ecItemsActuales = items;
     var total = items.reduce(function(a, it){ return a + it.monto; }, 0);
     cont.innerHTML =
       "<div class=\"stat-bar\">" +
         "<div class=\"stat\"><div class=\"k\">Movimientos</div><div class=\"v\">" + items.length + "</div></div>" +
-        "<div class=\"stat\"><div class=\"k\">Total " + MESES_ES[mes] + " " + anio + "</div><div class=\"v\">" + money(total) + "</div></div>" +
-      "</div>" + renderTablaItems(items);
+        "<div class=\"stat\"><div class=\"k\">Total " + MESES_ES[estado.mes] + " " + estado.anio + "</div><div class=\"v\">" + money(total) + "</div></div>" +
+      "</div>" + renderTablaEstadoCuenta(items);
+    cont.querySelectorAll("[data-ec-editar]").forEach(function(b){
+      b.addEventListener("click", function(){ abrirEditarItem(buscarItemEc(Number(b.dataset.ecEditar))); });
+    });
+    cont.querySelectorAll("[data-ec-dividir]").forEach(function(b){
+      b.addEventListener("click", function(){ abrirDividirCompra(buscarItemEc(Number(b.dataset.ecDividir))); });
+    });
+    cont.querySelectorAll("[data-ec-adjuntar]").forEach(function(b){
+      b.addEventListener("click", function(){ abrirAdjuntarItem(buscarItemEc(Number(b.dataset.ecAdjuntar))); });
+    });
+    cont.querySelectorAll("[data-ec-eliminar]").forEach(function(b){
+      b.addEventListener("click", function(){ eliminarItemEc(buscarItemEc(Number(b.dataset.ecEliminar))); });
+    });
   }
   document.getElementById("ecPersona").addEventListener("input", renderEstadoCuenta);
   document.getElementById("ecMes").addEventListener("change", renderEstadoCuenta);
   document.getElementById("ecAnio").addEventListener("change", renderEstadoCuenta);
+
+  // -------------------------------------------- modal generico (sin dependencias)
+
+  function abrirModal(html){
+    document.getElementById("modalBox").innerHTML = html;
+    document.getElementById("modalOverlay").hidden = false;
+  }
+  function cerrarModal(){
+    document.getElementById("modalOverlay").hidden = true;
+    document.getElementById("modalBox").innerHTML = "";
+  }
+  document.getElementById("modalOverlay").addEventListener("click", function(ev){
+    if(ev.target.id === "modalOverlay") cerrarModal();
+  });
+
+  // -------------------------------------------- Estado de Cuenta: edicion/division/adjunte/eliminacion + historial
+
+  var CAMPOS_EDITABLES_GASTO = ["fecha", "detalle", "empresa", "cuota_texto"];
+  var CAMPO_ETIQUETAS = {fecha: "Fecha", detalle: "Detalle", empresa: "Empresa", cuota_texto: "Cuota"};
+  var TIPO_AJUSTE_TEXTOS = {
+    EDICION_MANUAL: "Edición manual", REASIGNACION_PERSONA: "Adjuntado",
+    EDICION_CAMPO: "Corrección", ELIMINACION: "Eliminado", DIVISION_GASTO: "División"
+  };
+
+  function registrarAjuste(persona, anio, mes, detalle, tipo, gastoId, valorAnterior, valorNuevo, personaNueva, campo, snapshotJson){
+    db.run(
+      "INSERT INTO historial_ajustes (persona, anio, mes, detalle, tipo, gasto_id, valor_anterior, valor_nuevo, persona_nueva, campo, snapshot_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+      [persona, anio, mes, detalle || "", tipo, (gastoId == null ? null : gastoId),
+       (valorAnterior == null ? null : String(valorAnterior)), (valorNuevo == null ? null : String(valorNuevo)),
+       personaNueva || null, campo || null, snapshotJson || null]
+    );
+    return lastId();
+  }
+  function listarHistorial(persona, anio, mes){
+    return dbAll(
+      "SELECT * FROM historial_ajustes WHERE persona=? COLLATE NOCASE AND anio=? AND mes=? AND deshecho=0 ORDER BY fecha_hora DESC, id DESC",
+      [persona, anio, mes]
+    );
+  }
+  function editarCampoGastoEc(gastoId, campo, nuevoValor){
+    if(CAMPOS_EDITABLES_GASTO.indexOf(campo) === -1) throw new Error("Campo no editable: " + campo);
+    db.run("UPDATE gastos SET " + campo + " = ? WHERE id = ?", [nuevoValor, gastoId]);
+  }
+  // Analogo web de editar_gasto_persona_monto (gastos_repo.py): sobreescribe
+  // EN EL LUGAR el monto de UNA persona en gasto_persona -- no toca las
+  // demas filas del mismo gasto_id. Solo si esa persona quedo como la UNICA
+  // en el reparto se actualiza tambien gastos.monto_total (mismo criterio
+  // que el escritorio), para que un gasto de una sola persona quede
+  // coherente entre ambas tablas.
+  function editarMontoPersonaEc(gastoId, personaNombre, nuevoMonto){
+    var personaId = obtenerOCrearPersona(personaNombre);
+    db.run("UPDATE gasto_persona SET monto = ? WHERE gasto_id = ? AND persona_id = ?", [nuevoMonto, gastoId, personaId]);
+    var n = dbGet("SELECT COUNT(*) AS n FROM gasto_persona WHERE gasto_id = ?", [gastoId]).n;
+    if(n === 1){
+      db.run("UPDATE gastos SET monto_total = ? WHERE id = ?", [nuevoMonto, gastoId]);
+    }
+  }
+  function eliminarGastoPersonaEc(gastoId, personaNombre){
+    var personaId = obtenerOCrearPersona(personaNombre);
+    db.run("DELETE FROM gasto_persona WHERE gasto_id = ? AND persona_id = ?", [gastoId, personaId]);
+    var n = dbGet("SELECT COUNT(*) AS n FROM gasto_persona WHERE gasto_id = ?", [gastoId]).n;
+    if(n === 0) db.run("DELETE FROM gastos WHERE id = ?", [gastoId]);
+  }
+  function restaurarGastoEliminadoEc(personaNombre, fecha, detalle, empresa, cuotaTexto, origen, montoPersona){
+    var d = new Date(fecha + "T00:00:00");
+    var anio = d.getFullYear();
+    var mes = d.getMonth() + 1;
+    db.run(
+      "INSERT INTO gastos (anio, mes, fecha, detalle, empresa, categoria_id, monto_total, cuota_texto, origen) VALUES (?,?,?,?,?,?,?,?,?)",
+      [anio, mes, fecha, detalle, empresa || null, null, montoPersona, cuotaTexto || "1", origen || "MANUAL"]
+    );
+    var gastoId = lastId();
+    var personaId = obtenerOCrearPersona(personaNombre);
+    db.run("INSERT INTO gasto_persona (gasto_id, persona_id, monto) VALUES (?,?,?)", [gastoId, personaId, montoPersona]);
+    return gastoId;
+  }
+  function personasDelGastoEc(gastoId){
+    return dbAll(
+      "SELECT p.nombre AS nombre FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id WHERE gp.gasto_id=?", [gastoId]
+    ).map(function(r){ return r.nombre; });
+  }
+  // Analogo web de dividir_gasto_persona (gastos_repo.py). descartarResto:
+  // para cuando la persona original pago la compra completa -- su fila se
+  // borra siempre, aunque el resto no de exactamente $0.
+  function dividirGastoPersonaEc(gastoId, personaOriginal, repartoNuevo, descartarResto){
+    var idOriginal = obtenerOCrearPersona(personaOriginal);
+    var filaOriginal = dbGet("SELECT monto FROM gasto_persona WHERE gasto_id=? AND persona_id=?", [gastoId, idOriginal]);
+    if(!filaOriginal) throw new Error(personaOriginal + " no tiene ese gasto.");
+    var montoOriginal = filaOriginal.monto;
+
+    var totalRepartido = 0;
+    Object.keys(repartoNuevo).forEach(function(n){ totalRepartido += repartoNuevo[n]; });
+    totalRepartido = Math.round(totalRepartido * 100) / 100;
+    if(totalRepartido <= 0 || totalRepartido > montoOriginal + 0.01){
+      throw new Error("El total a repartir debe ser mayor que 0 y no puede superar el monto original.");
+    }
+
+    var idsNuevos = {};
+    Object.keys(repartoNuevo).forEach(function(nombre){
+      var personaId = obtenerOCrearPersona(nombre);
+      var yaExiste = dbGet("SELECT 1 AS x FROM gasto_persona WHERE gasto_id=? AND persona_id=?", [gastoId, personaId]);
+      if(yaExiste) throw new Error(nombre + " ya tiene una fila en este gasto -- editala directo.");
+      idsNuevos[nombre] = personaId;
+    });
+    Object.keys(repartoNuevo).forEach(function(nombre){
+      db.run("INSERT INTO gasto_persona (gasto_id, persona_id, monto) VALUES (?,?,?)", [gastoId, idsNuevos[nombre], repartoNuevo[nombre]]);
+    });
+
+    var restante = Math.round((montoOriginal - totalRepartido) * 100) / 100;
+    if(restante <= 0 || descartarResto){
+      db.run("DELETE FROM gasto_persona WHERE gasto_id=? AND persona_id=?", [gastoId, idOriginal]);
+    }else{
+      db.run("UPDATE gasto_persona SET monto=? WHERE gasto_id=? AND persona_id=?", [restante, gastoId, idOriginal]);
+    }
+    return restante;
+  }
+  function deshacerDivisionGastoEc(gastoId, personaOriginal, montoOriginal, repartoNuevo){
+    Object.keys(repartoNuevo).forEach(function(nombre){
+      var personaId = obtenerOCrearPersona(nombre);
+      db.run("DELETE FROM gasto_persona WHERE gasto_id=? AND persona_id=?", [gastoId, personaId]);
+    });
+    var idOriginal = obtenerOCrearPersona(personaOriginal);
+    var filaOriginal = dbGet("SELECT 1 AS x FROM gasto_persona WHERE gasto_id=? AND persona_id=?", [gastoId, idOriginal]);
+    if(!filaOriginal){
+      db.run("INSERT INTO gasto_persona (gasto_id, persona_id, monto) VALUES (?,?,?)", [gastoId, idOriginal, montoOriginal]);
+    }else{
+      db.run("UPDATE gasto_persona SET monto=? WHERE gasto_id=? AND persona_id=?", [montoOriginal, gastoId, idOriginal]);
+    }
+  }
+
+  // Puerto de eliminar_ajuste_y_deshacer (historial_repo.py): deshace el
+  // efecto real de una fila de historial segun su tipo, y despues borra esa
+  // fila (mismo criterio que el escritorio -- no se marca "deshecho", se
+  // elimina del todo).
+  function eliminarAjusteYDeshacer(historialId){
+    var fila = dbGet("SELECT * FROM historial_ajustes WHERE id=?", [historialId]);
+    if(!fila) return;
+
+    if(fila.tipo === "EDICION_MANUAL"){
+      var personaId = obtenerOCrearPersona(fila.persona);
+      db.run("UPDATE gasto_persona SET monto=? WHERE gasto_id=? AND persona_id=?", [Number(fila.valor_anterior), fila.gasto_id, personaId]);
+      var n = dbGet("SELECT COUNT(*) AS n FROM gasto_persona WHERE gasto_id=?", [fila.gasto_id]).n;
+      if(n === 1) db.run("UPDATE gastos SET monto_total=? WHERE id=?", [Number(fila.valor_anterior), fila.gasto_id]);
+    }else if(fila.tipo === "REASIGNACION_PERSONA"){
+      // "Adjuntar a otra persona" crea una fila NUEVA para persona_nueva sin
+      // tocar el original -- deshacer = borrar esa fila nueva completa
+      // (mismo efecto que el tipo AJUSTE del escritorio).
+      if(fila.gasto_id != null) db.run("DELETE FROM gastos WHERE id=?", [fila.gasto_id]);
+    }else if(fila.tipo === "EDICION_CAMPO"){
+      if(fila.gasto_id != null && fila.campo) editarCampoGastoEc(fila.gasto_id, fila.campo, fila.valor_anterior);
+    }else if(fila.tipo === "ELIMINACION"){
+      if(fila.snapshot_json){
+        var datos = JSON.parse(fila.snapshot_json);
+        restaurarGastoEliminadoEc(fila.persona, datos.fecha, datos.detalle, datos.empresa, datos.cuota, datos.origen, datos.monto);
+      }
+    }else if(fila.tipo === "DIVISION_GASTO"){
+      if(fila.gasto_id != null && fila.snapshot_json){
+        var datos2 = JSON.parse(fila.snapshot_json);
+        deshacerDivisionGastoEc(fila.gasto_id, fila.persona, datos2.monto_original, datos2.reparto_nuevo);
+      }
+    }
+    db.run("DELETE FROM historial_ajustes WHERE id=?", [historialId]);
+  }
+
+  function refrescarTrasAjusteEc(){
+    refrescarDatalists();
+    renderEstadoCuenta();
+    renderResumen();
+    renderListaIngreso();
+    renderChecklist();
+  }
+
+  function abrirEditarItem(item){
+    if(!item) return;
+    var estado = estadoActual();
+    if(!estado) return;
+    var html =
+      "<h2>Editar movimiento</h2>" +
+      "<p class=\"hint\">Fecha/Detalle/Empresa/Cuota corrigen el gasto real (afecta a todos los que lo comparten). " +
+      "El Monto corrige solo el registro de " + escapeHtml(estado.nombre) + ", sin tocar el resto del reparto ni el " +
+      "total del gasto (salvo que sea la unica persona). Cada cambio queda en el Historial de ajustes.</p>" +
+      "<div class=\"form-grid\">" +
+        "<div class=\"field small\"><label>Fecha</label><input type=\"date\" id=\"emFecha\" value=\"" + escapeHtml(item.fecha) + "\"></div>" +
+        "<div class=\"field grow\"><label>Detalle</label><input type=\"text\" id=\"emDetalle\" value=\"" + escapeHtml(item.detalle) + "\"></div>" +
+        "<div class=\"field grow\"><label>Empresa</label><input type=\"text\" id=\"emEmpresa\" value=\"" + escapeHtml(item.empresa||"") + "\"></div>" +
+        "<div class=\"field small\"><label>Cuota</label><input type=\"text\" id=\"emCuota\" value=\"" + escapeHtml(item.cuota||"") + "\"></div>" +
+        "<div class=\"field small\"><label>Monto de " + escapeHtml(estado.nombre) + "</label><input type=\"number\" id=\"emMonto\" step=\"1\" value=\"" + item.monto + "\"></div>" +
+      "</div>" +
+      "<div class=\"note\" id=\"emMensaje\" hidden></div>" +
+      "<div class=\"form-actions\">" +
+        "<button type=\"button\" class=\"btn-ghost\" id=\"emCancelar\">Cancelar</button>" +
+        "<button type=\"button\" class=\"btn-primary\" id=\"emGuardar\">Guardar</button>" +
+      "</div>";
+    abrirModal(html);
+    document.getElementById("emCancelar").addEventListener("click", cerrarModal);
+    document.getElementById("emGuardar").addEventListener("click", function(){
+      var msgEl = document.getElementById("emMensaje");
+      var nuevaFecha = document.getElementById("emFecha").value;
+      if(!nuevaFecha){ msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="Elige una fecha."; return; }
+      var nuevoDetalle = document.getElementById("emDetalle").value.trim();
+      if(!nuevoDetalle){ msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="El detalle no puede quedar vacío."; return; }
+      var nuevaEmpresa = document.getElementById("emEmpresa").value.trim();
+      var nuevaCuota = document.getElementById("emCuota").value.trim();
+      var montoTxt = document.getElementById("emMonto").value;
+      var nuevoMonto = Number(montoTxt);
+      if(montoTxt.trim() === "" || isNaN(nuevoMonto)){ msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="El monto no es válido."; return; }
+
+      db.run("BEGIN");
+      try{
+        var camposGasto = [
+          ["fecha", item.fecha, nuevaFecha],
+          ["detalle", item.detalle, nuevoDetalle],
+          ["empresa", item.empresa || "", nuevaEmpresa],
+          ["cuota_texto", item.cuota || "", nuevaCuota]
+        ];
+        camposGasto.forEach(function(c){
+          if(c[2] !== c[1]){
+            editarCampoGastoEc(item.gastoId, c[0], c[2]);
+            registrarAjuste(estado.nombre, estado.anio, estado.mes, item.detalle, "EDICION_CAMPO", item.gastoId, c[1], c[2], null, c[0], null);
+          }
+        });
+        if(nuevoMonto !== item.monto){
+          editarMontoPersonaEc(item.gastoId, estado.nombre, nuevoMonto);
+          registrarAjuste(estado.nombre, estado.anio, estado.mes, item.detalle, "EDICION_MANUAL", item.gastoId, item.monto, nuevoMonto, null, null, null);
+        }
+        db.run("COMMIT");
+      }catch(e){
+        db.run("ROLLBACK");
+        msgEl.hidden = false; msgEl.className = "note bad"; msgEl.textContent = "Error al guardar: " + e.message;
+        return;
+      }
+      scheduleSave();
+      cerrarModal();
+      refrescarTrasAjusteEc();
+      mostrarToast("Movimiento actualizado.", "ok");
+    });
+  }
+
+  function abrirDividirCompra(item){
+    if(!item) return;
+    var estado = estadoActual();
+    if(!estado) return;
+    var yaEnGasto = {};
+    personasDelGastoEc(item.gastoId).forEach(function(n){ yaEnGasto[n.toLowerCase()] = true; });
+    var entradas = []; // [{nombre, monto}]
+
+    var html =
+      "<h2>Dividir compra</h2>" +
+      "<p class=\"hint\">\"" + escapeHtml(item.detalle) + "\" -- actualmente " + money(item.monto) + " de " + escapeHtml(estado.nombre) + ". " +
+      "Elige cuánto le corresponde a cada persona nueva; el resto queda en " + escapeHtml(estado.nombre) + ". Esto SI modifica el gasto real.</p>" +
+      "<div class=\"form-grid\">" +
+        "<div class=\"field grow\"><label>Persona nueva</label><input type=\"text\" id=\"dcPersona\" list=\"personasList\" placeholder=\"Nombre...\"></div>" +
+        "<div class=\"field small\"><label>Monto</label><input type=\"number\" id=\"dcMonto\" min=\"0\" step=\"1\" placeholder=\"0\"></div>" +
+      "</div>" +
+      "<div class=\"form-actions\" style=\"justify-content:flex-start;margin-bottom:10px;\">" +
+        "<button type=\"button\" class=\"btn-ghost\" id=\"dcAgregar\">+ Agregar</button>" +
+      "</div>" +
+      "<div id=\"dcLista\"></div>" +
+      "<label class=\"checkbox-line\"><input type=\"checkbox\" id=\"dcNoCobrarme\"> " + escapeHtml(estado.nombre) +
+      " también participa, pero su parte NO se le cobra (ya la pagó al pagar todo)</label>" +
+      "<div class=\"note\" id=\"dcResto\"></div>" +
+      "<div class=\"note\" id=\"dcMensaje\" hidden></div>" +
+      "<div class=\"form-actions\">" +
+        "<button type=\"button\" class=\"btn-ghost\" id=\"dcCancelar\">Cancelar</button>" +
+        "<button type=\"button\" class=\"btn-primary\" id=\"dcGuardar\">Guardar división</button>" +
+      "</div>";
+    abrirModal(html);
+
+    function restoActual(){
+      var suma = entradas.reduce(function(a, e){ return a + e.monto; }, 0);
+      return Math.round((item.monto - suma) * 100) / 100;
+    }
+    function actualizar(){
+      var listaEl = document.getElementById("dcLista");
+      listaEl.innerHTML = entradas.map(function(e, i){
+        return "<div class=\"division-row\"><span>" + escapeHtml(e.nombre) + "</span><span>" + money(e.monto) +
+          " <button type=\"button\" class=\"icon-btn danger\" data-quitar=\"" + i + "\" title=\"Quitar\">✕</button></span></div>";
+      }).join("");
+      listaEl.querySelectorAll("[data-quitar]").forEach(function(b){
+        b.addEventListener("click", function(){ entradas.splice(Number(b.dataset.quitar), 1); actualizar(); });
+      });
+      var resto = restoActual();
+      var restoEl = document.getElementById("dcResto");
+      if(document.getElementById("dcNoCobrarme").checked){
+        restoEl.textContent = "Parte de " + estado.nombre + " (NO se le cobra): " + money(resto);
+      }else{
+        restoEl.textContent = "Resto para " + estado.nombre + ": " + money(resto);
+      }
+    }
+    document.getElementById("dcNoCobrarme").addEventListener("change", actualizar);
+    document.getElementById("dcAgregar").addEventListener("click", function(){
+      var msgEl = document.getElementById("dcMensaje");
+      msgEl.hidden = true;
+      var nombre = document.getElementById("dcPersona").value.trim();
+      if(!nombre){ msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="Elige una persona."; return; }
+      var nombreLower = nombre.toLowerCase();
+      if(nombreLower === estado.nombre.toLowerCase() || yaEnGasto[nombreLower] || entradas.some(function(e){ return e.nombre.toLowerCase()===nombreLower; })){
+        msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent=nombre + " ya tiene una fila en este gasto o ya fue agregada.";
+        return;
+      }
+      var montoTxt = document.getElementById("dcMonto").value;
+      var monto = Number(montoTxt);
+      if(montoTxt.trim() === "" || isNaN(monto) || monto <= 0){
+        msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="El monto debe ser mayor que 0.";
+        return;
+      }
+      if(monto > restoActual()){
+        msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="No queda suficiente resto (" + money(restoActual()) + ") para ese monto.";
+        return;
+      }
+      msgEl.hidden = true;
+      entradas.push({nombre: nombre, monto: monto});
+      document.getElementById("dcPersona").value = "";
+      document.getElementById("dcMonto").value = "";
+      actualizar();
+    });
+    document.getElementById("dcCancelar").addEventListener("click", cerrarModal);
+    document.getElementById("dcGuardar").addEventListener("click", function(){
+      var msgEl = document.getElementById("dcMensaje");
+      if(entradas.length === 0){ msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="Agrega al menos una persona nueva."; return; }
+      var repartoNuevo = {};
+      entradas.forEach(function(e){ repartoNuevo[e.nombre] = e.monto; });
+      var descartarResto = document.getElementById("dcNoCobrarme").checked;
+      var restante;
+      db.run("BEGIN");
+      try{
+        restante = dividirGastoPersonaEc(item.gastoId, estado.nombre, repartoNuevo, descartarResto);
+        registrarAjuste(
+          estado.nombre, estado.anio, estado.mes, item.detalle, "DIVISION_GASTO", item.gastoId, item.monto, restante,
+          null, null, JSON.stringify({monto_original: item.monto, reparto_nuevo: repartoNuevo})
+        );
+        db.run("COMMIT");
+      }catch(e){
+        db.run("ROLLBACK");
+        msgEl.hidden = false; msgEl.className = "note bad"; msgEl.textContent = e.message;
+        return;
+      }
+      scheduleSave();
+      cerrarModal();
+      refrescarTrasAjusteEc();
+      mostrarToast("Compra dividida. Se puede deshacer desde el Historial de ajustes.", "ok");
+    });
+    actualizar();
+  }
+
+  function abrirAdjuntarItem(item){
+    if(!item) return;
+    var estado = estadoActual();
+    if(!estado) return;
+    var html =
+      "<h2>Adjuntar a otra persona</h2>" +
+      "<p class=\"hint\">\"" + escapeHtml(item.detalle) + "\" (" + money(item.monto) + ") queda igual en " + escapeHtml(estado.nombre) +
+      ", y se agrega ese mismo monto a otra persona (ej. quien se lo paga a nombre de ella). No se toca el gasto original.</p>" +
+      "<div class=\"form-grid\">" +
+        "<div class=\"field grow\"><label>Persona destino</label><input type=\"text\" id=\"adPersona\" list=\"personasList\" placeholder=\"Nombre...\"></div>" +
+      "</div>" +
+      "<div class=\"note\" id=\"adMensaje\" hidden></div>" +
+      "<div class=\"form-actions\">" +
+        "<button type=\"button\" class=\"btn-ghost\" id=\"adCancelar\">Cancelar</button>" +
+        "<button type=\"button\" class=\"btn-primary\" id=\"adGuardar\">Adjuntar</button>" +
+      "</div>";
+    abrirModal(html);
+    document.getElementById("adCancelar").addEventListener("click", cerrarModal);
+    document.getElementById("adGuardar").addEventListener("click", function(){
+      var msgEl = document.getElementById("adMensaje");
+      var destino = document.getElementById("adPersona").value.trim();
+      if(!destino){ msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="Elige a quién adjuntarselo."; return; }
+      if(destino.toLowerCase() === estado.nombre.toLowerCase()){ msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="Elige una persona distinta."; return; }
+
+      db.run("BEGIN");
+      var gastoId;
+      try{
+        db.run(
+          "INSERT INTO gastos (anio, mes, fecha, detalle, empresa, categoria_id, monto_total, cuota_texto, origen) VALUES (?,?,?,?,?,?,?,?,?)",
+          [estado.anio, estado.mes, item.fecha, "De " + estado.nombre + ": " + item.detalle, item.empresa || null, null, item.monto, item.cuota || "1", "AJUSTE"]
+        );
+        gastoId = lastId();
+        var personaId = obtenerOCrearPersona(destino);
+        db.run("INSERT INTO gasto_persona (gasto_id, persona_id, monto) VALUES (?,?,?)", [gastoId, personaId, item.monto]);
+        registrarAjuste(estado.nombre, estado.anio, estado.mes, item.detalle, "REASIGNACION_PERSONA", gastoId, item.monto, item.monto, destino, null, null);
+        db.run("COMMIT");
+      }catch(e){
+        db.run("ROLLBACK");
+        msgEl.hidden = false; msgEl.className = "note bad"; msgEl.textContent = "Error: " + e.message;
+        return;
+      }
+      scheduleSave();
+      cerrarModal();
+      refrescarTrasAjusteEc();
+      mostrarToast("Se agregó " + money(item.monto) + " a " + destino + " (queda igual en " + estado.nombre + ").", "ok");
+    });
+  }
+
+  function eliminarItemEc(item){
+    if(!item) return;
+    var estado = estadoActual();
+    if(!estado) return;
+    if(!confirm("¿Eliminar \"" + item.detalle + "\" (" + money(item.monto) + ") de " + estado.nombre + "?\n\nSe puede deshacer después desde el Historial de ajustes.")) return;
+
+    db.run("BEGIN");
+    try{
+      var snapshot = JSON.stringify({
+        fecha: item.fecha, detalle: item.detalle, empresa: item.empresa || "",
+        cuota: item.cuota || "", origen: item.origen || "MANUAL", monto: item.monto
+      });
+      eliminarGastoPersonaEc(item.gastoId, estado.nombre);
+      registrarAjuste(estado.nombre, estado.anio, estado.mes, item.detalle, "ELIMINACION", item.gastoId, item.monto, 0, null, null, snapshot);
+      db.run("COMMIT");
+    }catch(e){
+      db.run("ROLLBACK");
+      mostrarToast("No se pudo eliminar: " + e.message, "bad");
+      return;
+    }
+    scheduleSave();
+    refrescarTrasAjusteEc();
+    mostrarToast("Se eliminó \"" + item.detalle + "\". Se puede deshacer desde el Historial de ajustes.", "ok");
+  }
+
+  function textoHistorialFila(fila){
+    var tipoTexto = TIPO_AJUSTE_TEXTOS[fila.tipo] || fila.tipo;
+    if(fila.tipo === "REASIGNACION_PERSONA"){
+      return escapeHtml(fila.fecha_hora) + " — " + tipoTexto + ": " + escapeHtml(fila.detalle) + " — " +
+        money(Number(fila.valor_nuevo)) + " a " + escapeHtml(fila.persona_nueva || "");
+    }
+    if(fila.tipo === "EDICION_CAMPO"){
+      return escapeHtml(fila.fecha_hora) + " — " + tipoTexto + " (" + escapeHtml(CAMPO_ETIQUETAS[fila.campo] || fila.campo) + "): " +
+        escapeHtml(fila.detalle) + " — \"" + escapeHtml(fila.valor_anterior) + "\" → \"" + escapeHtml(fila.valor_nuevo) + "\"";
+    }
+    if(fila.tipo === "ELIMINACION"){
+      return escapeHtml(fila.fecha_hora) + " — " + tipoTexto + ": " + escapeHtml(fila.detalle) + " — era " + money(Number(fila.valor_anterior));
+    }
+    if(fila.tipo === "DIVISION_GASTO"){
+      var datos = fila.snapshot_json ? JSON.parse(fila.snapshot_json) : {};
+      var repartoTexto = Object.keys(datos.reparto_nuevo || {}).map(function(n){
+        return escapeHtml(n) + ": " + money(datos.reparto_nuevo[n]);
+      }).join(", ");
+      return escapeHtml(fila.fecha_hora) + " — " + tipoTexto + ": " + escapeHtml(fila.detalle) + " — " + repartoTexto +
+        ", resto " + money(Number(fila.valor_nuevo)) + " para " + escapeHtml(fila.persona);
+    }
+    return escapeHtml(fila.fecha_hora) + " — " + tipoTexto + ": " + escapeHtml(fila.detalle) + " — " +
+      money(Number(fila.valor_anterior)) + " → " + money(Number(fila.valor_nuevo));
+  }
+
+  function construirListaHistorial(){
+    var estado = estadoActual();
+    var cont = document.getElementById("hisLista");
+    if(!cont) return;
+    if(!estado){
+      cont.innerHTML = "<p class=\"hint\">Elige persona/año/mes para ver su historial.</p>";
+      return;
+    }
+    var filas = listarHistorial(estado.nombre, estado.anio, estado.mes);
+    if(filas.length === 0){
+      cont.innerHTML = "<p class=\"hint\">Todavía no hay ajustes registrados este mes.</p>";
+      return;
+    }
+    cont.innerHTML = filas.map(function(f){
+      return "<div class=\"historial-item\"><p>" + textoHistorialFila(f) + "</p>" +
+        "<button type=\"button\" class=\"btn-danger\" data-deshacer=\"" + f.id + "\">Deshacer</button></div>";
+    }).join("");
+    cont.querySelectorAll("[data-deshacer]").forEach(function(b){
+      b.addEventListener("click", function(){ deshacerAjusteConfirmando(Number(b.dataset.deshacer)); });
+    });
+  }
+
+  function deshacerAjusteConfirmando(historialId){
+    if(!confirm("Esto deshace el movimiento seleccionado. ¿Continuar?")) return;
+    db.run("BEGIN");
+    try{
+      eliminarAjusteYDeshacer(historialId);
+      db.run("COMMIT");
+    }catch(e){
+      db.run("ROLLBACK");
+      mostrarToast("No se pudo deshacer: " + e.message, "bad");
+      return;
+    }
+    scheduleSave();
+    refrescarTrasAjusteEc();
+    construirListaHistorial();
+    mostrarToast("El movimiento se deshizo correctamente.", "ok");
+  }
+
+  function abrirHistorial(){
+    var html =
+      "<h2>Historial de ajustes</h2>" +
+      "<p class=\"hint\">Movimientos creados o modificados en Estado de Cuenta. Si alguno fue un error, deshacelo.</p>" +
+      "<div id=\"hisLista\"></div>" +
+      "<div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"hisCerrar\">Cerrar</button></div>";
+    abrirModal(html);
+    document.getElementById("hisCerrar").addEventListener("click", cerrarModal);
+    construirListaHistorial();
+  }
+  document.getElementById("ecBtnHistorial").addEventListener("click", abrirHistorial);
 
   // ---------------------------------------------------------------- Checklist Pagos
 
