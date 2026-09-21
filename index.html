@@ -123,7 +123,26 @@
     width:32px; height:32px; border-radius:999px; font-size:.95rem; cursor:pointer;
     display:flex; align-items:center; justify-content:center; flex:none;
   }
-  .data-tools{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+  .data-tools{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px; }
+  .sync-status-text{ font-size:.8rem; color:var(--text-dim); }
+  #btnSyncReconectar[hidden]{ display:none; }
+  #btnSyncReconectar{ background:var(--bad); color:var(--bad-ink); border-color:transparent; }
+
+  /* ---------------- toasts (avisos no bloqueantes) ---------------- */
+  #toastContainer{
+    position:fixed; right:16px; bottom:16px; z-index:9999;
+    display:flex; flex-direction:column; gap:8px; align-items:flex-end;
+    pointer-events:none;
+  }
+  .toast{
+    background:var(--surface); color:var(--text); border:1px solid var(--border);
+    border-left:4px solid var(--accent); border-radius:8px; padding:10px 14px;
+    font-size:.85rem; max-width:320px; box-shadow:0 4px 14px rgba(0,0,0,.25);
+    animation:toast-in .18s ease-out; pointer-events:auto;
+  }
+  .toast.bad{ border-left-color:var(--bad); }
+  .toast.ok{ border-left-color:var(--ok); }
+  @keyframes toast-in{ from{ opacity:0; transform:translateY(6px); } to{ opacity:1; transform:translateY(0); } }
 
   /* ---------------- botones ---------------- */
   button{ font-family:inherit; }
@@ -310,6 +329,9 @@
       <button id="btnExportar" class="btn-ghost" type="button">⬇ Descargar copia de la base</button>
       <button id="btnImportarTrigger" class="btn-ghost" type="button">⬆ Restaurar desde un archivo</button>
       <input type="file" id="inputImportar" accept=".sqlite,.db,.sqlite3" hidden>
+      <button id="btnSync" class="btn-ghost" type="button">🔄 Sincronizar con carpeta...</button>
+      <button id="btnSyncReconectar" class="btn-ghost" type="button" hidden>⚠ Reconectar carpeta</button>
+      <span id="syncStatusText" class="sync-status-text"></span>
     </div>
     <nav class="tabs" id="tabsNav">
       <button class="tab-btn" type="button" data-tab="cargarmes">Cargar mes</button>
@@ -641,7 +663,10 @@
 <footer class="wrap">
   Los datos se guardan en este navegador (SQLite + IndexedDB), no en internet.
   Descarga una copia de seguridad de vez en cuando (botón "Descargar copia de la base" arriba) para no perder nada si cambias de navegador o de equipo.
+  Si conectás una carpeta con "Sincronizar con carpeta..." (solo Chrome/Edge), además se publica una copia de los datos ahí para compartirlos con otros dispositivos/apps que usen esa misma carpeta.
 </footer>
+
+<div id="toastContainer" aria-live="polite"></div>
 
 <div class="loading-screen" id="appLoading">
   <div class="loading-box">
@@ -810,6 +835,12 @@
   function scheduleSave(){
     if(saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(flushSave, 350);
+    // Sincronizacion con carpeta (ver seccion "sync carpeta" mas abajo): cada
+    // vez que algo se guarda localmente es una senal de "cambio local" que
+    // eventualmente hay que publicar en la carpeta compartida, salvo que
+    // estemos en medio de aplicar una fusion de datos que ya vinieron de esa
+    // misma carpeta (ahi se suprime para no generar un ida-y-vuelta infinito).
+    if(!suprimirMarcaSyncPendiente) marcarCambioLocalParaSync();
   }
   function flushSave(){
     saveTimer = null;
@@ -2171,6 +2202,489 @@
     reader.readAsArrayBuffer(file);
   });
 
+  // ---------------------------------------------------------------- sync con carpeta local (OneDrive/Drive)
+  //
+  // Sincronizacion opcional, 100% no-bloqueante, contra dos archivos dentro
+  // de una carpeta que el usuario elige a mano con el picker nativo del
+  // navegador (File System Access API -- solo Chrome/Edge de escritorio, no
+  // hay forma de "detectar sola" una carpeta de OneDrive/Drive desde una
+  // pagina web). Esa carpeta la sincroniza OneDrive/Drive por su cuenta;
+  // esta app solo lee y escribe dos archivos ahi adentro:
+  //   - sync_meta.json               -> {version, updated_at, device}
+  //   - family_expenses_sync.json    -> {version, updated_at, device, data:{...}}
+  // Una app de escritorio en Python (otro proceso, no tocar) lee/escribe
+  // esos mismos dos archivos con el mismo formato -- el punto de encuentro
+  // son nombres/valores en texto (persona, categoria, detalle), NUNCA los
+  // ids internos de esta base sql.js.
+  //
+  // Si el usuario nunca conecta una carpeta, nada de esta seccion hace
+  // ninguna diferencia: la app sigue 100% local como antes.
+
+  var SYNC_META_FILE = "sync_meta.json";
+  var SYNC_DATA_FILE = "family_expenses_sync.json";
+  var SYNC_HANDLE_KEY = "sync_dir_handle";
+  var SYNC_POLL_MS = 210000;   // 3.5 minutos
+  var SYNC_DEBOUNCE_MS = 18000; // ~15-20s sin actividad antes de publicar cambios locales
+
+  var syncDirHandle = null;
+  var syncPollingTimer = null;
+  var syncExportTimer = null;
+  var syncBusy = false;                    // evita solapar lecturas/escrituras en la carpeta
+  var suprimirMarcaSyncPendiente = false;   // true mientras se aplica una fusion remota
+  var cambiosLocalesPendientesSync = false; // hay cambios locales sin publicar todavia
+
+  function fsaSupported(){
+    return typeof window.showDirectoryPicker === "function";
+  }
+
+  function obtenerDeviceIdSync(){
+    var id = null;
+    try{ id = localStorage.getItem("gf_syncDeviceId"); }catch(e){}
+    if(!id){
+      id = "web-" + Math.random().toString(36).slice(2, 10);
+      try{ localStorage.setItem("gf_syncDeviceId", id); }catch(e){}
+    }
+    return id;
+  }
+
+  // ---- toasts (avisos breves, no bloqueantes) ----
+  function mostrarToast(mensaje, tipo){
+    var cont = document.getElementById("toastContainer");
+    if(!cont){ return; }
+    var el = document.createElement("div");
+    el.className = "toast" + (tipo ? " " + tipo : "");
+    el.textContent = mensaje;
+    cont.appendChild(el);
+    setTimeout(function(){
+      if(el.parentNode) el.parentNode.removeChild(el);
+    }, 5000);
+  }
+
+  // ---- estado visible en el header ----
+  function actualizarEstadoSyncUI(){
+    var el = document.getElementById("syncStatusText");
+    if(!el) return;
+    if(!syncDirHandle){
+      el.textContent = "";
+      return;
+    }
+    var nombreCarpeta = "";
+    try{ nombreCarpeta = localStorage.getItem("gf_syncFolderName") || ""; }catch(e){}
+    var ultima = null;
+    try{ ultima = localStorage.getItem("gf_syncLastLocalExportAt"); }catch(e){}
+    var texto = "🔗 Sincronizando con " + (nombreCarpeta || "carpeta elegida");
+    if(ultima){
+      try{
+        var d = new Date(ultima);
+        texto += " -- último envío " + d.toLocaleTimeString("es-CL", {hour:"2-digit", minute:"2-digit"});
+      }catch(e){}
+    }
+    el.textContent = texto;
+  }
+  function mostrarBotonReconectar(){
+    document.getElementById("btnSyncReconectar").hidden = false;
+  }
+  function ocultarBotonReconectar(){
+    document.getElementById("btnSyncReconectar").hidden = true;
+  }
+
+  // ---- permisos sobre el FileSystemDirectoryHandle guardado ----
+  function verificarPermisoCarpeta(handle, solicitar){
+    var opts = {mode: "readwrite"};
+    return Promise.resolve().then(function(){
+      return handle.queryPermission(opts);
+    }).catch(function(){ return "denied"; }).then(function(estado){
+      if(estado === "granted") return true;
+      if(!solicitar) return false;
+      // requestPermission puede requerir un gesto del usuario reciente; si
+      // se llama fuera de un click, muchos navegadores la rechazan --
+      // dejamos que ese rechazo suba y quien llama decide mostrar el boton
+      // "Reconectar carpeta" en vez de fallar en silencio.
+      return handle.requestPermission(opts).then(function(r){ return r === "granted"; });
+    });
+  }
+
+  // ---- lectura/escritura de los dos archivos del contrato ----
+  function escribirArchivoEnCarpeta(handle, nombre, objeto){
+    return handle.getFileHandle(nombre, {create: true}).then(function(fileHandle){
+      return fileHandle.createWritable();
+    }).then(function(writable){
+      return writable.write(JSON.stringify(objeto, null, 2)).then(function(){
+        return writable.close();
+      });
+    });
+  }
+  function leerArchivoDeCarpeta(handle, nombre){
+    return handle.getFileHandle(nombre, {create: false}).then(function(fileHandle){
+      return fileHandle.getFile();
+    }).then(function(file){
+      return file.text();
+    }).then(function(texto){
+      try{ return JSON.parse(texto); }
+      catch(e){ throw new Error("El archivo " + nombre + " en la carpeta de sync no es JSON válido."); }
+    }).catch(function(err){
+      if(err && (err.name === "NotFoundError")) return null;
+      throw err;
+    });
+  }
+
+  // ---- armar el JSON a publicar a partir de la base local ----
+  function construirDatosSync(){
+    var personas = dbAll("SELECT nombre FROM personas ORDER BY nombre COLLATE NOCASE")
+      .map(function(r){ return {nombre: r.nombre}; });
+    var categorias = dbAll("SELECT nombre FROM categorias ORDER BY nombre COLLATE NOCASE")
+      .map(function(r){ return {nombre: r.nombre}; });
+
+    var gastosRows = dbAll(
+      "SELECT g.*, c.nombre AS categoria_nombre FROM gastos g " +
+      "LEFT JOIN categorias c ON c.id = g.categoria_id ORDER BY g.id"
+    );
+    var gastos = gastosRows.map(function(g){
+      var reparto = dbAll(
+        "SELECT p.nombre AS nombre, gp.monto AS monto FROM gasto_persona gp " +
+        "JOIN personas p ON p.id = gp.persona_id WHERE gp.gasto_id = ? ORDER BY p.nombre COLLATE NOCASE",
+        [g.id]
+      );
+      return {
+        anio: g.anio, mes: g.mes, fecha: g.fecha, detalle: g.detalle, empresa: g.empresa || "",
+        categoria: g.categoria_nombre || "", monto_total: g.monto_total, cuota_texto: g.cuota_texto || "1",
+        origen: g.origen || "manual",
+        personas: reparto.map(function(r){ return {nombre: r.nombre, monto: r.monto}; })
+      };
+    });
+
+    var checklist = dbAll("SELECT persona, anio, mes, detalle, pagado FROM checklist_pagos ORDER BY id")
+      .map(function(r){
+        return {persona: r.persona, anio: r.anio, mes: r.mes, detalle: r.detalle, pagado: !!r.pagado};
+      });
+
+    var gdRows = dbAll(
+      "SELECT gd.*, c.nombre AS categoria_nombre FROM gastos_diarios gd " +
+      "LEFT JOIN categorias c ON c.id = gd.categoria_id ORDER BY gd.id"
+    );
+    var gastosDiarios = gdRows.map(function(g){
+      return {
+        anio: g.anio, mes: g.mes, fecha: g.fecha, detalle: g.detalle, categoria: g.categoria_nombre || "",
+        monto: g.monto, prescindible: !!g.prescindible, medio_pago: g.medio_pago || "",
+        tipo_tarjeta: g.tipo_tarjeta || "", banco_tarjeta: g.banco_tarjeta || ""
+      };
+    });
+
+    return {personas: personas, categorias: categorias, gastos: gastos, checklist_pagos: checklist, gastos_diarios: gastosDiarios};
+  }
+
+  // ---- publicar el estado local en la carpeta ----
+  function exportarASync(){
+    if(!syncDirHandle) return Promise.resolve();
+    if(syncBusy) return Promise.resolve();
+    syncBusy = true;
+    return verificarPermisoCarpeta(syncDirHandle, false).then(function(ok){
+      if(!ok){ mostrarBotonReconectar(); return; }
+      var ts = new Date().toISOString();
+      var device = obtenerDeviceIdSync();
+      var payload = {version: 1, updated_at: ts, device: device, data: construirDatosSync()};
+      return escribirArchivoEnCarpeta(syncDirHandle, SYNC_DATA_FILE, payload).then(function(){
+        return escribirArchivoEnCarpeta(syncDirHandle, SYNC_META_FILE, {version: 1, updated_at: ts, device: device});
+      }).then(function(){
+        try{
+          localStorage.setItem("gf_syncLastLocalExportAt", ts);
+          // esto es LO QUE ACABAMOS de publicar -- si despues lo releemos
+          // (con el mismo device id) no hay que volver a "aplicarlo".
+          localStorage.setItem("gf_syncLastAppliedRemoteUpdatedAt", ts);
+        }catch(e){}
+        cambiosLocalesPendientesSync = false;
+        actualizarEstadoSyncUI();
+      });
+    }).catch(function(e){
+      mostrarToast("No se pudo publicar en la carpeta de sync: " + (e && e.message ? e.message : e), "bad");
+    }).then(function(){
+      syncBusy = false;
+    });
+  }
+
+  // ---- fusion (upsert) de datos remotos hacia la base local ----
+  function repartosIguales(a, b){
+    var ka = Object.keys(a).sort(), kb = Object.keys(b).sort();
+    if(ka.length !== kb.length) return false;
+    for(var i = 0; i < ka.length; i++){
+      if(ka[i] !== kb[i]) return false;
+      if(Math.round(Number(a[ka[i]]) || 0) !== Math.round(Number(b[kb[i]]) || 0)) return false;
+    }
+    return true;
+  }
+
+  function fusionarDatosRemotos(data){
+    var huboCambios = false;
+    suprimirMarcaSyncPendiente = true;
+    try{
+      db.run("BEGIN");
+      try{
+        (data.personas || []).forEach(function(p){
+          var nombre = p && String(p.nombre || "").trim();
+          if(!nombre) return;
+          var existente = dbGet("SELECT id FROM personas WHERE nombre = ? COLLATE NOCASE", [nombre]);
+          if(!existente){ obtenerOCrearPersona(nombre); huboCambios = true; }
+        });
+        (data.categorias || []).forEach(function(c){
+          var nombre = c && String(c.nombre || "").trim();
+          if(!nombre) return;
+          var existente = dbGet("SELECT id FROM categorias WHERE nombre = ? COLLATE NOCASE", [nombre]);
+          if(!existente){ obtenerOCrearCategoria(nombre); huboCambios = true; }
+        });
+
+        (data.gastos || []).forEach(function(g){
+          if(!g || !g.detalle || !g.fecha) return;
+          var anio = Number(g.anio), mes = Number(g.mes), monto = Number(g.monto_total);
+          if(!anio || !mes || !isFinite(monto)) return;
+          var categoriaNombre = String(g.categoria || "").trim();
+          var empresa = String(g.empresa || "").trim();
+          var cuota = String(g.cuota_texto || "1").trim() || "1";
+          var origen = String(g.origen || "sync").trim() || "sync";
+          var repartoIn = {};
+          (g.personas || []).forEach(function(p){
+            var nombre = p && String(p.nombre || "").trim();
+            if(nombre) repartoIn[nombre] = Number(p.monto) || 0;
+          });
+
+          var existente = dbGet(
+            "SELECT * FROM gastos WHERE anio=? AND mes=? AND fecha=? AND detalle=? AND monto_total=?",
+            [anio, mes, g.fecha, g.detalle, monto]
+          );
+          if(existente){
+            var repartoActual = {};
+            dbAll(
+              "SELECT p.nombre AS nombre, gp.monto AS monto FROM gasto_persona gp " +
+              "JOIN personas p ON p.id = gp.persona_id WHERE gp.gasto_id = ?",
+              [existente.id]
+            ).forEach(function(r){ repartoActual[r.nombre] = r.monto; });
+            var catActualNombre = "";
+            if(existente.categoria_id){
+              var cRow = dbGet("SELECT nombre FROM categorias WHERE id=?", [existente.categoria_id]);
+              catActualNombre = cRow ? cRow.nombre : "";
+            }
+            var igual = (existente.empresa || "") === empresa &&
+                        catActualNombre === categoriaNombre &&
+                        (existente.cuota_texto || "1") === cuota &&
+                        repartosIguales(repartoActual, repartoIn);
+            if(igual) return;
+            var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
+            db.run("UPDATE gastos SET empresa=?, categoria_id=?, cuota_texto=? WHERE id=?",
+              [empresa || null, categoriaId, cuota, existente.id]);
+            db.run("DELETE FROM gasto_persona WHERE gasto_id=?", [existente.id]);
+            Object.keys(repartoIn).forEach(function(nombre){
+              var personaId = obtenerOCrearPersona(nombre);
+              db.run("INSERT INTO gasto_persona (gasto_id, persona_id, monto) VALUES (?,?,?)", [existente.id, personaId, repartoIn[nombre]]);
+            });
+            huboCambios = true;
+          }else{
+            insertarGastoConReparto(g.fecha, g.detalle, empresa, categoriaNombre, monto, cuota, repartoIn, origen);
+            huboCambios = true;
+          }
+        });
+
+        (data.checklist_pagos || []).forEach(function(c){
+          if(!c || !c.persona || !c.detalle) return;
+          var anio = Number(c.anio), mes = Number(c.mes);
+          if(!anio || !mes) return;
+          var pagado = c.pagado ? 1 : 0;
+          var existente = dbGet(
+            "SELECT * FROM checklist_pagos WHERE persona=? COLLATE NOCASE AND anio=? AND mes=? AND detalle=?",
+            [c.persona, anio, mes, c.detalle]
+          );
+          if(existente){
+            if(!!existente.pagado === !!pagado) return;
+            db.run("UPDATE checklist_pagos SET pagado=?, actualizado_en=datetime('now') WHERE id=?", [pagado, existente.id]);
+            huboCambios = true;
+          }else{
+            db.run("INSERT INTO checklist_pagos (persona, anio, mes, detalle, pagado) VALUES (?,?,?,?,?)",
+              [c.persona, anio, mes, c.detalle, pagado]);
+            huboCambios = true;
+          }
+        });
+
+        (data.gastos_diarios || []).forEach(function(g){
+          if(!g || !g.detalle || !g.fecha) return;
+          var anio = Number(g.anio), mes = Number(g.mes), monto = Number(g.monto);
+          if(!anio || !mes || !isFinite(monto)) return;
+          var categoriaNombre = String(g.categoria || "").trim();
+          var prescindible = g.prescindible ? 1 : 0;
+          var medioPago = String(g.medio_pago || "").trim();
+          var tipoTarjeta = String(g.tipo_tarjeta || "").trim();
+          var bancoTarjeta = String(g.banco_tarjeta || "").trim();
+          var existente = dbGet(
+            "SELECT * FROM gastos_diarios WHERE anio=? AND mes=? AND fecha=? AND detalle=? AND monto=?",
+            [anio, mes, g.fecha, g.detalle, monto]
+          );
+          if(existente){
+            var catActualNombre = "";
+            if(existente.categoria_id){
+              var cRow2 = dbGet("SELECT nombre FROM categorias WHERE id=?", [existente.categoria_id]);
+              catActualNombre = cRow2 ? cRow2.nombre : "";
+            }
+            var igual2 = catActualNombre === categoriaNombre &&
+                        !!existente.prescindible === !!prescindible &&
+                        (existente.medio_pago || "") === medioPago &&
+                        (existente.tipo_tarjeta || "") === tipoTarjeta &&
+                        (existente.banco_tarjeta || "") === bancoTarjeta;
+            if(igual2) return;
+            var categoriaId2 = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
+            db.run(
+              "UPDATE gastos_diarios SET categoria_id=?, prescindible=?, medio_pago=?, tipo_tarjeta=?, banco_tarjeta=? WHERE id=?",
+              [categoriaId2, prescindible, medioPago || null, tipoTarjeta || null, bancoTarjeta || null, existente.id]
+            );
+            huboCambios = true;
+          }else{
+            insertarGastoDiario(g.fecha, g.detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta);
+            huboCambios = true;
+          }
+        });
+
+        db.run("COMMIT");
+      }catch(e){
+        db.run("ROLLBACK");
+        throw e;
+      }
+    }finally{
+      suprimirMarcaSyncPendiente = false;
+    }
+    if(huboCambios){
+      scheduleSave();
+      refrescarTodo();
+    }
+    return huboCambios;
+  }
+
+  // ---- revisar si hay una version mas nueva en la carpeta y aplicarla ----
+  function revisarActualizacionesRemotas(avisar){
+    if(!syncDirHandle) return Promise.resolve();
+    if(syncBusy) return Promise.resolve();
+    syncBusy = true;
+    return verificarPermisoCarpeta(syncDirHandle, false).then(function(ok){
+      if(!ok){ mostrarBotonReconectar(); return; }
+      return leerArchivoDeCarpeta(syncDirHandle, SYNC_META_FILE).then(function(meta){
+        if(!meta || !meta.updated_at) return;
+        var ultimaAplicada = null;
+        try{ ultimaAplicada = localStorage.getItem("gf_syncLastAppliedRemoteUpdatedAt"); }catch(e){}
+        if(ultimaAplicada && new Date(meta.updated_at).getTime() <= new Date(ultimaAplicada).getTime()) return;
+        return leerArchivoDeCarpeta(syncDirHandle, SYNC_DATA_FILE).then(function(payload){
+          if(!payload || !payload.data) return;
+          var huboCambios = fusionarDatosRemotos(payload.data);
+          try{ localStorage.setItem("gf_syncLastAppliedRemoteUpdatedAt", meta.updated_at); }catch(e){}
+          actualizarEstadoSyncUI();
+          if(avisar && huboCambios) mostrarToast("Datos actualizados desde la nube.", "ok");
+        });
+      });
+    }).catch(function(e){
+      mostrarToast("No se pudo revisar la carpeta de sync: " + (e && e.message ? e.message : e), "bad");
+    }).then(function(){
+      syncBusy = false;
+    });
+  }
+
+  // ---- marcar cambio local pendiente (llamado desde scheduleSave) ----
+  function marcarCambioLocalParaSync(){
+    cambiosLocalesPendientesSync = true;
+    if(!syncDirHandle) return;
+    if(syncExportTimer) clearTimeout(syncExportTimer);
+    syncExportTimer = setTimeout(function(){
+      syncExportTimer = null;
+      exportarASync();
+    }, SYNC_DEBOUNCE_MS);
+  }
+
+  // ---- polling cada 3.5 minutos ----
+  function iniciarPollingSync(){
+    if(syncPollingTimer) return;
+    syncPollingTimer = setInterval(function(){
+      revisarActualizacionesRemotas(true).then(function(){
+        if(cambiosLocalesPendientesSync) return exportarASync();
+      });
+    }, SYNC_POLL_MS);
+  }
+
+  // ---- conectar carpeta por primera vez ----
+  document.getElementById("btnSync").addEventListener("click", function(){
+    if(!fsaSupported()){
+      alert(
+        "Esta función solo está disponible en navegadores basados en Chromium (Google Chrome o Microsoft Edge) " +
+        "de escritorio -- es una limitación del navegador, no se puede evitar. El resto de la app funciona " +
+        "normalmente sin esta función."
+      );
+      return;
+    }
+    window.showDirectoryPicker({mode: "readwrite"}).then(function(handle){
+      syncDirHandle = handle;
+      return idbSet(SYNC_HANDLE_KEY, handle).then(function(){
+        try{ localStorage.setItem("gf_syncFolderName", handle.name || ""); }catch(e){}
+        ocultarBotonReconectar();
+        actualizarEstadoSyncUI();
+        iniciarPollingSync();
+        return revisarActualizacionesRemotas(true);
+      }).then(function(){
+        marcarCambioLocalParaSync();
+        mostrarToast("Carpeta conectada. Sincronizando…", "ok");
+      });
+    }).catch(function(e){
+      if(e && e.name === "AbortError") return; // el usuario cerro el dialogo del picker
+      mostrarToast("No se pudo conectar la carpeta: " + (e && e.message ? e.message : e), "bad");
+    });
+  });
+
+  // ---- reconectar (requiere gesto del usuario -- por eso es un boton, no algo automatico) ----
+  document.getElementById("btnSyncReconectar").addEventListener("click", function(){
+    if(!syncDirHandle){ mostrarToast("No hay ninguna carpeta guardada todavía.", "bad"); return; }
+    verificarPermisoCarpeta(syncDirHandle, true).then(function(ok){
+      if(ok){
+        ocultarBotonReconectar();
+        actualizarEstadoSyncUI();
+        iniciarPollingSync();
+        mostrarToast("Carpeta reconectada.", "ok");
+        return revisarActualizacionesRemotas(true);
+      }else{
+        mostrarToast("No se otorgó permiso sobre la carpeta.", "bad");
+      }
+    }).catch(function(e){
+      mostrarToast("No se pudo reconectar la carpeta: " + (e && e.message ? e.message : e), "bad");
+    });
+  });
+
+  // ---- al cargar la app: si hay una carpeta guardada de una visita anterior ----
+  function inicializarSyncAlCargar(){
+    if(!fsaSupported()) return Promise.resolve();
+    return idbGet(SYNC_HANDLE_KEY).then(function(handle){
+      if(!handle) return;
+      syncDirHandle = handle;
+      actualizarEstadoSyncUI();
+      return verificarPermisoCarpeta(handle, false).then(function(ok){
+        if(ok){
+          iniciarPollingSync();
+          return revisarActualizacionesRemotas(true);
+        }else{
+          // no podemos pedir permiso automaticamente sin un gesto del
+          // usuario apenas carga la pagina -- mostramos el boton en vez de
+          // fallar en silencio.
+          mostrarBotonReconectar();
+        }
+      });
+    }).catch(function(e){
+      // un handle guardado que ya no es valido (carpeta borrada/movida, etc.)
+      // no debe romper el arranque de la app -- se ignora, el usuario puede
+      // volver a elegir carpeta con el boton principal.
+      try{ console.warn("No se pudo restaurar la carpeta de sync guardada:", e); }catch(err){}
+    });
+  }
+
+  // Expone algunas funciones internas de esta seccion en window para poder
+  // probar la logica de fusion desde la consola del navegador sin pasar por
+  // el picker real de carpeta (util para pruebas automatizadas/headless,
+  // donde showDirectoryPicker() no se puede completar). No cambia el
+  // comportamiento normal de la app para el usuario.
+  window.__gfSyncDebug = {
+    construirDatosSync: construirDatosSync,
+    fusionarDatosRemotos: fusionarDatosRemotos,
+    repartosIguales: repartosIguales
+  };
+
   // ---------------------------------------------------------------- arranque
 
   function refrescarTodo(){
@@ -2196,6 +2710,11 @@
     activarTab(lastTab || "ingreso");
 
     document.getElementById("appLoading").hidden = true;
+
+    // Sync con carpeta local: nunca bloquea el arranque -- se dispara
+    // aparte y en segundo plano (revisa si ya habia una carpeta elegida en
+    // una visita anterior).
+    inicializarSyncAlCargar().catch(function(e){ try{ console.warn(e); }catch(err){} });
   }
 
   if(typeof initSqlJs !== "function"){
