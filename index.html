@@ -2223,7 +2223,7 @@
   var SYNC_META_FILE = "sync_meta.json";
   var SYNC_DATA_FILE = "family_expenses_sync.json";
   var SYNC_HANDLE_KEY = "sync_dir_handle";
-  var SYNC_POLL_MS = 210000;   // 3.5 minutos
+  var SYNC_POLL_MS = 30000;    // 30 segundos
   var SYNC_DEBOUNCE_MS = 18000; // ~15-20s sin actividad antes de publicar cambios locales
 
   var syncDirHandle = null;
@@ -2592,7 +2592,7 @@
     }, SYNC_DEBOUNCE_MS);
   }
 
-  // ---- polling cada 3.5 minutos ----
+  // ---- polling cada 30 segundos ----
   function iniciarPollingSync(){
     if(syncPollingTimer) return;
     syncPollingTimer = setInterval(function(){
