@@ -330,6 +330,27 @@
   .placeholder-card h2{ margin-bottom:8px; }
   .placeholder-card p{ max-width:440px; margin:0 auto 8px; color:var(--text-dim); font-size:.9rem; }
 
+  /* ---------------- pantalla de clave ---------------- */
+  .lock-screen{
+    position:fixed; inset:0; background:var(--bg); z-index:60;
+    display:flex; align-items:center; justify-content:center; padding:16px;
+  }
+  .lock-screen[hidden]{ display:none; }
+  .lock-box{
+    background:var(--surface); border:1px solid var(--border); border-radius:12px;
+    padding:28px 24px; width:100%; max-width:320px; text-align:center;
+  }
+  .lock-box .brand-logo{ font-size:2.4rem; display:block; margin-bottom:8px; }
+  .lock-box h2{ margin-bottom:4px; }
+  .lock-box p{ color:var(--text-dim); font-size:.85rem; margin-bottom:16px; }
+  .lock-box input{
+    width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--border);
+    background:var(--surface-2); color:var(--text); font-size:1rem; text-align:center;
+    letter-spacing:.15em; margin-bottom:10px;
+  }
+  .lock-box button{ width:100%; }
+  #lockError{ color:var(--bad); font-size:.82rem; min-height:1.2em; margin-top:8px; }
+
   /* ---------------- pantalla de carga inicial ---------------- */
   .loading-screen{
     position:fixed; inset:0; background:var(--bg); z-index:50;
@@ -356,6 +377,19 @@
 </style>
 </head>
 <body>
+
+<div class="lock-screen" id="lockScreen">
+  <div class="lock-box">
+    <span class="brand-logo">🔒</span>
+    <h2>Gastos Familiares</h2>
+    <p>Ingresa la clave para continuar</p>
+    <form id="lockForm" autocomplete="off">
+      <input type="password" id="lockClave" inputmode="numeric" placeholder="Clave" autofocus>
+      <button type="submit" class="btn-primary">Entrar</button>
+    </form>
+    <div id="lockError"></div>
+  </div>
+</div>
 
 <div id="fatalBanner" hidden role="alert">
   <span id="fatalBannerText"></span>
@@ -5249,9 +5283,11 @@
     inicializarSyncAlCargar().catch(function(e){ try{ console.warn(e); }catch(err){} });
   }
 
-  if(typeof initSqlJs !== "function"){
-    mostrarErrorFatal("No se pudo cargar el motor de base de datos (vendor/sql-wasm.js). Verifica que la carpeta 'vendor' esté junto a este archivo.");
-  }else{
+  function iniciarAppReal(){
+    if(typeof initSqlJs !== "function"){
+      mostrarErrorFatal("No se pudo cargar el motor de base de datos (vendor/sql-wasm.js). Verifica que la carpeta 'vendor' esté junto a este archivo.");
+      return;
+    }
     initSqlJs({ locateFile: function(file){ return "vendor/" + file; } }).then(function(SQLNS){
       SQL = SQLNS;
       return idbGet(IDB_KEY);
@@ -5275,6 +5311,42 @@
       document.getElementById("appLoading").hidden = true;
     });
   }
+
+  // ---------------------------------------------------------------- clave de acceso
+  // OJO: esto es una barrera del lado del navegador nada mas -- como el
+  // repositorio es publico, cualquiera que mire el codigo fuente puede ver
+  // esta clave. Sirve para que alguien con el link no entre sin querer o por
+  // curiosidad, NO es seguridad real (a diferencia de la clave de la app de
+  // escritorio, que si usa hash con sal). Se pide una vez por sesion del
+  // navegador (sessionStorage), no en cada recarga de pagina.
+  var LOCK_CLAVE = "1234";
+  var LOCK_SESSION_KEY = "gf_lockOk";
+
+  function mostrarApp(){
+    document.getElementById("lockScreen").hidden = true;
+    iniciarAppReal();
+  }
+
+  (function inicializarLock(){
+    var yaDesbloqueado = false;
+    try{ yaDesbloqueado = sessionStorage.getItem(LOCK_SESSION_KEY) === "1"; }catch(e){}
+    if(yaDesbloqueado){
+      mostrarApp();
+      return;
+    }
+    document.getElementById("lockForm").addEventListener("submit", function(ev){
+      ev.preventDefault();
+      var valor = document.getElementById("lockClave").value;
+      if(valor === LOCK_CLAVE){
+        try{ sessionStorage.setItem(LOCK_SESSION_KEY, "1"); }catch(e){}
+        mostrarApp();
+      }else{
+        document.getElementById("lockError").textContent = "Clave incorrecta.";
+        document.getElementById("lockClave").value = "";
+        document.getElementById("lockClave").focus();
+      }
+    });
+  })();
 })();
 </script>
 </body>
