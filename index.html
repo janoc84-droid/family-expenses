@@ -582,6 +582,7 @@
         <button type="button" class="btn-ghost" id="ecBtnCopiarImagen">📋 Copiar imagen</button>
         <button type="button" class="btn-primary" id="ecBtnWhatsapp">💬 Enviar por WhatsApp</button>
         <button type="button" class="btn-ghost" id="ecBtnHistorial">🕘 Historial de ajustes...</button>
+        <button type="button" class="btn-ghost" id="ecBtnSubtotal">➕ Subtotal combinado...</button>
       </div>
       <div class="note" id="ecExportMensaje" hidden></div>
       <div id="ecResultado"></div>
@@ -934,6 +935,30 @@
     "  actualizado_en TEXT NOT NULL DEFAULT (datetime('now')),",
     "  UNIQUE (anio, mes)",
     ");",
+    // Subtotal combinado de Estado de Cuenta: calculadora aparte para el
+    // caso "una persona paga por otras" (varia cada mes, no es una regla
+    // fija modelable de antemano -- ver _abrir_subtotal_combinado del
+    // escritorio, family_expenses/app/gui/screens/estado_cuenta_screen.py).
+    // Cada fila es UNA entrada agregada a mano desde el panel "Subtotal
+    // combinado..." de Estado de Cuenta: el total real de otra persona ya
+    // cargada, o un monto suelto con etiqueta libre. Se acumulan entre usos
+    // (nunca se reemplazan) y cada una se puede quitar por separado.
+    // incluir_en_total=1 significa que esta fila SI se suma al total que se
+    // muestra en pantalla y en las exportaciones de Estado de Cuenta -- pero
+    // es puramente de presentacion: nunca toca gastos/gasto_persona reales,
+    // asi que Resumen Mensual/Dashboard (que leen esas tablas directo) nunca
+    // se ven afectados por esto.
+    "CREATE TABLE IF NOT EXISTS ajuste_estado_cuenta (",
+    "  id INTEGER PRIMARY KEY,",
+    "  persona TEXT NOT NULL,",
+    "  anio INTEGER NOT NULL,",
+    "  mes INTEGER NOT NULL CHECK (mes BETWEEN 1 AND 12),",
+    "  etiqueta TEXT NOT NULL,",
+    "  monto REAL NOT NULL,",
+    "  incluir_en_total INTEGER NOT NULL DEFAULT 0,",
+    "  detalle TEXT,",
+    "  created_at TEXT NOT NULL DEFAULT (datetime('now'))",
+    ");",
     "CREATE INDEX IF NOT EXISTS idx_gastos_anio_mes ON gastos(anio, mes);",
     "CREATE INDEX IF NOT EXISTS idx_gasto_persona_gasto ON gasto_persona(gasto_id);",
     "CREATE INDEX IF NOT EXISTS idx_gasto_persona_persona ON gasto_persona(persona_id);",
@@ -941,7 +966,8 @@
     "CREATE INDEX IF NOT EXISTS idx_gastos_diarios_anio_mes ON gastos_diarios(anio, mes);",
     "CREATE INDEX IF NOT EXISTS idx_gasto_diario_persona_gasto ON gasto_diario_persona(gasto_diario_id);",
     "CREATE INDEX IF NOT EXISTS idx_historial_persona_mes ON historial_ajustes(persona, anio, mes);",
-    "CREATE INDEX IF NOT EXISTS idx_meses_conciliados_anio_mes ON meses_conciliados(anio, mes);"
+    "CREATE INDEX IF NOT EXISTS idx_meses_conciliados_anio_mes ON meses_conciliados(anio, mes);",
+    "CREATE INDEX IF NOT EXISTS idx_ajuste_ec_persona_mes ON ajuste_estado_cuenta(persona, anio, mes);"
   ].join("\n");
 
   // Evolucion defensiva del esquema para instalaciones previas: CREATE
@@ -1723,6 +1749,62 @@
     return encontrados.length ? encontrados[0] : null;
   }
 
+  // -------------------------------------------- Subtotal combinado (ajuste_estado_cuenta)
+  // Puerto de _abrir_subtotal_combinado (estado_cuenta_screen.py): calculadora
+  // aparte para "una persona paga por otras" -- ver comentario de
+  // ajuste_estado_cuenta en SCHEMA_SQL mas arriba para el porque de
+  // incluir_en_total.
+
+  // Misma logica de suma que ecItemsActuales/totalEcActual, pero para OTRA
+  // persona (la que se agrega desde el panel de Subtotal combinado).
+  function totalRealPersonaMes(nombre, anio, mes){
+    var row = dbGet(
+      "SELECT COALESCE(SUM(gp.monto),0) AS total FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id " +
+      "JOIN personas p ON p.id=gp.persona_id WHERE p.nombre=? COLLATE NOCASE AND g.anio=? AND g.mes=?",
+      [nombre, anio, mes]
+    );
+    return row ? row.total : 0;
+  }
+  function ajustesEcGuardados(estado){
+    if(!estado) return [];
+    return dbAll(
+      "SELECT * FROM ajuste_estado_cuenta WHERE persona=? COLLATE NOCASE AND anio=? AND mes=? ORDER BY created_at, id",
+      [estado.nombre, estado.anio, estado.mes]
+    );
+  }
+  function sumaAjustesIncluidos(ajustes){
+    return ajustes.reduce(function(a, it){ return a + (it.incluir_en_total ? Number(it.monto) : 0); }, 0);
+  }
+  function renderFilasAjusteEc(ajustes, conQuitar){
+    if(!ajustes.length) return "";
+    return ajustes.map(function(a){
+      var tipoTxt = a.incluir_en_total ? "suma al total" : "nota, no suma";
+      return "<div class=\"historial-item\"><p><strong>" + escapeHtml(a.etiqueta) + "</strong> — " + money(a.monto) +
+        " (" + tipoTxt + ")" + (a.detalle ? " — " + escapeHtml(a.detalle) : "") + "</p>" +
+        (conQuitar ? "<button type=\"button\" class=\"btn-danger\" data-quitar-ajuste=\"" + a.id + "\">Quitar</button>" : "") +
+        "</div>";
+    }).join("");
+  }
+  function quitarAjusteEc(id){
+    if(!confirm("¿Quitar este ajuste de Subtotal combinado?")) return;
+    dbRun("DELETE FROM ajuste_estado_cuenta WHERE id=?", [id]);
+    renderEstadoCuenta();
+    mostrarToast("Ajuste quitado.", "ok");
+  }
+  // Info compartida por la vista principal y las 3 exportaciones (PDF/
+  // imagen/WhatsApp): el total real de ecItemsActuales mas lo que corresponda
+  // sumar de ajuste_estado_cuenta, sin tocar nunca gastos/gasto_persona.
+  function infoTotalEc(estado){
+    var real = totalEcActual();
+    var ajustes = ajustesEcGuardados(estado);
+    var incluidos = sumaAjustesIncluidos(ajustes);
+    var hayIncluidos = ajustes.some(function(a){ return a.incluir_en_total; });
+    return {
+      real: real, ajustes: ajustes, incluidos: incluidos,
+      totalMostrado: hayIncluidos ? real + incluidos : real, hayIncluidos: hayIncluidos
+    };
+  }
+
   function renderTablaEstadoCuenta(items){
     if(items.length === 0) return "<p class=\"hint\">Sin movimientos.</p>";
     var filas = items.map(function(it){
@@ -1796,12 +1878,20 @@
     ecItemsActuales = items;
     var total = items.reduce(function(a, it){ return a + it.monto; }, 0);
     var avisoCuadre = verificarCuadreMes(estado.anio, estado.mes);
+    var ajustes = ajustesEcGuardados(estado);
+    var incluidos = sumaAjustesIncluidos(ajustes);
+    var hayIncluidos = ajustes.some(function(a){ return a.incluir_en_total; });
+    var totalMostrado = hayIncluidos ? total + incluidos : total;
+    var statTotalLabel = hayIncluidos ? "Total combinado " + MESES_ES[estado.mes] + " " + estado.anio : "Total " + MESES_ES[estado.mes] + " " + estado.anio;
     cont.innerHTML =
       (avisoCuadre ? "<div class=\"note warn\">" + escapeHtml(avisoCuadre) + "</div>" : "") +
       "<div class=\"stat-bar\">" +
         "<div class=\"stat\"><div class=\"k\">Movimientos</div><div class=\"v\">" + items.length + "</div></div>" +
-        "<div class=\"stat\"><div class=\"k\">Total " + MESES_ES[estado.mes] + " " + estado.anio + "</div><div class=\"v\">" + money(total) + "</div></div>" +
-      "</div>" + renderTablaEstadoCuenta(items);
+        "<div class=\"stat\"><div class=\"k\">" + escapeHtml(statTotalLabel) + "</div><div class=\"v\">" + money(totalMostrado) + "</div></div>" +
+      "</div>" +
+      (hayIncluidos ? "<p class=\"hint\">Incluye " + money(incluidos) + " agregado desde Subtotal combinado (total real sin agregados: " + money(total) + ").</p>" : "") +
+      renderTablaEstadoCuenta(items) +
+      (ajustes.length ? "<h3 style=\"font-size:.85rem;color:var(--text-dim);margin:14px 0 8px;\">Ajustes de Subtotal combinado</h3>" + renderFilasAjusteEc(ajustes, true) : "");
     cont.querySelectorAll("[data-ec-editar]").forEach(function(b){
       b.addEventListener("click", function(){ abrirEditarItem(buscarItemEc(Number(b.dataset.ecEditar))); });
     });
@@ -1813,6 +1903,9 @@
     });
     cont.querySelectorAll("[data-ec-eliminar]").forEach(function(b){
       b.addEventListener("click", function(){ eliminarItemEc(buscarItemEc(Number(b.dataset.ecEliminar))); });
+    });
+    cont.querySelectorAll("[data-quitar-ajuste]").forEach(function(b){
+      b.addEventListener("click", function(){ quitarAjusteEc(Number(b.dataset.quitarAjuste)); });
     });
   }
   document.getElementById("ecPersona").addEventListener("input", renderEstadoCuenta);
@@ -2312,6 +2405,163 @@
   }
   document.getElementById("ecBtnHistorial").addEventListener("click", abrirHistorial);
 
+  // -------------------------------------------- Subtotal combinado (panel)
+
+  function abrirSubtotalCombinado(){
+    var estado = estadoActual();
+    if(!estado){ mostrarToast("Elige persona, mes y año primero.", "bad"); return; }
+    var nuevas = []; // [{etiqueta, monto, detalle}] -- agregado en esta sesion, aun no guardado
+
+    var html =
+      "<h2>Subtotal combinado</h2>" +
+      "<p class=\"hint\">Sumale a " + escapeHtml(estado.nombre) + " lo que pagó por otras personas este mes " + MESES_ES[estado.mes] + " " + estado.anio +
+      ": otra persona ya cargada (se agrega su total real de este mismo mes) o un monto suelto con etiqueta libre. " +
+      "\"Agregar como nota\" deja la fila visible sin cambiar el total mostrado; \"Agregar a Estado de Cuenta\" hace que el total en pantalla y en las exportaciones " +
+      "pase a incluirla -- en ambos casos nunca se toca ningún gasto real ni el total que usan Resumen Mensual/Dashboard.</p>" +
+      "<div id=\"scGuardados\"></div>" +
+      "<h3 style=\"font-size:.85rem;color:var(--text-dim);margin:14px 0 6px;\">Agregar otra persona</h3>" +
+      "<div class=\"form-grid\">" +
+        "<div class=\"field grow\"><label>Persona</label><input type=\"text\" id=\"scPersona\" list=\"personasList\" placeholder=\"Nombre...\"></div>" +
+      "</div>" +
+      "<div class=\"form-actions\" style=\"justify-content:flex-start;margin-bottom:6px;\">" +
+        "<button type=\"button\" class=\"btn-ghost\" id=\"scAgregarPersona\">+ Agregar persona</button>" +
+      "</div>" +
+      "<h3 style=\"font-size:.85rem;color:var(--text-dim);margin:14px 0 6px;\">Agregar monto manual</h3>" +
+      "<div class=\"form-grid\">" +
+        "<div class=\"field grow\"><label>Etiqueta</label><input type=\"text\" id=\"scEtiqueta\" placeholder=\"Ej. Alejandro\"></div>" +
+        "<div class=\"field small\"><label>Monto</label><input type=\"number\" id=\"scMonto\" min=\"0\" step=\"1\" placeholder=\"0\"></div>" +
+        "<div class=\"field grow\"><label>Detalle (opcional)</label><input type=\"text\" id=\"scDetalle\" placeholder=\"Ej. Deudas compartidas\"></div>" +
+      "</div>" +
+      "<div class=\"form-actions\" style=\"justify-content:flex-start;margin-bottom:6px;\">" +
+        "<button type=\"button\" class=\"btn-ghost\" id=\"scAgregarManual\">+ Agregar monto</button>" +
+      "</div>" +
+      "<h3 style=\"font-size:.85rem;color:var(--text-dim);margin:14px 0 6px;\">Nuevo en esta sesión (todavía sin guardar)</h3>" +
+      "<div id=\"scLista\"></div>" +
+      "<div class=\"note\" id=\"scTotalLive\"></div>" +
+      "<div class=\"note\" id=\"scMensaje\" hidden></div>" +
+      "<div class=\"form-actions\">" +
+        "<button type=\"button\" class=\"btn-ghost\" id=\"scCancelar\">Cerrar</button>" +
+        "<button type=\"button\" class=\"btn-ghost\" id=\"scGuardarNota\">Agregar como nota (no suma)</button>" +
+        "<button type=\"button\" class=\"btn-primary\" id=\"scGuardarTotal\">Agregar a Estado de Cuenta</button>" +
+      "</div>";
+    abrirModal(html);
+
+    function renderGuardados(){
+      var ajustes = ajustesEcGuardados(estado);
+      var cont = document.getElementById("scGuardados");
+      if(!cont) return;
+      if(ajustes.length === 0){
+        cont.innerHTML = "<p class=\"hint\">Todavía no hay ajustes guardados para este mes.</p>";
+        return;
+      }
+      cont.innerHTML = "<h3 style=\"font-size:.85rem;color:var(--text-dim);margin-bottom:6px;\">Ya guardado (de sesiones anteriores)</h3>" +
+        renderFilasAjusteEc(ajustes, true);
+      cont.querySelectorAll("[data-quitar-ajuste]").forEach(function(b){
+        b.addEventListener("click", function(){
+          if(!confirm("¿Quitar este ajuste guardado?")) return;
+          dbRun("DELETE FROM ajuste_estado_cuenta WHERE id=?", [Number(b.dataset.quitarAjuste)]);
+          renderGuardados();
+          actualizarTotalLive();
+        });
+      });
+    }
+    function totalGuardadosIncluidos(){
+      return sumaAjustesIncluidos(ajustesEcGuardados(estado));
+    }
+    function actualizarListaNuevas(){
+      var listaEl = document.getElementById("scLista");
+      if(nuevas.length === 0){
+        listaEl.innerHTML = "<p class=\"hint\">Nada agregado todavía.</p>";
+      }else{
+        listaEl.innerHTML = nuevas.map(function(n, i){
+          return "<div class=\"division-row\"><span>" + escapeHtml(n.etiqueta) +
+            (n.detalle ? " <span class=\"hint\">(" + escapeHtml(n.detalle) + ")</span>" : "") + "</span>" +
+            "<span>" + money(n.monto) + " <button type=\"button\" class=\"icon-btn danger\" data-quitar-nueva=\"" + i + "\" title=\"Quitar\">✕</button></span></div>";
+        }).join("");
+        listaEl.querySelectorAll("[data-quitar-nueva]").forEach(function(b){
+          b.addEventListener("click", function(){ nuevas.splice(Number(b.dataset.quitarNueva), 1); actualizarListaNuevas(); });
+        });
+      }
+      actualizarTotalLive();
+    }
+    function actualizarTotalLive(){
+      var real = totalEcActual();
+      var incluidos = totalGuardadosIncluidos();
+      var sumaNuevas = nuevas.reduce(function(a, n){ return a + n.monto; }, 0);
+      var el = document.getElementById("scTotalLive");
+      el.className = "note";
+      el.textContent = "Total combinado en vivo (real de " + estado.nombre + " + ya guardado que suma + lo nuevo de arriba): " +
+        money(real + incluidos + sumaNuevas) + " = " + money(real) + " + " + money(incluidos) + " + " + money(sumaNuevas) + ".";
+    }
+
+    renderGuardados();
+    actualizarListaNuevas();
+
+    document.getElementById("scCancelar").addEventListener("click", cerrarModal);
+
+    document.getElementById("scAgregarPersona").addEventListener("click", function(){
+      var msgEl = document.getElementById("scMensaje");
+      msgEl.hidden = true;
+      var nombreOtra = document.getElementById("scPersona").value.trim();
+      if(!nombreOtra){ msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="Elige una persona."; return; }
+      if(nombreOtra.toLowerCase() === estado.nombre.toLowerCase()){
+        msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="Elige una persona distinta a " + estado.nombre + "."; return;
+      }
+      var totalOtra = totalRealPersonaMes(nombreOtra, estado.anio, estado.mes);
+      nuevas.push({
+        etiqueta: nombreOtra, monto: totalOtra,
+        detalle: "Total real de " + nombreOtra + " en " + MESES_ES[estado.mes] + " " + estado.anio
+      });
+      document.getElementById("scPersona").value = "";
+      actualizarListaNuevas();
+    });
+
+    document.getElementById("scAgregarManual").addEventListener("click", function(){
+      var msgEl = document.getElementById("scMensaje");
+      msgEl.hidden = true;
+      var etiqueta = document.getElementById("scEtiqueta").value.trim();
+      if(!etiqueta){ msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="Escribe una etiqueta."; return; }
+      var montoTxt = document.getElementById("scMonto").value;
+      var monto = Number(montoTxt);
+      if(montoTxt.trim() === "" || isNaN(monto) || monto <= 0){
+        msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="El monto debe ser mayor que 0."; return;
+      }
+      var detalle = document.getElementById("scDetalle").value.trim();
+      nuevas.push({etiqueta: etiqueta, monto: monto, detalle: detalle});
+      document.getElementById("scEtiqueta").value = "";
+      document.getElementById("scMonto").value = "";
+      document.getElementById("scDetalle").value = "";
+      actualizarListaNuevas();
+    });
+
+    function guardarNuevas(incluirEnTotal){
+      var msgEl = document.getElementById("scMensaje");
+      if(nuevas.length === 0){ msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="Agrega al menos una fila antes de guardar."; return; }
+      db.run("BEGIN");
+      try{
+        nuevas.forEach(function(n){
+          db.run(
+            "INSERT INTO ajuste_estado_cuenta (persona, anio, mes, etiqueta, monto, incluir_en_total, detalle) VALUES (?,?,?,?,?,?,?)",
+            [estado.nombre, estado.anio, estado.mes, n.etiqueta, n.monto, incluirEnTotal ? 1 : 0, n.detalle || null]
+          );
+        });
+        db.run("COMMIT");
+      }catch(e){
+        db.run("ROLLBACK");
+        msgEl.hidden = false; msgEl.className = "note bad"; msgEl.textContent = "Error al guardar: " + e.message;
+        return;
+      }
+      scheduleSave();
+      nuevas = [];
+      cerrarModal();
+      renderEstadoCuenta();
+      mostrarToast(incluirEnTotal ? "Se agregó a Estado de Cuenta." : "Se agregó como nota (no suma al total).", "ok");
+    }
+    document.getElementById("scGuardarNota").addEventListener("click", function(){ guardarNuevas(false); });
+    document.getElementById("scGuardarTotal").addEventListener("click", function(){ guardarNuevas(true); });
+  }
+  document.getElementById("ecBtnSubtotal").addEventListener("click", abrirSubtotalCombinado);
+
   // -------------------------------------------- Estado de Cuenta: exportar PDF / imagen / WhatsApp
   // Puerto web de family_expenses/app/export/{whatsapp_link,pdf_estado_cuenta,
   // imagen_estado_cuenta,clipboard_imagen}.py. El escritorio ademas agrupa
@@ -2396,7 +2646,8 @@
       return;
     }
     var items = ecItemsActuales;
-    var total = totalEcActual();
+    var info = infoTotalEc(estado);
+    var total = info.totalMostrado;
     var doc = new window.jspdf.jsPDF({unit: "mm", format: "a4"});
     var marginX = 14;
     var pageBottom = 280;
@@ -2456,6 +2707,21 @@
     doc.text(montoFinalTxt, tableRight - montoFinalW, y);
     doc.setTextColor(0, 0, 0);
 
+    if(info.ajustes.length){
+      y += 10;
+      if(y > pageBottom){ doc.addPage(); y = 18; }
+      doc.setFont("helvetica", "bold"); doc.setFontSize(11); doc.setTextColor(0, 0, 0);
+      doc.text("Ajustes de Subtotal combinado:", marginX, y); y += 6;
+      doc.setFont("helvetica", "normal"); doc.setFontSize(9);
+      info.ajustes.forEach(function(a){
+        if(y + 5 > pageBottom){ doc.addPage(); y = 18; }
+        var tipoTxt = a.incluir_en_total ? "suma al total" : "nota, no suma";
+        var linea = a.etiqueta + ": " + money(a.monto) + " (" + tipoTxt + ")" + (a.detalle ? " - " + a.detalle : "");
+        doc.text(String(linea).slice(0, 120), marginX, y);
+        y += 5;
+      });
+    }
+
     var nombreArchivo = nombreArchivoEc(estado, "pdf");
     doc.save(nombreArchivo);
     mostrarMensajeExportEc("PDF generado: " + nombreArchivo, "ok");
@@ -2468,9 +2734,18 @@
   // imagen_estado_cuenta.py, simplificado a una sola pagina (la web no
   // pagina items como el escritorio; para un mes normal entra sin
   // problema en una imagen larga).
-  function construirNodoExportEc(estado, items, total){
+  function construirNodoExportEc(estado, items, total, ajustes){
     var v = veredictoEstadoCuenta(estado.nombre, total);
     var colorCss = "rgb(" + v.color.join(",") + ")";
+    var ajustesHtml = (ajustes && ajustes.length) ?
+      "<div style=\"margin-top:16px;\">" +
+        "<div style=\"font-size:19px;font-weight:700;color:#5a5a5a;margin-bottom:6px;\">Ajustes de Subtotal combinado</div>" +
+        ajustes.map(function(a){
+          var tipoTxt = a.incluir_en_total ? "suma al total" : "nota, no suma";
+          return "<div style=\"font-size:18px;padding:3px 0;\">" + escapeHtml(a.etiqueta) + ": " + escapeHtml(money(a.monto)) +
+            " (" + tipoTxt + ")" + (a.detalle ? " — " + escapeHtml(a.detalle) : "") + "</div>";
+        }).join("") +
+      "</div>" : "";
     var filasHtml = items.map(function(it, i){
       var bg = (i % 2 === 0) ? "#f0f0f0" : "#ffffff";
       var montoColor = it.monto >= 0 ? "#0a5abe" : "#be1e23";
@@ -2498,6 +2773,7 @@
           "</tr></thead>" +
           "<tbody>" + (filasHtml || "<tr><td colspan=\"5\" style=\"padding:14px;color:#5a5a5a;\">Sin movimientos.</td></tr>") + "</tbody>" +
         "</table>" +
+        ajustesHtml +
         "<hr style=\"border:none;border-top:3px solid #000000;margin:26px 0 20px;\">" +
         "<div style=\"font-size:24px;font-weight:700;color:" + colorCss + ";margin-bottom:12px;\">" + escapeHtml(v.etiqueta) + "</div>" +
         "<div style=\"font-size:34px;font-weight:700;color:" + colorCss + ";text-align:right;\">" + escapeHtml(money(v.monto)) + "</div>" +
@@ -2517,8 +2793,8 @@
       return Promise.reject(new Error("No se pudo cargar la librería de imagen (vendor/html2canvas.min.js). Verifica que la carpeta 'vendor' esté completa."));
     }
     var items = ecItemsActuales;
-    var total = totalEcActual();
-    var wrapper = construirNodoExportEc(estado, items, total);
+    var info = infoTotalEc(estado);
+    var wrapper = construirNodoExportEc(estado, items, info.totalMostrado, info.ajustes);
     document.body.appendChild(wrapper);
     var objetivo = wrapper.firstChild;
     return html2canvas(objetivo, {scale: 2, backgroundColor: "#ffffff", useCORS: true}).then(function(canvas){
@@ -2581,7 +2857,7 @@
     if(!estado){ mostrarMensajeExportEc("Elige persona, mes y año primero.", "bad"); return; }
     var telefono = document.getElementById("ecTelefono").value.trim();
     if(!telefono){ mostrarMensajeExportEc("Escribe un teléfono para enviar por WhatsApp.", "bad"); return; }
-    var total = totalEcActual();
+    var total = infoTotalEc(estado).totalMostrado;
     var mensaje = mensajeEstadoCuentaWhatsapp(estado.nombre, estado.anio, estado.mes, total);
     var link = construirLinkWhatsapp(telefono, mensaje);
     actualizarTelefonoPersona(estado.nombre, telefono);
