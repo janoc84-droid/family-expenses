@@ -284,7 +284,7 @@
 
   /* ---------------- Estado de Cuenta: acciones por movimiento + historial ---------------- */
   .ec-row-acciones{ display:flex; gap:4px; flex-wrap:nowrap; justify-content:flex-end; }
-  .ec-toolbar{ display:flex; justify-content:flex-end; margin-bottom:10px; }
+  .ec-toolbar{ display:flex; flex-wrap:wrap; gap:8px; justify-content:flex-end; margin-bottom:10px; }
   .modal-overlay{
     position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:200;
     display:flex; align-items:flex-start; justify-content:center;
@@ -544,10 +544,16 @@
         <div class="field grow"><label>Persona</label><input type="text" id="ecPersona" list="personasList" placeholder="Nombre..."></div>
         <div class="field small"><label>Mes</label><select id="ecMes"></select></div>
         <div class="field small"><label>Año</label><select id="ecAnio"></select></div>
+        <div class="field grow"><label>Teléfono (WhatsApp)</label><input type="text" id="ecTelefono" placeholder="+56 9 1234 5678"></div>
       </div>
       <div class="ec-toolbar">
+        <button type="button" class="btn-ghost" id="ecBtnPdf">📄 Exportar PDF</button>
+        <button type="button" class="btn-ghost" id="ecBtnImagen">🖼 Exportar imagen</button>
+        <button type="button" class="btn-ghost" id="ecBtnCopiarImagen">📋 Copiar imagen</button>
+        <button type="button" class="btn-primary" id="ecBtnWhatsapp">💬 Enviar por WhatsApp</button>
         <button type="button" class="btn-ghost" id="ecBtnHistorial">🕘 Historial de ajustes...</button>
       </div>
+      <div class="note" id="ecExportMensaje" hidden></div>
       <div id="ecResultado"></div>
     </div>
   </section>
@@ -720,6 +726,8 @@
 <script src="vendor/sql-wasm.js"></script>
 <script src="vendor/pdf.min.js"></script>
 <script src="vendor/xlsx.full.min.js"></script>
+<script src="vendor/jspdf.umd.min.js"></script>
+<script src="vendor/html2canvas.min.js"></script>
 <script>
 (function(){
   "use strict";
@@ -828,6 +836,27 @@
     "CREATE INDEX IF NOT EXISTS idx_gastos_diarios_anio_mes ON gastos_diarios(anio, mes);",
     "CREATE INDEX IF NOT EXISTS idx_historial_persona_mes ON historial_ajustes(persona, anio, mes);"
   ].join("\n");
+
+  // Evolucion defensiva del esquema para instalaciones previas: CREATE
+  // TABLE IF NOT EXISTS (ver SCHEMA_SQL arriba) no agrega columnas nuevas
+  // a una tabla que ya existia, asi que columnas sumadas despues del
+  // lanzamiento inicial se agregan aca a mano, revisando primero si ya
+  // existen (PRAGMA table_info) para no fallar con "duplicate column" en
+  // instalaciones que ya la tengan ni romper las que recien la reciben.
+  function aplicarMigracionesEsquema(dbRef){
+    function tieneColumna(tabla, columna){
+      var info = dbRef.exec("PRAGMA table_info(" + tabla + ")");
+      if(!info.length) return false;
+      var idxNombre = info[0].columns.indexOf("name");
+      return info[0].values.some(function(fila){ return fila[idxNombre] === columna; });
+    }
+    // personas.telefono: numero de WhatsApp guardado por persona (Estado
+    // de Cuenta -> "Enviar por WhatsApp"), para no tener que escribirlo
+    // cada vez -- mismo campo que Personas.telefono en el escritorio.
+    if(!tieneColumna("personas", "telefono")){
+      dbRef.run("ALTER TABLE personas ADD COLUMN telefono TEXT");
+    }
+  }
 
   // ---------------------------------------------------------------- utiles
 
@@ -1477,14 +1506,26 @@
       filas + "</tbody></table></div>";
   }
 
+  // Recuerda el ultimo telefono usado por persona (personas.telefono) --
+  // se recarga solo cuando cambia persona/mes/año, nunca mientras el
+  // campo de telefono esta enfocado (para no pisarle lo que este
+  // escribiendo si en ese momento hay un refresco por otra razon).
+  function refrescarTelefonoEc(nombre){
+    var telInput = document.getElementById("ecTelefono");
+    if(!telInput || document.activeElement === telInput) return;
+    telInput.value = nombre ? telefonoDePersona(nombre) : "";
+  }
+
   function renderEstadoCuenta(){
     var estado = estadoActual();
     var cont = document.getElementById("ecResultado");
     if(!estado){
       cont.innerHTML = "<p class=\"hint\">Escribe o elige una persona para ver su estado de cuenta.</p>";
       ecItemsActuales = [];
+      refrescarTelefonoEc(null);
       return;
     }
+    refrescarTelefonoEc(estado.nombre);
     var items = dbAll(
       "SELECT g.id AS gastoId, g.fecha AS fecha, g.detalle AS detalle, g.empresa AS empresa, g.cuota_texto AS cuota, " +
       "gp.monto AS monto, g.origen AS origen " +
@@ -2008,6 +2049,283 @@
     construirListaHistorial();
   }
   document.getElementById("ecBtnHistorial").addEventListener("click", abrirHistorial);
+
+  // -------------------------------------------- Estado de Cuenta: exportar PDF / imagen / WhatsApp
+  // Puerto web de family_expenses/app/export/{whatsapp_link,pdf_estado_cuenta,
+  // imagen_estado_cuenta,clipboard_imagen}.py. El escritorio ademas agrupa
+  // "ajustes" (AjusteEstadoCuenta, incluir_en_total) al pie del PDF/imagen --
+  // ese modelo no existe todavia en la base de la web (aca el equivalente es
+  // el Historial de ajustes, que es un log de auditoria/deshacer, no una
+  // lista de ajustes que se suman al total), asi que por ahora se exporta
+  // tabla + total real, sin esa seccion. Lo que SI se porta tal cual --
+  // pedido explicito documentado del usuario -- es la distincion de signo
+  // del total (a favor/en contra/al dia) en el mensaje, el PDF y la imagen.
+
+  function telefonoDePersona(nombre){
+    if(!nombre) return "";
+    var row = dbGet("SELECT telefono FROM personas WHERE nombre=? COLLATE NOCASE", [nombre]);
+    return (row && row.telefono) || "";
+  }
+  function actualizarTelefonoPersona(nombre, telefono){
+    var personaId = obtenerOCrearPersona(nombre);
+    if(personaId == null) return;
+    dbRun("UPDATE personas SET telefono=? WHERE id=?", [telefono || null, personaId]);
+  }
+
+  // Mismo criterio y mismos textos que _etiqueta_y_monto_final en el
+  // escritorio (pdf_estado_cuenta.py / imagen_estado_cuenta.py): un total
+  // NEGATIVO significa que se le debe devolver plata a la persona.
+  function veredictoEstadoCuenta(nombre, total){
+    if(total < -1) return {etiqueta: "A FAVOR: hay que devolverle a " + nombre, monto: Math.abs(total), color: [20, 140, 80]};
+    if(total > 1) return {etiqueta: "EN CONTRA: " + nombre + " debe pagar", monto: total, color: [190, 30, 35]};
+    return {etiqueta: nombre + " está al día (sin diferencia)", monto: 0, color: [120, 120, 120]};
+  }
+
+  function slugify(s){
+    return String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "")
+      .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-+|-+$)/g, "") || "sin-nombre";
+  }
+
+  // Puerto de normalizar_telefono_cl (whatsapp_link.py).
+  function normalizarTelefonoCl(telefono){
+    var soloDigitos = String(telefono || "").replace(/\D/g, "");
+    if(soloDigitos.indexOf("56") === 0) return soloDigitos;
+    if(soloDigitos.length === 9 && soloDigitos.charAt(0) === "9") return "56" + soloDigitos;
+    return soloDigitos;
+  }
+  // Puerto de mensaje_estado_cuenta (whatsapp_link.py) -- misma distincion
+  // a favor/en contra/al dia, pedido explicito del usuario.
+  function mensajeEstadoCuentaWhatsapp(nombre, anio, mes, total){
+    var fraseTotal;
+    if(total < -1) fraseTotal = "Tienes un saldo A TU FAVOR de " + money(Math.abs(total)) + " (te lo debemos devolver).";
+    else if(total > 1) fraseTotal = "Total a pagar: " + money(total) + ".";
+    else fraseTotal = "Estas al dia, sin diferencia este mes.";
+    return "Hola " + nombre + ", te comparto tu estado de cuenta de " + MESES_ES[mes] + " " + anio + ". " +
+      fraseTotal + " Te adjunto el detalle en PDF.";
+  }
+  // Puerto de construir_link_whatsapp (whatsapp_link.py).
+  function construirLinkWhatsapp(telefono, mensaje){
+    return "https://wa.me/" + normalizarTelefonoCl(telefono) + "?text=" + encodeURIComponent(mensaje);
+  }
+
+  function mostrarMensajeExportEc(msg, tipo){
+    var el = document.getElementById("ecExportMensaje");
+    if(!el) return;
+    el.hidden = false;
+    el.className = "note " + (tipo || "");
+    el.textContent = msg;
+  }
+
+  function totalEcActual(){
+    return ecItemsActuales.reduce(function(a, it){ return a + it.monto; }, 0);
+  }
+
+  function nombreArchivoEc(estado, ext){
+    return "estado-cuenta-" + slugify(estado.nombre) + "-" + slugify(MESES_ES[estado.mes]) + "-" + estado.anio + "." + ext;
+  }
+
+  // -------------------------------------------- exportar a PDF (jsPDF)
+
+  function exportarEstadoCuentaPDF(){
+    var estado = estadoActual();
+    if(!estado){ mostrarMensajeExportEc("Elige persona, mes y año primero.", "bad"); return; }
+    if(typeof window.jspdf === "undefined" || !window.jspdf.jsPDF){
+      mostrarMensajeExportEc("No se pudo cargar la librería de PDF (vendor/jspdf.umd.min.js). Verifica que la carpeta 'vendor' esté completa.", "bad");
+      return;
+    }
+    var items = ecItemsActuales;
+    var total = totalEcActual();
+    var doc = new window.jspdf.jsPDF({unit: "mm", format: "a4"});
+    var marginX = 14;
+    var pageBottom = 280;
+    var y = 18;
+
+    doc.setFont("helvetica", "bold"); doc.setFontSize(18); doc.setTextColor(0, 0, 0);
+    doc.text("Estado de Cuenta", marginX, y); y += 10;
+    doc.setFont("helvetica", "normal"); doc.setFontSize(12);
+    doc.text("Persona: " + estado.nombre, marginX, y); y += 7;
+    doc.text("Mes: " + MESES_ES[estado.mes] + " " + estado.anio, marginX, y); y += 9;
+
+    var cols = [
+      {label: "Fecha", w: 24, campo: "fecha"}, {label: "Detalle", w: 62, campo: "detalle"},
+      {label: "Empresa", w: 44, campo: "empresa"}, {label: "Cuota", w: 20, campo: "cuota"},
+      {label: "Monto", w: 30, campo: "monto"}
+    ];
+    var xs = []; var xAcc = marginX;
+    cols.forEach(function(c){ xs.push(xAcc); xAcc += c.w; });
+    var tableRight = xAcc;
+    var rowH = 7;
+
+    function dibujarEncabezado(){
+      doc.setFillColor(220, 220, 220); doc.setDrawColor(0, 0, 0);
+      doc.setFont("helvetica", "bold"); doc.setFontSize(10); doc.setTextColor(0, 0, 0);
+      cols.forEach(function(c, i){
+        doc.rect(xs[i], y, c.w, rowH, "FD");
+        doc.text(c.label, xs[i] + 2, y + 5);
+      });
+      y += rowH;
+    }
+    dibujarEncabezado();
+
+    doc.setFont("helvetica", "normal"); doc.setFontSize(9);
+    items.forEach(function(it, idx){
+      if(y + rowH > pageBottom){ doc.addPage(); y = 18; dibujarEncabezado(); doc.setFont("helvetica", "normal"); doc.setFontSize(9); }
+      doc.setFillColor(idx % 2 === 0 ? 245 : 255, idx % 2 === 0 ? 245 : 255, idx % 2 === 0 ? 245 : 255);
+      cols.forEach(function(c, i){ doc.rect(xs[i], y, c.w, rowH, "FD"); });
+      doc.setTextColor(0, 0, 0);
+      doc.text(String(it.fecha || "").slice(0, 14), xs[0] + 1.5, y + 5);
+      doc.text(String(it.detalle || "").slice(0, 40), xs[1] + 1.5, y + 5);
+      doc.text(String(it.empresa || "").slice(0, 28), xs[2] + 1.5, y + 5);
+      doc.text(String(it.cuota || "-").slice(0, 8), xs[3] + 1.5, y + 5);
+      var montoTxt = money(it.monto);
+      var montoW = doc.getTextWidth(montoTxt);
+      doc.text(montoTxt, xs[4] + cols[4].w - 2 - montoW, y + 5);
+      y += rowH;
+    });
+
+    y += 10;
+    if(y > pageBottom){ doc.addPage(); y = 18; }
+    var v = veredictoEstadoCuenta(estado.nombre, total);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(13);
+    doc.setTextColor(v.color[0], v.color[1], v.color[2]);
+    doc.text(v.etiqueta, marginX, y);
+    var montoFinalTxt = money(v.monto);
+    var montoFinalW = doc.getTextWidth(montoFinalTxt);
+    doc.text(montoFinalTxt, tableRight - montoFinalW, y);
+    doc.setTextColor(0, 0, 0);
+
+    var nombreArchivo = nombreArchivoEc(estado, "pdf");
+    doc.save(nombreArchivo);
+    mostrarMensajeExportEc("PDF generado: " + nombreArchivo, "ok");
+  }
+  document.getElementById("ecBtnPdf").addEventListener("click", exportarEstadoCuentaPDF);
+
+  // -------------------------------------------- exportar a imagen / copiar al portapapeles (html2canvas)
+  // Nodo fuera de pantalla (fondo blanco, letra grande) para que se lea
+  // bien reducido como miniatura en WhatsApp -- mismo espiritu que
+  // imagen_estado_cuenta.py, simplificado a una sola pagina (la web no
+  // pagina items como el escritorio; para un mes normal entra sin
+  // problema en una imagen larga).
+  function construirNodoExportEc(estado, items, total){
+    var v = veredictoEstadoCuenta(estado.nombre, total);
+    var colorCss = "rgb(" + v.color.join(",") + ")";
+    var filasHtml = items.map(function(it, i){
+      var bg = (i % 2 === 0) ? "#f0f0f0" : "#ffffff";
+      var montoColor = it.monto >= 0 ? "#0a5abe" : "#be1e23";
+      return "<tr style=\"background:" + bg + ";\">" +
+        "<td style=\"padding:10px 14px;white-space:nowrap;\">" + escapeHtml(it.fecha) + "</td>" +
+        "<td style=\"padding:10px 14px;\">" + escapeHtml(it.detalle) + "</td>" +
+        "<td style=\"padding:10px 14px;color:#5a5a5a;\">" + escapeHtml(it.empresa || "") + "</td>" +
+        "<td style=\"padding:10px 14px;color:#5a5a5a;white-space:nowrap;\">" + escapeHtml(it.cuota || "-") + "</td>" +
+        "<td style=\"padding:10px 14px;text-align:right;color:" + montoColor + ";font-weight:600;white-space:nowrap;\">" + escapeHtml(money(it.monto)) + "</td>" +
+      "</tr>";
+    }).join("");
+    var subtitulo = estado.nombre + "  —  " + MESES_ES[estado.mes] + " " + estado.anio;
+    var html =
+      "<div style=\"width:1080px;background:#ffffff;color:#000000;font-family:'Segoe UI',Arial,sans-serif;padding:44px;box-sizing:border-box;\">" +
+        "<div style=\"font-size:40px;font-weight:700;margin-bottom:10px;\">Estado de Cuenta</div>" +
+        "<div style=\"font-size:22px;color:#5a5a5a;margin-bottom:18px;\">" + escapeHtml(subtitulo) + "</div>" +
+        "<hr style=\"border:none;border-top:2px solid #c8c8c8;margin-bottom:18px;\">" +
+        "<table style=\"width:100%;border-collapse:collapse;font-size:20px;\">" +
+          "<thead><tr style=\"color:#5a5a5a;font-weight:700;font-size:19px;\">" +
+            "<th style=\"text-align:left;padding:6px 14px;\">Fecha</th>" +
+            "<th style=\"text-align:left;padding:6px 14px;\">Detalle</th>" +
+            "<th style=\"text-align:left;padding:6px 14px;\">Empresa</th>" +
+            "<th style=\"text-align:left;padding:6px 14px;\">Cuota</th>" +
+            "<th style=\"text-align:right;padding:6px 14px;\">Monto</th>" +
+          "</tr></thead>" +
+          "<tbody>" + (filasHtml || "<tr><td colspan=\"5\" style=\"padding:14px;color:#5a5a5a;\">Sin movimientos.</td></tr>") + "</tbody>" +
+        "</table>" +
+        "<hr style=\"border:none;border-top:3px solid #000000;margin:26px 0 20px;\">" +
+        "<div style=\"font-size:24px;font-weight:700;color:" + colorCss + ";margin-bottom:12px;\">" + escapeHtml(v.etiqueta) + "</div>" +
+        "<div style=\"font-size:34px;font-weight:700;color:" + colorCss + ";text-align:right;\">" + escapeHtml(money(v.monto)) + "</div>" +
+      "</div>";
+    var wrapper = document.createElement("div");
+    wrapper.style.position = "fixed";
+    wrapper.style.left = "-99999px";
+    wrapper.style.top = "0";
+    wrapper.innerHTML = html;
+    return wrapper;
+  }
+
+  function generarCanvasEstadoCuenta(){
+    var estado = estadoActual();
+    if(!estado) return Promise.reject(new Error("Elige persona, mes y año primero."));
+    if(typeof html2canvas !== "function"){
+      return Promise.reject(new Error("No se pudo cargar la librería de imagen (vendor/html2canvas.min.js). Verifica que la carpeta 'vendor' esté completa."));
+    }
+    var items = ecItemsActuales;
+    var total = totalEcActual();
+    var wrapper = construirNodoExportEc(estado, items, total);
+    document.body.appendChild(wrapper);
+    var objetivo = wrapper.firstChild;
+    return html2canvas(objetivo, {scale: 2, backgroundColor: "#ffffff", useCORS: true}).then(function(canvas){
+      document.body.removeChild(wrapper);
+      return canvas;
+    }, function(err){
+      document.body.removeChild(wrapper);
+      throw err;
+    });
+  }
+
+  document.getElementById("ecBtnImagen").addEventListener("click", function(){
+    generarCanvasEstadoCuenta().then(function(canvas){
+      canvas.toBlob(function(blob){
+        if(!blob){ mostrarMensajeExportEc("No se pudo generar la imagen.", "bad"); return; }
+        var estado = estadoActual();
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = nombreArchivoEc(estado, "png");
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+        mostrarMensajeExportEc("Imagen generada: " + a.download, "ok");
+      }, "image/png");
+    }, function(err){
+      mostrarMensajeExportEc((err && err.message) || "No se pudo generar la imagen.", "bad");
+    });
+  });
+
+  document.getElementById("ecBtnCopiarImagen").addEventListener("click", function(){
+    // Deteccion de soporte -- Clipboard API con imagenes no existe en todos
+    // los navegadores (y requiere contexto seguro: https o localhost).
+    // Pedido explicito: mostrar un mensaje claro en vez de fallar en
+    // silencio si no hay soporte.
+    if(!(navigator.clipboard && typeof navigator.clipboard.write === "function" && typeof window.ClipboardItem === "function")){
+      mostrarMensajeExportEc(
+        "Este navegador no soporta copiar imágenes al portapapeles (falta la Clipboard API / ClipboardItem, o la página no está en un contexto seguro). Usa \"Exportar imagen\" y adjúntala a mano en WhatsApp.",
+        "bad"
+      );
+      return;
+    }
+    generarCanvasEstadoCuenta().then(function(canvas){
+      return new Promise(function(resolve, reject){
+        canvas.toBlob(function(blob){
+          if(!blob){ reject(new Error("No se pudo generar la imagen.")); return; }
+          navigator.clipboard.write([new ClipboardItem({"image/png": blob})]).then(resolve, reject);
+        }, "image/png");
+      });
+    }).then(function(){
+      mostrarMensajeExportEc("Imagen copiada al portapapeles. Pégala en WhatsApp (o donde sea) con Ctrl+V.", "ok");
+    }, function(err){
+      mostrarMensajeExportEc("No se pudo copiar la imagen: " + ((err && err.message) || err), "bad");
+    });
+  });
+
+  // -------------------------------------------- enviar por WhatsApp (wa.me)
+
+  document.getElementById("ecBtnWhatsapp").addEventListener("click", function(){
+    var estado = estadoActual();
+    if(!estado){ mostrarMensajeExportEc("Elige persona, mes y año primero.", "bad"); return; }
+    var telefono = document.getElementById("ecTelefono").value.trim();
+    if(!telefono){ mostrarMensajeExportEc("Escribe un teléfono para enviar por WhatsApp.", "bad"); return; }
+    var total = totalEcActual();
+    var mensaje = mensajeEstadoCuentaWhatsapp(estado.nombre, estado.anio, estado.mes, total);
+    var link = construirLinkWhatsapp(telefono, mensaje);
+    actualizarTelefonoPersona(estado.nombre, telefono);
+    window.open(link, "_blank", "noopener");
+    mostrarMensajeExportEc("Se abrió WhatsApp con el mensaje listo. WhatsApp no permite adjuntar el PDF/imagen automáticamente -- adjúntalo a mano dentro del chat.", "ok");
+  });
 
   // ---------------------------------------------------------------- Checklist Pagos
 
@@ -3099,6 +3417,7 @@
         var nuevaDb = new SQL.Database(bytes);
         nuevaDb.run("PRAGMA foreign_keys = ON");
         nuevaDb.run(SCHEMA_SQL);
+        aplicarMigracionesEsquema(nuevaDb);
         db = nuevaDb;
         scheduleSave();
         refrescarTodo();
@@ -3595,6 +3914,19 @@
     repartosIguales: repartosIguales
   };
 
+  // Mismo criterio que __gfSyncDebug de arriba: expone la logica de
+  // exportacion de Estado de Cuenta para poder probarla desde headless sin
+  // depender de descargas de archivo reales (jsPDF/html2canvas si generan
+  // los binarios reales -- esto solo expone la parte de mensaje/link de
+  // WhatsApp, que es pura logica de texto).
+  window.__gfEcDebug = {
+    mensajeEstadoCuentaWhatsapp: mensajeEstadoCuentaWhatsapp,
+    construirLinkWhatsapp: construirLinkWhatsapp,
+    normalizarTelefonoCl: normalizarTelefonoCl,
+    veredictoEstadoCuenta: veredictoEstadoCuenta,
+    generarCanvasEstadoCuenta: generarCanvasEstadoCuenta
+  };
+
   // ---------------------------------------------------------------- arranque
 
   function refrescarTodo(){
@@ -3641,6 +3973,7 @@
       }
       db.run("PRAGMA foreign_keys = ON");
       db.run(SCHEMA_SQL);
+      aplicarMigracionesEsquema(db);
       scheduleSave();
       boot();
     }).catch(function(err){
