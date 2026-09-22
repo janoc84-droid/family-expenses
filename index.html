@@ -549,7 +549,7 @@
         <div class="field small">
           <label>Monto total</label>
           <div class="field-with-calc">
-            <input type="number" id="gMonto" min="0" step="1" placeholder="0">
+            <input type="text" id="gMonto" inputmode="numeric" placeholder="0">
             <button type="button" class="icon-btn calc-trigger-btn" id="gMontoCalcBtn" title="Abrir calculadora">🖩</button>
           </div>
         </div>
@@ -700,7 +700,7 @@
         <div class="field small">
           <label>Monto</label>
           <div class="field-with-calc">
-            <input type="number" id="gdMonto" min="0" step="1" placeholder="0">
+            <input type="text" id="gdMonto" inputmode="numeric" placeholder="0">
             <button type="button" class="icon-btn calc-trigger-btn" id="gdMontoCalcBtn" title="Abrir calculadora">🖩</button>
           </div>
         </div>
@@ -1136,6 +1136,38 @@
     if(!isFinite(n)) n = 0;
     return "$ " + Math.round(n).toLocaleString("es-CL");
   }
+  // ------------------------------------------------- formato pesos en vivo
+  // Puerto de app/domain/currency.py + app/gui/widgets/currency_entry.py
+  // (escritorio): usado SOLO en los campos de monto mas usados (#gMonto en
+  // Ingreso Manual y #gdMonto en Gastos Diarios) -- ver decision de alcance
+  // en la auditoria, el resto de los campos de monto de la app se dejan
+  // como inputs numericos simples sin tocar.
+  function parsearPesos(texto){
+    if(texto == null) return NaN;
+    var s = String(texto).trim();
+    if(s === "") return NaN;
+    var neg = s.charAt(0) === "-";
+    var digitos = s.replace(/[^0-9]/g, "");
+    if(digitos === "") return NaN;
+    var n = Number(digitos);
+    return neg ? -n : n;
+  }
+  function formatearPesosEnVivo(inputEl){
+    var crudo = inputEl.value;
+    var neg = crudo.charAt(0) === "-";
+    var digitos = crudo.replace(/[^0-9]/g, "");
+    var texto = "";
+    if(digitos !== ""){
+      var conPuntos = digitos.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+      texto = (neg ? "-" : "") + "$" + conPuntos;
+    }
+    inputEl.value = texto;
+    try{ inputEl.setSelectionRange(texto.length, texto.length); }catch(e){}
+  }
+  function pintarPesosEnCampo(inputEl, numero){
+    inputEl.value = (numero === null || numero === undefined || isNaN(numero)) ? "" : String(Math.round(numero));
+    formatearPesosEnVivo(inputEl);
+  }
   function todayISO(){
     var d = new Date();
     var m = String(d.getMonth()+1).padStart(2,"0");
@@ -1416,6 +1448,37 @@
     btn.addEventListener("click", function(){ activarTab(btn.dataset.tab); });
   });
 
+  // ---------------------------------------------------------------- atajos de teclado
+  // Puerto de los atajos del escritorio (F1-F8 saltan directo a cada
+  // pestana en el mismo orden que TAB_IDS, flechas izq/der pasan a la
+  // pestana anterior/siguiente). F9 ("Respaldo y traslado") y F10 (cambiar
+  // clave) del escritorio no tienen equivalente real en la web y se omiten
+  // a proposito (ver auditoria). Sin modificadores, para no interferir con
+  // atajos nativos del navegador (Ctrl+F1, etc.).
+  document.addEventListener("keydown", function(e){
+    if(e.altKey || e.ctrlKey || e.metaKey) return;
+    var m = /^F([1-8])$/.exec(e.key);
+    if(m){
+      var idx = Number(m[1]) - 1;
+      if(TAB_IDS[idx]){
+        activarTab(TAB_IDS[idx]);
+        e.preventDefault();
+      }
+      return;
+    }
+    if(e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    var tag = document.activeElement ? document.activeElement.tagName : "";
+    if(tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+    var actual = document.querySelector(".tab-btn.active");
+    var actualId = actual ? actual.dataset.tab : TAB_IDS[0];
+    var i = TAB_IDS.indexOf(actualId);
+    if(i === -1) i = 0;
+    var delta = e.key === "ArrowLeft" ? -1 : 1;
+    var nuevo = (i + delta + TAB_IDS.length) % TAB_IDS.length;
+    activarTab(TAB_IDS[nuevo]);
+    e.preventDefault();
+  });
+
   // ---------------------------------------------------------------- datalists
 
   function setDatalist(id, values){
@@ -1530,7 +1593,7 @@
     box.hidden = !checked;
     if(!checked) return;
     var nombres = nombresDesdeCampo();
-    var monto = Number(document.getElementById("gMonto").value) || 0;
+    var monto = parsearPesos(document.getElementById("gMonto").value) || 0;
     var rowsEl = document.getElementById("gRepartoRows");
     if(nombres.length === 0){
       rowsEl.innerHTML = "<p class=\"hint\">Escribe al menos un nombre en \"Personas\" primero.</p>";
@@ -1580,6 +1643,12 @@
     actualizarCajaReparto();
   });
   document.getElementById("gMontoCalcBtn").addEventListener("click", function(){ abrirCalculadora("gMonto"); });
+  (function(){
+    var elGMonto = document.getElementById("gMonto");
+    elGMonto.addEventListener("input", function(){ formatearPesosEnVivo(this); });
+    elGMonto.addEventListener("keyup", function(){ formatearPesosEnVivo(this); });
+    elGMonto.addEventListener("focus", function(){ this.select(); });
+  })();
 
   // ---------------------------------------------------------------- Ingreso Manual: guardar / editar / borrar
 
@@ -1615,7 +1684,7 @@
     if(!detalle){ mostrarMensajeGasto("Escribe un detalle (ej. Agua, Luz).", "bad"); return; }
     var empresa = document.getElementById("gEmpresa").value.trim() || detalle;
     var categoriaNombre = document.getElementById("gCategoria").value.trim();
-    var monto = Number(document.getElementById("gMonto").value);
+    var monto = parsearPesos(document.getElementById("gMonto").value);
     if(document.getElementById("gMonto").value.trim() === "" || isNaN(monto) || monto === 0){ mostrarMensajeGasto("Escribe un monto (puede ser negativo, ej. un descuento o abono, pero no puede estar vacío o en cero).", "bad"); return; }
     var cuotas = document.getElementById("gCuotas").value.trim() || "1";
     var nombres = nombresDesdeCampo();
@@ -1700,7 +1769,7 @@
     document.getElementById("gEmpresa").value = g.empresa || "";
     var cat = g.categoria_id ? dbGet("SELECT nombre FROM categorias WHERE id=?", [g.categoria_id]) : null;
     document.getElementById("gCategoria").value = cat ? cat.nombre : "";
-    document.getElementById("gMonto").value = g.monto_total;
+    pintarPesosEnCampo(document.getElementById("gMonto"), g.monto_total);
     document.getElementById("gCuotas").value = g.cuota_texto || "1";
     var reparto = dbAll(
       "SELECT p.nombre AS nombre, gp.monto AS monto FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id WHERE gp.gasto_id=?",
@@ -1826,7 +1895,7 @@
     document.getElementById("gFecha").value = anio + "-" + String(mes).padStart(2, "0") + "-01";
     document.getElementById("gDetalle").value = item.detalle;
     document.getElementById("gEmpresa").value = item.empresa || "";
-    document.getElementById("gMonto").value = Math.round(item.montoMesAnterior);
+    pintarPesosEnCampo(document.getElementById("gMonto"), Math.round(item.montoMesAnterior));
     document.getElementById("gCuotas").value = item.cuota || "1";
     document.getElementById("gPersonas").value = item.nombresMesAnterior.join(" ");
     document.getElementById("tab-ingreso").scrollIntoView({behavior:"smooth", block:"start"});
@@ -2325,8 +2394,9 @@
     var campoDestino = document.getElementById(inputId);
     var expr = "";
     var mostrandoResultado = false;
-    if(campoDestino && campoDestino.value !== "" && !isNaN(Number(campoDestino.value)) && Number(campoDestino.value) > 0){
-      expr = String(Math.round(Number(campoDestino.value)));
+    if(campoDestino && campoDestino.value !== ""){
+      var valorPrevio = parsearPesos(campoDestino.value);
+      if(!isNaN(valorPrevio) && valorPrevio > 0) expr = String(Math.round(valorPrevio));
     }
 
     var html =
@@ -3954,6 +4024,12 @@
   }
   document.getElementById("gdMedioPago").addEventListener("change", actualizarCamposTarjetaGD);
   document.getElementById("gdMontoCalcBtn").addEventListener("click", function(){ abrirCalculadora("gdMonto"); });
+  (function(){
+    var elGdMonto = document.getElementById("gdMonto");
+    elGdMonto.addEventListener("input", function(){ formatearPesosEnVivo(this); });
+    elGdMonto.addEventListener("keyup", function(){ formatearPesosEnVivo(this); });
+    elGdMonto.addEventListener("focus", function(){ this.select(); });
+  })();
 
   function limpiarFormularioGD(){
     editingGastoDiarioId = null;
@@ -3981,7 +4057,7 @@
     var detalle = document.getElementById("gdDetalle").value.trim();
     if(!detalle){ mostrarMensajeGD("Escribe un detalle (ej. Café, Colación).", "bad"); return; }
     var categoriaNombre = document.getElementById("gdCategoria").value.trim();
-    var monto = Number(document.getElementById("gdMonto").value);
+    var monto = parsearPesos(document.getElementById("gdMonto").value);
     if(document.getElementById("gdMonto").value.trim() === "" || isNaN(monto) || monto === 0){ mostrarMensajeGD("Escribe un monto (puede ser negativo, ej. un descuento o abono, pero no puede estar vacío o en cero).", "bad"); return; }
     var medioPago = document.getElementById("gdMedioPago").value;
     var tipoTarjeta = medioPago === "Tarjeta" ? document.getElementById("gdTipoTarjeta").value : null;
@@ -4024,7 +4100,7 @@
     document.getElementById("gdDetalle").value = g.detalle;
     var cat = g.categoria_id ? dbGet("SELECT nombre FROM categorias WHERE id=?", [g.categoria_id]) : null;
     document.getElementById("gdCategoria").value = cat ? cat.nombre : "";
-    document.getElementById("gdMonto").value = g.monto;
+    pintarPesosEnCampo(document.getElementById("gdMonto"), g.monto);
     document.getElementById("gdMedioPago").value = g.medio_pago || "Efectivo";
     document.getElementById("gdTipoTarjeta").value = g.tipo_tarjeta || "Débito";
     document.getElementById("gdBancoTarjeta").value = g.banco_tarjeta || "";
@@ -4153,7 +4229,7 @@
     document.getElementById("gdFecha").value = anio + "-" + String(mes).padStart(2, "0") + "-01";
     document.getElementById("gdDetalle").value = item.detalle;
     document.getElementById("gdCategoria").value = item.categoria === "Sin categoría" ? "" : item.categoria;
-    document.getElementById("gdMonto").value = Math.round(item.montoMesAnterior);
+    pintarPesosEnCampo(document.getElementById("gdMonto"), Math.round(item.montoMesAnterior));
     document.getElementById("gdMedioPago").value = item.medioPago || "Efectivo";
     document.getElementById("gdTipoTarjeta").value = item.tipoTarjeta || "Débito";
     document.getElementById("gdBancoTarjeta").value = item.bancoTarjeta || "";
