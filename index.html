@@ -636,7 +636,7 @@
           <div class="field small"><select id="catAnio"></select></div>
         </div>
       </div>
-      <p class="hint" style="margin-bottom:10px;">Gastos sin categoría del mes elegido. Si un gasto con el mismo detalle ya fue categorizado antes, se sugiere esa misma categoría -- podés aceptarla o escribir otra.</p>
+      <p class="hint" style="margin-bottom:10px;">Gastos sin categoría (o en "Otros") del mes elegido. Al guardar, además de categorizar este gasto se crea una regla con la palabra clave: de ahí en más, cualquier gasto (de este mes o de meses futuros) cuyo detalle contenga esa palabra se categoriza solo. Dejá la palabra clave vacía para categorizar sólo este gasto puntual.</p>
       <div class="note" id="catResumen"></div>
       <div id="catLista"></div>
     </div>
@@ -996,6 +996,28 @@
     "  detalle TEXT,",
     "  created_at TEXT NOT NULL DEFAULT (datetime('now'))",
     ");",
+    // Reglas de categorizacion automatica por palabra clave -- puerto de
+    // domain/categorization.py + repositories/reglas_repo.py del escritorio
+    // (ver categorizarTexto mas abajo). Cada regla mapea una palabra clave a
+    // una categoria: cuando el usuario categoriza un gasto pendiente desde
+    // "Categorizar", ademas de fijar la categoria de ESE gasto se guarda una
+    // regla reutilizable que de ahi en adelante se aplica sola a CUALQUIER
+    // gasto (existente o futuro) cuyo detalle contenga esa palabra (substring,
+    // no exacto). "prioridad" define el orden de evaluacion (menor = primero,
+    // como en el escritorio); las reglas nuevas creadas desde la pantalla usan
+    // 100 (al final) para no tapar reglas mas especificas que se importen a
+    // futuro con prioridad mas baja. COLLATE NOCASE en palabra_clave (a
+    // diferencia de la definicion literal del escritorio, que es
+    // case-sensitive a nivel de columna y compara en minusculas en Python)
+    // para que "Uber" y "uber" sean la MISMA regla al guardar -- evita
+    // duplicados silenciosos, mismo criterio que personas.nombre/
+    // categorias.nombre mas arriba.
+    "CREATE TABLE IF NOT EXISTS categoria_reglas (",
+    "  id INTEGER PRIMARY KEY,",
+    "  prioridad INTEGER NOT NULL DEFAULT 100,",
+    "  palabra_clave TEXT NOT NULL COLLATE NOCASE UNIQUE,",
+    "  categoria_id INTEGER REFERENCES categorias(id)",
+    ");",
     "CREATE INDEX IF NOT EXISTS idx_gastos_anio_mes ON gastos(anio, mes);",
     "CREATE INDEX IF NOT EXISTS idx_gasto_persona_gasto ON gasto_persona(gasto_id);",
     "CREATE INDEX IF NOT EXISTS idx_gasto_persona_persona ON gasto_persona(persona_id);",
@@ -1004,7 +1026,8 @@
     "CREATE INDEX IF NOT EXISTS idx_gasto_diario_persona_gasto ON gasto_diario_persona(gasto_diario_id);",
     "CREATE INDEX IF NOT EXISTS idx_historial_persona_mes ON historial_ajustes(persona, anio, mes);",
     "CREATE INDEX IF NOT EXISTS idx_meses_conciliados_anio_mes ON meses_conciliados(anio, mes);",
-    "CREATE INDEX IF NOT EXISTS idx_ajuste_ec_persona_mes ON ajuste_estado_cuenta(persona, anio, mes);"
+    "CREATE INDEX IF NOT EXISTS idx_ajuste_ec_persona_mes ON ajuste_estado_cuenta(persona, anio, mes);",
+    "CREATE INDEX IF NOT EXISTS idx_categoria_reglas_prioridad ON categoria_reglas(prioridad);"
   ].join("\n");
 
   // Evolucion defensiva del esquema para instalaciones previas: CREATE
@@ -1437,8 +1460,18 @@
     var d = new Date(fecha + "T00:00:00");
     var anio = d.getFullYear();
     var mes = d.getMonth() + 1;
-    var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
     var idAntes = editingGastoId;
+    // Si es un gasto NUEVO (no una edicion) y el usuario no eligio categoria
+    // a mano, se intenta autocategorizar con las reglas por palabra clave
+    // vigentes (o, en su defecto, la heuristica de "ultimo gasto igual") --
+    // asi un gasto cargado por Ingreso Manual que calza con una regla ya
+    // creada desde "Categorizar" (ej. "uber" -> Transporte) no vuelve a
+    // quedar pendiente. Si no hay ninguna sugerencia, sigue sin categoria
+    // como siempre.
+    if(!idAntes && !categoriaNombre){
+      categoriaNombre = sugerirCategoriaCombinada(detalle);
+    }
+    var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
 
     db.run("BEGIN");
     try{
@@ -2963,13 +2996,66 @@
   document.getElementById("chkAnio").addEventListener("change", renderChecklist);
 
   // ---------------------------------------------------------------- Categorizar
-  // Version simplificada de categorizar_screen.py / categorization.py: en vez de
-  // reglas por palabra clave guardadas en una tabla aparte, se sugiere la
-  // categoria mirando el gasto MAS RECIENTE ya categorizado con el mismo
-  // detalle exacto -- mismo espiritu (reconocer texto repetido), sin agregar
-  // una tabla de reglas nueva al esquema. El usuario siempre puede aceptar la
-  // sugerencia o escribir otra categoria antes de guardar.
+  // Motor de reglas por palabra clave -- puerto de domain/categorization.py +
+  // repositories/reglas_repo.py del escritorio (ver tabla categoria_reglas en
+  // SCHEMA_SQL). Cuando el usuario categoriza un gasto pendiente se guarda
+  // una regla (palabra_clave -> categoria) que de ahi en mas se aplica sola a
+  // TODOS los gastos que contengan esa palabra en el detalle -- no solo al
+  // que se estaba editando, y tambien a los que se carguen despues (Cargar
+  // mes, Ingreso Manual). Se mantiene ademas la heuristica vieja
+  // (sugerirCategoriaPara: "ultimo gasto con el mismo detalle exacto") como
+  // respaldo cuando ninguna regla calza -- una regla real es mas confiable
+  // que esa heuristica, asi que siempre tiene prioridad sobre ella.
 
+  // "Pendiente de categorizar" incluye tanto categoria_id NULL como la
+  // categoria literal "Otros" -- esta ultima es el resultado por defecto de
+  // categorizarTexto() cuando ninguna regla calza (igual que categorizar()
+  // en el escritorio), asi que un gasto que cayo ahi sigue necesitando
+  // revision humana tanto como uno sin categoria.
+  var SQL_FILTRO_PENDIENTE = "(g.categoria_id IS NULL OR c.nombre = 'Otros' COLLATE NOCASE)";
+
+  function cargarReglasCategoria(){
+    return dbAll(
+      "SELECT r.id, r.prioridad, r.palabra_clave, r.categoria_id, c.nombre AS categoria " +
+      "FROM categoria_reglas r JOIN categorias c ON c.id = r.categoria_id ORDER BY r.prioridad ASC, r.id ASC"
+    );
+  }
+
+  // Traduccion directa de categorizar() (categorization.py, 22 lineas): la
+  // primera regla (ordenada por prioridad ascendente) cuya palabra_clave
+  // aparece como substring del texto (case-insensitive) gana. Devuelve la
+  // regla completa (no solo el nombre de categoria) porque el llamador a
+  // veces necesita tambien la palabra_clave que matcheo (ver renderCategorizar).
+  function encontrarReglaQueAplica(texto, reglas){
+    var t = String(texto || "").trim().toLowerCase();
+    if(!t) return null;
+    for(var i = 0; i < reglas.length; i++){
+      var regla = reglas[i];
+      var palabra = String(regla.palabra_clave || "").trim().toLowerCase();
+      if(palabra && t.indexOf(palabra) !== -1) return regla;
+    }
+    return null;
+  }
+
+  // categorizar(texto, reglas) del escritorio, portado tal cual: devuelve el
+  // NOMBRE de categoria (nunca la regla), "Otros" si ninguna regla calza.
+  function categorizarTexto(texto, reglas){
+    var regla = encontrarReglaQueAplica(texto, reglas);
+    return regla ? regla.categoria : "Otros";
+  }
+
+  function obtenerReglaPorPalabra(palabraClave){
+    return dbGet(
+      "SELECT r.id, r.prioridad, r.palabra_clave, r.categoria_id, c.nombre AS categoria " +
+      "FROM categoria_reglas r JOIN categorias c ON c.id = r.categoria_id " +
+      "WHERE r.palabra_clave = ? COLLATE NOCASE",
+      [palabraClave]
+    );
+  }
+
+  // Version simplificada de categorizar_screen.py: sugiere la categoria
+  // mirando el gasto MAS RECIENTE ya categorizado con el mismo detalle
+  // exacto. Queda como respaldo de categorizarTexto (ver sugerirCategoriaCombinada).
   function sugerirCategoriaPara(detalle){
     var row = dbGet(
       "SELECT c.nombre AS nombre FROM gastos g JOIN categorias c ON c.id=g.categoria_id " +
@@ -2977,6 +3063,41 @@
       [detalle]
     );
     return row ? row.nombre : "";
+  }
+
+  // Sugerencia combinada usada al INSERTAR un gasto nuevo (Cargar mes,
+  // Ingreso Manual): una regla por palabra clave es mas confiable que la
+  // heuristica de "ultimo gasto igual", asi que tiene prioridad; la
+  // heuristica queda de respaldo si ninguna regla calza. Devuelve "" (no
+  // "Otros") cuando no hay ninguna sugerencia, para no autocategorizar a
+  // ciegas gastos nuevos -- quedan sin categoria, visibles en "Categorizar".
+  function sugerirCategoriaCombinada(detalle){
+    var porRegla = categorizarTexto(detalle, cargarReglasCategoria());
+    if(porRegla !== "Otros") return porRegla;
+    return sugerirCategoriaPara(detalle);
+  }
+
+  // categorizar_pendiente() del escritorio: tras crear/actualizar una regla,
+  // se re-aplica el set COMPLETO de reglas vigentes a TODOS los gastos que
+  // hoy estan pendientes (sin categoria o en "Otros"), en cualquier mes -- no
+  // solo al gasto que se estaba editando. No abre transaccion propia --
+  // quien llama debe envolver en BEGIN/COMMIT y llamar scheduleSave() despues
+  // (mismo criterio que insertarGastoConReparto). Devuelve cuantos gastos
+  // quedaron recategorizados.
+  function reaplicarReglasCategoria(){
+    var reglas = cargarReglasCategoria();
+    if(!reglas.length) return 0;
+    var pendientes = dbAll(
+      "SELECT g.id, g.detalle FROM gastos g LEFT JOIN categorias c ON c.id=g.categoria_id WHERE " + SQL_FILTRO_PENDIENTE
+    );
+    var cambios = 0;
+    pendientes.forEach(function(g){
+      var regla = encontrarReglaQueAplica(g.detalle, reglas);
+      if(!regla) return;
+      db.run("UPDATE gastos SET categoria_id=? WHERE id=?", [regla.categoria_id, g.id]);
+      cambios++;
+    });
+    return cambios;
   }
 
   function renderCategorizar(){
@@ -2987,7 +3108,9 @@
     if(!anio || !mes){ cont.innerHTML = ""; resumen.textContent = ""; return; }
 
     var filas = dbAll(
-      "SELECT id, fecha, detalle, empresa, monto_total FROM gastos WHERE anio=? AND mes=? AND categoria_id IS NULL ORDER BY monto_total DESC",
+      "SELECT g.id, g.fecha, g.detalle, g.empresa, g.monto_total FROM gastos g " +
+      "LEFT JOIN categorias c ON c.id=g.categoria_id " +
+      "WHERE g.anio=? AND g.mes=? AND " + SQL_FILTRO_PENDIENTE + " ORDER BY g.monto_total DESC",
       [anio, mes]
     );
     if(filas.length === 0){
@@ -3000,8 +3123,18 @@
     resumen.className = "note warn";
     resumen.textContent = filas.length + " gasto" + (filas.length !== 1 ? "s" : "") + " sin categoría -- " + money(total) + " en total.";
 
+    var reglas = cargarReglasCategoria();
     cont.innerHTML = filas.map(function(f){
-      var sugerida = sugerirCategoriaPara(f.detalle);
+      // Una regla existente que ya calza con el detalle es mas confiable que
+      // la heuristica vieja -- si aplica, se usa tanto para precargar la
+      // categoria como la palabra clave (la de la regla, no el detalle
+      // crudo). Si no hay ninguna regla que calce, se cae a la heuristica de
+      // "ultimo gasto igual" para la categoria, y se precarga la palabra
+      // clave con el detalle tal cual (lo mas probable que el usuario quiera
+      // usar como gatillo de la regla nueva).
+      var reglaMatch = encontrarReglaQueAplica(f.detalle, reglas);
+      var categoriaSugerida = reglaMatch ? reglaMatch.categoria : sugerirCategoriaPara(f.detalle);
+      var palabraSugerida = reglaMatch ? reglaMatch.palabra_clave : f.detalle;
       return "<div class=\"list-row\" data-catid=\"" + f.id + "\">" +
         "<div class=\"list-row-main\">" +
           "<span class=\"list-fecha\">" + f.fecha + "</span>" +
@@ -3009,7 +3142,8 @@
           "<span class=\"list-monto\">" + money(f.monto_total) + "</span>" +
         "</div>" +
         "<div class=\"list-row-side\">" +
-          "<input type=\"text\" class=\"cat-input\" list=\"categoriasList\" style=\"width:180px;\" value=\"" + escapeHtml(sugerida) + "\" placeholder=\"Elegir categoría...\">" +
+          "<input type=\"text\" class=\"cat-input\" list=\"categoriasList\" style=\"width:160px;\" value=\"" + escapeHtml(categoriaSugerida) + "\" placeholder=\"Elegir categoría...\">" +
+          "<input type=\"text\" class=\"cat-palabra-input\" style=\"width:140px;\" value=\"" + escapeHtml(palabraSugerida) + "\" placeholder=\"Palabra clave\" title=\"Palabra clave: se usará para categorizar automáticamente otros gastos que la contengan (dejar vacío para categorizar solo este gasto, sin crear una regla).\">" +
           "<button type=\"button\" class=\"btn-primary\" data-catguardar=\"" + f.id + "\">Guardar</button>" +
         "</div>" +
       "</div>";
@@ -3020,9 +3154,43 @@
         var id = Number(btn.dataset.catguardar);
         var fila = cont.querySelector("[data-catid=\"" + id + "\"]");
         var nombre = fila.querySelector(".cat-input").value.trim();
+        var palabraClave = fila.querySelector(".cat-palabra-input").value.trim();
         if(!nombre){ alert("Elegí o escribí una categoría antes de guardar."); return; }
-        var categoriaId = obtenerOCrearCategoria(nombre);
-        dbRun("UPDATE gastos SET categoria_id=? WHERE id=?", [categoriaId, id]);
+
+        if(palabraClave){
+          var reglaExistente = obtenerReglaPorPalabra(palabraClave);
+          if(reglaExistente && reglaExistente.categoria.toLowerCase() !== nombre.toLowerCase()){
+            var continuar = confirm(
+              "La palabra clave \"" + palabraClave + "\" ya está asignada a la categoría \"" + reglaExistente.categoria + "\". ¿Reemplazarla por \"" + nombre + "\"?"
+            );
+            if(!continuar) return;
+          }
+        }
+
+        db.run("BEGIN");
+        try{
+          var categoriaId = obtenerOCrearCategoria(nombre);
+          db.run("UPDATE gastos SET categoria_id=? WHERE id=?", [categoriaId, id]);
+          if(palabraClave){
+            // Upsert por palabra_clave (UNIQUE COLLATE NOCASE en el esquema)
+            // -- nunca dos filas con la misma palabra clave; si ya existia
+            // (apuntando a esta categoria o a otra, tras la confirmacion de
+            // arriba) se actualiza la categoria que apunta, sin tocar su
+            // prioridad.
+            db.run(
+              "INSERT INTO categoria_reglas (prioridad, palabra_clave, categoria_id) VALUES (100, ?, ?) " +
+              "ON CONFLICT(palabra_clave) DO UPDATE SET categoria_id=excluded.categoria_id",
+              [palabraClave, categoriaId]
+            );
+            reaplicarReglasCategoria();
+          }
+          db.run("COMMIT");
+        }catch(e){
+          db.run("ROLLBACK");
+          alert("Error al guardar la categoría: " + e.message);
+          return;
+        }
+        scheduleSave();
         refrescarDatalists();
         renderResumen();
         renderCategorizar();
@@ -4326,7 +4494,7 @@
       var d = new Date(item.fechaCompra + "T00:00:00");
       var prev = mesAnteriorDe(d.getFullYear(), d.getMonth() + 1);
       var nombresMesAnteriorList = nombres.length ? nombresPorDetalleMes(detalleFinal, prev.anio, prev.mes) : [];
-      var categoriaSugerida = sugerirCategoriaPara(detalleFinal) || "Otros";
+      var categoriaSugerida = sugerirCategoriaCombinada(detalleFinal) || "Otros";
 
       return {
         fecha: item.fechaCompra,
@@ -4493,6 +4661,16 @@
           mostrarMensajeCargarMes("Se detectaron " + filasNuevas.length + " gastos. Revisalos abajo antes de confirmar.", "ok");
         }
         aplicarMatchingAutomatico(filasNuevas);
+        // El PDF no trae categoria propia (a diferencia de Deudas
+        // Adicionales) -- se precarga con la sugerencia combinada (regla por
+        // palabra clave primero, heuristica de "ultimo gasto igual" de
+        // respaldo) cuando hay alguna; si no hay ninguna sugerencia queda
+        // vacia, tal cual antes, para categorizar despues desde la pestaña
+        // "Categorizar". El usuario siempre puede editar esta celda antes de
+        // confirmar la importacion.
+        filasNuevas.forEach(function(f){
+          if(!f.categoria) f.categoria = sugerirCategoriaCombinada(f.detalle);
+        });
         sincronizarFilasCargarMesDesdeDOM();
         cmFilasActuales = cmFilasActuales.concat(filasNuevas);
         renderTablaCargarMes();
@@ -5579,7 +5757,14 @@
     renderComprobadorCoberturaGD: renderComprobadorCoberturaGD,
     renderListaGastosDiarios: renderListaGastosDiarios,
     guardarGastoDiario: guardarGastoDiario,
-    editarGastoDiarioForm: editarGastoDiarioForm
+    editarGastoDiarioForm: editarGastoDiarioForm,
+    categorizarTexto: categorizarTexto,
+    cargarReglasCategoria: cargarReglasCategoria,
+    encontrarReglaQueAplica: encontrarReglaQueAplica,
+    obtenerReglaPorPalabra: obtenerReglaPorPalabra,
+    sugerirCategoriaCombinada: sugerirCategoriaCombinada,
+    reaplicarReglasCategoria: reaplicarReglasCategoria,
+    renderCategorizar: renderCategorizar
   };
 
   // ---------------------------------------------------------------- arranque
