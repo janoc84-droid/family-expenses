@@ -247,6 +247,16 @@
   .charts-grid .chart-box{ flex:1 1 260px; }
   .chart-box h3{ font-size:.85rem; color:var(--text-dim); margin-bottom:8px; font-weight:600; }
 
+  /* ---------------- Panel Diario: calendario de calor (mapa de gasto por dia) ---------------- */
+  .heat-cal-dow{ display:grid; grid-template-columns:repeat(7,1fr); gap:4px; font-size:.68rem; color:var(--text-dim); text-align:center; margin-bottom:4px; }
+  .heat-cal-grid{ display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
+  .heat-cal-cell{
+    aspect-ratio:1; border-radius:6px; border:1px solid var(--border);
+    display:flex; align-items:center; justify-content:center;
+    font-size:.74rem; font-weight:600; font-variant-numeric:tabular-nums; cursor:default;
+  }
+  .heat-cal-cell.heat-cal-empty{ border-color:transparent; background:transparent; }
+
   /* ---------------- personas expandibles (resumen mensual) ---------------- */
   .person-row{ border:1px solid var(--border); border-radius:10px; margin-bottom:8px; overflow:hidden; }
   .person-row-head{
@@ -764,6 +774,13 @@
         </div>
       </div>
 
+      <h3 style="font-size:.85rem;color:var(--text-dim);margin:18px 0 8px;">Calendario de gasto diario</h3>
+      <p class="hint" style="margin-bottom:10px;">Un cuadrado por día del mes elegido arriba; mientras más intenso el color, más se gastó ese día en total (todas las personas juntas). Pasa el mouse sobre un día para ver el monto exacto.</p>
+      <div class="chart-box" style="margin-bottom:14px;">
+        <div class="heat-cal-dow"><span>Lun</span><span>Mar</span><span>Mié</span><span>Jue</span><span>Vie</span><span>Sáb</span><span>Dom</span></div>
+        <div class="heat-cal-grid" id="pdCalendario"></div>
+      </div>
+
       <h3 style="font-size:.85rem;color:var(--text-dim);margin:18px 0 8px;">Análisis por persona</h3>
       <p class="hint" style="margin-bottom:10px;">Cuánto gasta cada persona mes a mes, según lo asignado con "Compartir con"/"Dividir..." en Gastos Diarios. Lo que no quedó asignado a nadie se agrupa como "Sin asignar".</p>
       <div class="form-grid" style="margin-bottom:10px;">
@@ -779,6 +796,17 @@
         <h3>Tendencia de los últimos 12 meses</h3>
         <div class="bar-chart" id="pdPersonaTendencia"></div>
       </div>
+
+      <h3 style="font-size:.85rem;color:var(--text-dim);margin-bottom:8px;">Agregar gastos diarios de esta persona al Estado de Cuenta</h3>
+      <p class="hint" style="margin-bottom:10px;">Marca los gastos diarios (del mes elegido arriba) que también hay que cobrarle a la familia en el Estado de Cuenta -- se agregan como gastos manuales 100% de esta persona, en el mes/año destino que elijas abajo (no tiene que ser el mismo mes). Los que ya se hayan agregado antes (misma fecha, detalle y monto) se saltan solos, así puedes repetir la operación sin duplicar.</p>
+      <div id="pdPuenteLista"></div>
+      <div class="form-grid" style="margin:10px 0;">
+        <div class="field small"><label>Mes destino</label><select id="pdPuenteMes"></select></div>
+        <div class="field small"><label>Año destino</label><select id="pdPuenteAnio"></select></div>
+        <div class="field grow" style="justify-content:flex-end;"><button type="button" class="btn-primary" id="pdPuenteBtn">Agregar seleccionados a Estado de Cuenta</button></div>
+      </div>
+      <div class="note" id="pdPuenteMensaje" hidden></div>
+
       <h3 style="font-size:.85rem;color:var(--text-dim);margin-bottom:8px;">Todas las personas de este mes (toca una fila para elegirla arriba)</h3>
       <div id="pdPersonasList"></div>
     </div>
@@ -1212,10 +1240,22 @@
   // "Cargar mes" al confirmar la importacion del PDF, para no duplicar esta
   // logica en dos lados. NO abre transaccion propia -- quien llama debe
   // envolver la(s) llamada(s) en BEGIN/COMMIT y llamar scheduleSave() despues.
-  function insertarGastoConReparto(fecha, detalle, empresa, categoriaNombre, monto, cuotaTexto, reparto, origen){
-    var d = new Date(fecha + "T00:00:00");
-    var anio = d.getFullYear();
-    var mes = d.getMonth() + 1;
+  // anioMesOverride (opcional): [anio, mes] a usar tal cual en vez de
+  // derivarlos de 'fecha' -- lo usa el puente "Agregar a Estado de Cuenta"
+  // desde Gastos Diarios (ver agregarGastosDiariosAEstadoCuenta), donde la
+  // fecha original del gasto diario se conserva pero el "balde" anio/mes de
+  // destino puede ser otro mes elegido por el usuario (igual idea que
+  // mes_importado_id, desacoplado de fecha_compra, en el escritorio).
+  function insertarGastoConReparto(fecha, detalle, empresa, categoriaNombre, monto, cuotaTexto, reparto, origen, anioMesOverride){
+    var anio, mes;
+    if(anioMesOverride){
+      anio = anioMesOverride[0];
+      mes = anioMesOverride[1];
+    }else{
+      var d = new Date(fecha + "T00:00:00");
+      anio = d.getFullYear();
+      mes = d.getMonth() + 1;
+    }
     var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
     db.run("INSERT INTO gastos (anio, mes, fecha, detalle, empresa, categoria_id, monto_total, cuota_texto, origen) VALUES (?,?,?,?,?,?,?,?,?)",
       [anio, mes, fecha, detalle, empresa || null, categoriaId, monto, cuotaTexto || "1", origen || "MANUAL"]);
@@ -1294,7 +1334,7 @@
   // para los selectores de Gastos Diarios / Panel Diario (tabla nueva,
   // separada -- ver SCHEMA_SQL).
   var PERIODO_SELECTS = [["ingMes","ingAnio"],["rsMes","rsAnio"],["ecMes","ecAnio"],["chkMes","chkAnio"],["cmMes","cmAnio"],["catMes","catAnio"],
-    ["gdMes","gdAnio","gastos_diarios"],["pdMes","pdAnio","gastos_diarios"]];
+    ["gdMes","gdAnio","gastos_diarios"],["pdMes","pdAnio","gastos_diarios"],["pdPuenteMes","pdPuenteAnio"]];
 
   function poblarSelectMes(select){
     var actual = select.value;
@@ -3776,9 +3816,9 @@
   // grafico de barras CSS de Resumen Mensual (renderBarChart) -- version
   // simplificada de estadisticas_gastos_diarios_screen.py: se priorizaron
   // los desgloses que describia el placeholder original de esta pestana
-  // (prescindible vs. no, por categoria, por medio de pago) en vez del
-  // calendario/tendencia con matplotlib de la app de escritorio, que no
-  // tiene un equivalente directo en los graficos CSS ya existentes.
+  // (prescindible vs. no, por categoria, por medio de pago), mas el
+  // calendario de calor por dia (ver renderPanelDiarioCalendario, puerto de
+  // _dibujar_calendario_dia con color-mix en vez de matplotlib).
 
   function renderPanelDiario(){
     var anio = Number(document.getElementById("pdAnio").value);
@@ -3813,10 +3853,52 @@
     var itemsMedio = porMedio.map(function(r){ return {label: etiquetaMedioPago(r.medio_pago, r.tipo_tarjeta, r.banco_tarjeta), value: r.total}; });
     renderBarChart("pdChartMedioPago", itemsMedio, true);
 
+    renderPanelDiarioCalendario(anio, mes);
     renderPanelDiarioPersonas(anio, mes);
   }
   document.getElementById("pdMes").addEventListener("change", renderPanelDiario);
   document.getElementById("pdAnio").addEventListener("change", renderPanelDiario);
+
+  // renderPanelDiarioCalendario: calendario de calor del TOTAL de gastos
+  // diarios por dia del mes elegido (independiente del analisis por
+  // persona de mas abajo -- no filtra por persona). Puerto de
+  // _dibujar_calendario_dia (estadisticas_gastos_diarios_screen.py,
+  // lineas 195-245): grilla lunes-domingo, un cuadrado por dia, intensidad
+  // de color = (max(monto_del_dia,0) / max(monto_del_mes,0)) ** 0.45 (raiz,
+  // no lineal, asi un dia con gasto grande no aplasta la escala de los
+  // demas). Math.max(...,0) antes de la potencia es a proposito -- un
+  // gasto diario puede quedar negativo por una correccion/devolucion, y
+  // Math.pow(negativo, 0.45) da NaN en JS (mismo bug ya corregido en el
+  // escritorio). El monto real (con signo) se muestra igual en el tooltip.
+  function renderPanelDiarioCalendario(anio, mes){
+    var cont = document.getElementById("pdCalendario");
+    var filas = dbAll(
+      "SELECT fecha, SUM(monto) AS total FROM gastos_diarios WHERE anio=? AND mes=? GROUP BY fecha", [anio, mes]
+    );
+    var totalPorDia = {};
+    filas.forEach(function(f){ totalPorDia[f.fecha] = f.total; });
+
+    var maxPositivo = filas.reduce(function(m, f){ return Math.max(m, Math.max(f.total, 0)); }, 0);
+    var diasEnMes = new Date(anio, mes, 0).getDate();
+    // getDay(): 0=domingo..6=sabado -- se convierte a offset lunes-primero (0=lunes..6=domingo).
+    var offsetLunes = (new Date(anio, mes - 1, 1).getDay() + 6) % 7;
+
+    var celdas = [];
+    for(var i = 0; i < offsetLunes; i++){ celdas.push(null); }
+    for(var dia = 1; dia <= diasEnMes; dia++){ celdas.push(dia); }
+
+    cont.innerHTML = celdas.map(function(dia){
+      if(dia === null) return "<div class=\"heat-cal-cell heat-cal-empty\"></div>";
+      var fechaIso = anio + "-" + String(mes).padStart(2, "0") + "-" + String(dia).padStart(2, "0");
+      var monto = totalPorDia[fechaIso] || 0;
+      var intensidad = maxPositivo > 0 ? Math.pow(Math.max(monto, 0) / maxPositivo, 0.45) : 0;
+      var pct = Math.round(intensidad * 100);
+      var bg = "color-mix(in srgb, var(--warn) " + pct + "%, var(--surface))";
+      var color = pct > 55 ? "var(--warn-ink)" : "var(--text)";
+      var titulo = fechaIso + ": " + money(monto);
+      return "<div class=\"heat-cal-cell\" style=\"background:" + bg + ";color:" + color + ";\" title=\"" + escapeHtml(titulo) + "\">" + dia + "</div>";
+    }).join("");
+  }
 
   // ---------------------------------------------------------------- Panel Diario: analisis por persona
   // Puerto de estadisticas_gastos_diarios_screen.py (_build_evolucion_persona/
@@ -3977,6 +4059,8 @@
     }else{
       document.getElementById("pdPersonaCategoriaTop").textContent = "-";
     }
+
+    renderPanelDiarioPuente();
   }
 
   // renderPanelDiarioPersonas: arma el selector de persona y la lista de
@@ -4007,6 +4091,142 @@
     });
   }
   document.getElementById("pdPersonaSel").addEventListener("change", renderPanelDiarioPersonaDetalle);
+
+  // ---------------------------------------------------------------- Panel Diario: puente "Agregar a Estado de Cuenta"
+  // Puerto web de agregar_gastos_diarios_a_estado_cuenta (manual_entry_service.py,
+  // lineas 124+): cuando un gasto diario tambien hay que cobrarselo a la familia
+  // en el Estado de Cuenta de un mes (que se carga ~1 mes atrasado), este puente
+  // copia los gastos diarios de la persona elegida arriba que el usuario marco
+  // con el checkbox (nunca "todos de una vez") como gastos MANUAL 100%
+  // atribuidos a esa persona, en el anio/mes DESTINO que elija abajo -- no
+  // necesariamente el mismo mes/anio que se esta mirando en pdMes/pdAnio. La
+  // fecha original del gasto diario se conserva tal cual (solo el "balde"
+  // anio/mes de destino cambia -- ver insertarGastoConReparto/anioMesOverride,
+  // mismo desacople que mes_importado_id vs. fecha_compra en el escritorio).
+
+  // filasGastoDiarioPersona: gastos diarios de 'persona' en anio/mes, con el
+  // monto YA resuelto para ella (gasto_diario_persona.monto, no el monto total
+  // del gasto si estaba compartido/dividido) -- misma fuente que
+  // resumenCategoriaPersonaMesGD, pero fila por fila en vez de agregado. No
+  // aplica a la pseudo-persona "Sin asignar" (no hay a quien atribuirselo).
+  function filasGastoDiarioPersona(persona, anio, mes){
+    if(!persona || persona === "Sin asignar") return [];
+    return dbAll(
+      "SELECT gd.id AS gasto_diario_id, gd.fecha AS fecha, gd.detalle AS detalle, gp.monto AS monto, " +
+      "COALESCE(c.nombre,'') AS categoria " +
+      "FROM gasto_diario_persona gp JOIN gastos_diarios gd ON gd.id=gp.gasto_diario_id " +
+      "LEFT JOIN categorias c ON c.id=gd.categoria_id " +
+      "WHERE gp.persona = ? COLLATE NOCASE AND gd.anio=? AND gd.mes=? ORDER BY gd.fecha, gd.id",
+      [persona, anio, mes]
+    );
+  }
+
+  // agregarGastosDiariosAEstadoCuenta: inserta 'filas' (ya filtradas a las
+  // marcadas por el usuario) como gastos manuales 100% de 'persona' en
+  // anioDestino/mesDestino. Salta cualquiera que ya exista en el destino con
+  // la misma fecha+detalle+monto+persona (misma clave que el escritorio), para
+  // poder apretar el boton de nuevo sin duplicar. Devuelve {agregados, yaExistian}.
+  function agregarGastosDiariosAEstadoCuenta(persona, anioDestino, mesDestino, filas){
+    function clave(fecha, detalle, monto){ return fecha + "|" + detalle + "|" + Math.round(monto * 100); }
+
+    var existentes = {};
+    dbAll(
+      "SELECT g.fecha AS fecha, g.detalle AS detalle, gp.monto AS monto FROM gasto_persona gp " +
+      "JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
+      "WHERE g.anio=? AND g.mes=? AND g.origen='MANUAL' AND p.nombre=? COLLATE NOCASE",
+      [anioDestino, mesDestino, persona]
+    ).forEach(function(r){ existentes[clave(r.fecha, r.detalle, r.monto)] = true; });
+
+    var agregados = 0, yaExistian = 0;
+    db.run("BEGIN");
+    try{
+      filas.forEach(function(f){
+        var k = clave(f.fecha, f.detalle, f.monto);
+        if(existentes[k]){ yaExistian++; return; }
+        var reparto = {};
+        reparto[persona] = f.monto;
+        insertarGastoConReparto(f.fecha, f.detalle, "Gastos Diarios", f.categoria || "", f.monto, "1", reparto, "MANUAL", [anioDestino, mesDestino]);
+        existentes[k] = true; // por si la misma fila viene repetida en la misma tanda
+        agregados++;
+      });
+      db.run("COMMIT");
+    }catch(e){
+      db.run("ROLLBACK");
+      throw e;
+    }
+    scheduleSave();
+    return {agregados: agregados, yaExistian: yaExistian};
+  }
+
+  function renderPanelDiarioPuente(){
+    var persona = document.getElementById("pdPersonaSel").value;
+    var anio = Number(document.getElementById("pdAnio").value);
+    var mes = Number(document.getElementById("pdMes").value);
+    var cont = document.getElementById("pdPuenteLista");
+    var btn = document.getElementById("pdPuenteBtn");
+    document.getElementById("pdPuenteMensaje").hidden = true;
+
+    if(!persona || persona === "Sin asignar"){
+      cont.innerHTML = "<p class=\"hint\">Elige una persona (no \"Sin asignar\") arriba para poder agregar sus gastos diarios al Estado de Cuenta.</p>";
+      btn.disabled = true;
+      return;
+    }
+    var filas = filasGastoDiarioPersona(persona, anio, mes);
+    if(filas.length === 0){
+      cont.innerHTML = "<p class=\"hint\">" + escapeHtml(persona) + " no tiene gastos diarios asignados en " + MESES_ES[mes] + " " + anio + ".</p>";
+      btn.disabled = true;
+      return;
+    }
+    btn.disabled = false;
+    cont.innerHTML = filas.map(function(f){
+      return "<label class=\"checklist-item\">" +
+        "<input type=\"checkbox\" class=\"pd-puente-chk\" data-i=\"" + f.gasto_diario_id + "\">" +
+        "<span class=\"list-fecha\">" + escapeHtml(f.fecha) + "</span>" +
+        "<span class=\"checklist-detalle\">" + escapeHtml(f.detalle) + (f.categoria ? " <span class=\"hint\">(" + escapeHtml(f.categoria) + ")</span>" : "") + "</span>" +
+        "<span class=\"checklist-monto\">" + money(f.monto) + "</span>" +
+      "</label>";
+    }).join("");
+  }
+
+  document.getElementById("pdPuenteBtn").addEventListener("click", function(){
+    var persona = document.getElementById("pdPersonaSel").value;
+    var anio = Number(document.getElementById("pdAnio").value);
+    var mes = Number(document.getElementById("pdMes").value);
+    var anioDestino = Number(document.getElementById("pdPuenteAnio").value);
+    var mesDestino = Number(document.getElementById("pdPuenteMes").value);
+    if(!persona || persona === "Sin asignar") return;
+    if(!anioDestino || !mesDestino){ alert("Elegí el mes y año destino."); return; }
+
+    var idsMarcados = Array.prototype.slice.call(document.querySelectorAll(".pd-puente-chk:checked")).map(function(cb){
+      return Number(cb.dataset.i);
+    });
+    if(idsMarcados.length === 0){ alert("Marca al menos un gasto diario para agregar."); return; }
+
+    var filas = filasGastoDiarioPersona(persona, anio, mes).filter(function(f){
+      return idsMarcados.indexOf(f.gasto_diario_id) !== -1;
+    });
+
+    var resultado;
+    try{
+      resultado = agregarGastosDiariosAEstadoCuenta(persona, anioDestino, mesDestino, filas);
+    }catch(e){
+      alert("Error al agregar al Estado de Cuenta: " + e.message);
+      return;
+    }
+
+    refrescarDatalists();
+    refrescarSelectoresPeriodo();
+
+    var msg = document.getElementById("pdPuenteMensaje");
+    msg.hidden = false;
+    msg.className = "note " + (resultado.agregados > 0 ? "ok" : "warn");
+    msg.textContent = resultado.agregados + " gasto(s) agregado(s) al Estado de Cuenta de " + persona + " en " +
+      MESES_ES[mesDestino] + " " + anioDestino +
+      (resultado.yaExistian > 0 ? " (" + resultado.yaExistian + " ya existía(n) y se saltó/saltaron)." : ".");
+
+    renderPanelDiarioPuente();
+    renderEstadoCuenta();
+  });
 
   // ---------------------------------------------------------------- Cargar mes: extraccion de texto de PDF (pdf.js)
   // No existe una libreria Python (pdfplumber) equivalente en el navegador --
@@ -5764,7 +5984,13 @@
     obtenerReglaPorPalabra: obtenerReglaPorPalabra,
     sugerirCategoriaCombinada: sugerirCategoriaCombinada,
     reaplicarReglasCategoria: reaplicarReglasCategoria,
-    renderCategorizar: renderCategorizar
+    renderCategorizar: renderCategorizar,
+    renderPanelDiario: renderPanelDiario,
+    renderPanelDiarioCalendario: renderPanelDiarioCalendario,
+    renderPanelDiarioPersonaDetalle: renderPanelDiarioPersonaDetalle,
+    renderPanelDiarioPuente: renderPanelDiarioPuente,
+    filasGastoDiarioPersona: filasGastoDiarioPersona,
+    agregarGastosDiariosAEstadoCuenta: agregarGastosDiariosAEstadoCuenta
   };
 
   // ---------------------------------------------------------------- arranque
