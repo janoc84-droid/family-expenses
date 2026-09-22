@@ -336,6 +336,27 @@
     background:var(--surface-2); border-radius:6px; padding:6px 8px; margin-bottom:4px;
   }
 
+  /* ---------------- calculadora integrada ---------------- */
+  .field-with-calc{ display:flex; gap:6px; align-items:flex-end; }
+  .field-with-calc input{ flex:1; }
+  .calc-trigger-btn{ flex:none; }
+  #calcOverlay{ z-index:210; } /* por encima de un modal-overlay normal, para poder abrirse desde adentro de otro (ej. Subtotal combinado) sin cerrarlo */
+  #calcBox{ max-width:340px; }
+  .calc-display{
+    background:var(--surface-2); border:1px solid var(--border); border-radius:8px;
+    padding:14px; text-align:right; font-size:1.25rem; font-weight:700;
+    font-variant-numeric:tabular-nums; word-break:break-all; min-height:1.6em; margin-bottom:10px;
+  }
+  .calc-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+  .calc-btn{
+    background:var(--surface-2); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:12px 0; font-size:1.05rem; font-weight:600; cursor:pointer;
+  }
+  .calc-btn:hover{ border-color:var(--accent); }
+  .calc-btn.calc-op{ color:var(--accent-strong); }
+  .calc-btn.calc-eq{ grid-column:span 4; background:var(--accent); color:var(--accent-ink); }
+  .calc-btn.calc-eq:hover{ filter:brightness(1.06); }
+
   /* ---------------- pantallas "en construccion" ---------------- */
   .placeholder-card{ text-align:center; padding:34px 20px; }
   .placeholder-icon{ font-size:2.2rem; margin-bottom:10px; }
@@ -423,6 +444,7 @@
       <button id="btnExportar" class="btn-ghost" type="button">⬇ Descargar copia de la base</button>
       <button id="btnImportarTrigger" class="btn-ghost" type="button">⬆ Restaurar desde un archivo</button>
       <input type="file" id="inputImportar" accept=".sqlite,.db,.sqlite3" hidden>
+      <button id="btnRestaurarRespaldo" class="btn-ghost" type="button">🕐 Restaurar un respaldo anterior...</button>
       <button id="btnSync" class="btn-ghost" type="button">🔄 Sincronizar con carpeta...</button>
       <button id="btnSyncReconectar" class="btn-ghost" type="button" hidden>⚠ Reconectar carpeta</button>
       <span id="syncStatusText" class="sync-status-text"></span>
@@ -526,7 +548,10 @@
         </div>
         <div class="field small">
           <label>Monto total</label>
-          <input type="number" id="gMonto" min="0" step="1" placeholder="0">
+          <div class="field-with-calc">
+            <input type="number" id="gMonto" min="0" step="1" placeholder="0">
+            <button type="button" class="icon-btn calc-trigger-btn" id="gMontoCalcBtn" title="Abrir calculadora">🖩</button>
+          </div>
         </div>
         <div class="field small">
           <label>Cuotas (ej. 1 o 3/12)</label>
@@ -674,7 +699,10 @@
         </div>
         <div class="field small">
           <label>Monto</label>
-          <input type="number" id="gdMonto" min="0" step="1" placeholder="0">
+          <div class="field-with-calc">
+            <input type="number" id="gdMonto" min="0" step="1" placeholder="0">
+            <button type="button" class="icon-btn calc-trigger-btn" id="gdMontoCalcBtn" title="Abrir calculadora">🖩</button>
+          </div>
         </div>
         <div class="field small" id="gdCuotasField">
           <label>Cuotas</label>
@@ -846,6 +874,14 @@
 
 <div class="modal-overlay" id="modalOverlay" hidden>
   <div class="modal-box" id="modalBox"></div>
+</div>
+
+<!-- Overlay propio de la calculadora (ver abrirCalculadora): separado del
+     modal generico de arriba para poder abrirse ENCIMA de otro modal ya
+     abierto (ej. desde el boton de la calculadora dentro de "Subtotal
+     combinado") sin destruir su contenido/estado. -->
+<div class="modal-overlay" id="calcOverlay" hidden>
+  <div class="modal-box" id="calcBox"></div>
 </div>
 
 <div class="loading-screen" id="appLoading">
@@ -1134,12 +1170,25 @@
   var IDB_NAME = "family_expenses_store";
   var IDB_STORE = "kv";
   var IDB_KEY = "sqlite_db";
+  // Respaldo automatico rotativo (equivalente web de "Respaldos_exe" del
+  // escritorio): un object store aparte dentro de la misma base IndexedDB,
+  // con una copia del binario SQLite guardada al arrancar la app, ANTES de
+  // aplicar cualquier fusion de sincronizacion remota (carpeta o nube). Se
+  // rota para quedarse solo con los ultimos IDB_BACKUP_MAX. Ver
+  // guardarRespaldoRotativo/listarRespaldos/restaurarRespaldoPorId mas abajo.
+  var IDB_BACKUP_STORE = "respaldos";
+  var IDB_VERSION = 2;
+  var IDB_BACKUP_MAX = 5;
 
   function idbOpen(){
     return new Promise(function(resolve, reject){
       if(!window.indexedDB){ reject(new Error("Este navegador no soporta IndexedDB.")); return; }
-      var req = indexedDB.open(IDB_NAME, 1);
-      req.onupgradeneeded = function(){ req.result.createObjectStore(IDB_STORE); };
+      var req = indexedDB.open(IDB_NAME, IDB_VERSION);
+      req.onupgradeneeded = function(){
+        var conn = req.result;
+        if(!conn.objectStoreNames.contains(IDB_STORE)) conn.createObjectStore(IDB_STORE);
+        if(!conn.objectStoreNames.contains(IDB_BACKUP_STORE)) conn.createObjectStore(IDB_BACKUP_STORE, {keyPath:"id", autoIncrement:true});
+      };
       req.onsuccess = function(){ resolve(req.result); };
       req.onerror = function(){ reject(req.error); };
     });
@@ -1161,6 +1210,62 @@
         tx.objectStore(IDB_STORE).put(value, key);
         tx.oncomplete = function(){ resolve(); };
         tx.onerror = function(){ reject(tx.error); };
+      });
+    });
+  }
+
+  // Guarda una copia rotativa del binario SQLite en el object store de
+  // respaldos y borra las mas viejas que excedan IDB_BACKUP_MAX. Se llama al
+  // arrancar (ver iniciarAppReal) y esta disponible en window.__gfPruebaDebug
+  // para poder probarla repetidas veces sin recargar la pagina de verdad.
+  function guardarRespaldoRotativo(bytes){
+    return idbOpen().then(function(conn){
+      return new Promise(function(resolve, reject){
+        var tx = conn.transaction(IDB_BACKUP_STORE, "readwrite");
+        tx.objectStore(IDB_BACKUP_STORE).add({fecha: new Date().toISOString(), bytes: bytes});
+        tx.oncomplete = function(){ resolve(); };
+        tx.onerror = function(){ reject(tx.error); };
+      });
+    }).then(function(){
+      return listarRespaldos();
+    }).then(function(lista){
+      if(lista.length <= IDB_BACKUP_MAX) return;
+      var aBorrar = lista.slice(IDB_BACKUP_MAX);
+      return idbOpen().then(function(conn){
+        return new Promise(function(resolve, reject){
+          var tx = conn.transaction(IDB_BACKUP_STORE, "readwrite");
+          var store = tx.objectStore(IDB_BACKUP_STORE);
+          aBorrar.forEach(function(r){ store.delete(r.id); });
+          tx.oncomplete = function(){ resolve(); };
+          tx.onerror = function(){ reject(tx.error); };
+        });
+      });
+    });
+  }
+  // Lista los respaldos guardados, mas nuevo primero (no incluye los bytes
+  // completos para no cargar varios MB de golpe -- eso se pide aparte con
+  // obtenerRespaldoPorId al momento de restaurar uno especifico).
+  function listarRespaldos(){
+    return idbOpen().then(function(conn){
+      return new Promise(function(resolve, reject){
+        var tx = conn.transaction(IDB_BACKUP_STORE, "readonly");
+        var req = tx.objectStore(IDB_BACKUP_STORE).getAll();
+        req.onsuccess = function(){
+          var lista = (req.result || []).map(function(r){ return {id: r.id, fecha: r.fecha}; });
+          lista.sort(function(a, b){ return b.id - a.id; });
+          resolve(lista);
+        };
+        req.onerror = function(){ reject(req.error); };
+      });
+    });
+  }
+  function obtenerRespaldoPorId(id){
+    return idbOpen().then(function(conn){
+      return new Promise(function(resolve, reject){
+        var tx = conn.transaction(IDB_BACKUP_STORE, "readonly");
+        var req = tx.objectStore(IDB_BACKUP_STORE).get(id);
+        req.onsuccess = function(){ resolve(req.result || null); };
+        req.onerror = function(){ reject(req.error); };
       });
     });
   }
@@ -1318,11 +1423,45 @@
       return "<option value=\"" + escapeHtml(v) + "\">";
     }).join("");
   }
+  // Combinaciones de 2+ personas que ya aparecieron juntas en el reparto de
+  // ALGUN gasto (Ingreso Manual/Cargar mes via gasto_persona, o Gastos
+  // Diarios via gasto_diario_persona) -- para ofrecerlas como opcion extra
+  // en el datalist de Personas, ademas de cada nombre suelto. Simplificacion
+  // aceptada (ver auditoria): el orden de la combinacion se normaliza
+  // alfabeticamente, no se intenta reconstruir el orden exacto en que se
+  // tipeo esa vez.
+  function combinacionesPersonasUsadas(){
+    var combos = {};
+    function agregarDesde(filas){
+      filas.forEach(function(r){
+        var nombres = String(r.nombres || "").split("|").map(function(s){ return s.trim(); }).filter(Boolean);
+        var vistos = {};
+        var unicos = [];
+        nombres.forEach(function(n){
+          var key = n.toLowerCase();
+          if(!vistos[key]){ vistos[key] = true; unicos.push(n); }
+        });
+        if(unicos.length < 2) return;
+        unicos.sort(function(a, b){ return a.localeCompare(b, "es"); });
+        combos[unicos.join(" ")] = true;
+      });
+    }
+    agregarDesde(dbAll(
+      "SELECT gp.gasto_id AS gid, GROUP_CONCAT(p.nombre, '|') AS nombres " +
+      "FROM gasto_persona gp JOIN personas p ON p.id = gp.persona_id " +
+      "GROUP BY gp.gasto_id HAVING COUNT(*) >= 2"
+    ));
+    agregarDesde(dbAll(
+      "SELECT gasto_diario_id AS gid, GROUP_CONCAT(persona, '|') AS nombres " +
+      "FROM gasto_diario_persona GROUP BY gasto_diario_id HAVING COUNT(*) >= 2"
+    ));
+    return Object.keys(combos).sort(function(a, b){ return a.localeCompare(b, "es"); });
+  }
   function refrescarDatalists(){
     setDatalist("detallesList", dbAll("SELECT DISTINCT detalle FROM gastos ORDER BY detalle").map(function(r){ return r.detalle; }));
     setDatalist("empresasList", dbAll("SELECT DISTINCT empresa FROM gastos WHERE empresa IS NOT NULL AND empresa<>'' ORDER BY empresa").map(function(r){ return r.empresa; }));
     setDatalist("categoriasList", dbAll("SELECT nombre FROM categorias ORDER BY nombre").map(function(r){ return r.nombre; }));
-    setDatalist("personasList", dbAll("SELECT nombre FROM personas ORDER BY nombre").map(function(r){ return r.nombre; }));
+    setDatalist("personasList", dbAll("SELECT nombre FROM personas ORDER BY nombre").map(function(r){ return r.nombre; }).concat(combinacionesPersonasUsadas()));
     setDatalist("gdDetallesList", dbAll("SELECT DISTINCT detalle FROM gastos_diarios ORDER BY detalle").map(function(r){ return r.detalle; }));
     setDatalist("bancosTarjetaList", dbAll("SELECT DISTINCT banco_tarjeta FROM gastos_diarios WHERE banco_tarjeta IS NOT NULL AND banco_tarjeta<>'' ORDER BY banco_tarjeta").map(function(r){ return r.banco_tarjeta; }));
   }
@@ -1440,6 +1579,7 @@
     repartoManualValores = {};
     actualizarCajaReparto();
   });
+  document.getElementById("gMontoCalcBtn").addEventListener("click", function(){ abrirCalculadora("gMonto"); });
 
   // ---------------------------------------------------------------- Ingreso Manual: guardar / editar / borrar
 
@@ -2043,6 +2183,275 @@
     if(ev.target.id === "modalOverlay") cerrarModal();
   });
 
+  // -------------------------------------------- Calculadora integrada
+  //
+  // Evaluador de expresiones aritmeticas SIN eval()/Function() sobre texto
+  // del usuario -- tokenizer + parser recursivo-descendente propio, con
+  // precedencia normal de operadores (× y ÷ antes que + y −, % como postfijo
+  // de mayor precedencia todavia -- "n%" = n/100, y parentesis para agrupar).
+  // Los montos de esta app son siempre pesos enteros (money() redondea),
+  // asi que a proposito NO hay boton de punto decimal: es una simplificacion
+  // aceptada, no una limitacion tecnica del parser (los operadores si
+  // trabajan con numeros no enteros internamente, ej. para %).
+
+  function calcTokenize(expr){
+    var tokens = [];
+    var i = 0;
+    while(i < expr.length){
+      var c = expr.charAt(i);
+      if(c === " "){ i++; continue; }
+      if(c >= "0" && c <= "9"){
+        var j = i;
+        while(j < expr.length && expr.charAt(j) >= "0" && expr.charAt(j) <= "9") j++;
+        tokens.push({type: "num", value: Number(expr.slice(i, j))});
+        i = j;
+        continue;
+      }
+      if("+-*/%()".indexOf(c) !== -1){
+        tokens.push({type: c});
+        i++;
+        continue;
+      }
+      throw new Error("Carácter no válido en la expresión: \"" + c + "\".");
+    }
+    return tokens;
+  }
+  function calcParse(tokens){
+    var pos = 0;
+    function peek(){ return tokens[pos]; }
+    function next(){ return tokens[pos++]; }
+    function parseExpr(){
+      var value = parseTerm();
+      while(peek() && (peek().type === "+" || peek().type === "-")){
+        var op = next().type;
+        var rhs = parseTerm();
+        value = op === "+" ? value + rhs : value - rhs;
+      }
+      return value;
+    }
+    function parseTerm(){
+      var value = parsePercent();
+      while(peek() && (peek().type === "*" || peek().type === "/")){
+        var op = next().type;
+        var rhs = parsePercent();
+        if(op === "/"){
+          if(rhs === 0) throw new Error("No se puede dividir por cero.");
+          value = value / rhs;
+        }else{
+          value = value * rhs;
+        }
+      }
+      return value;
+    }
+    function parsePercent(){
+      var value = parseUnary();
+      while(peek() && peek().type === "%"){
+        next();
+        value = value / 100;
+      }
+      return value;
+    }
+    function parseUnary(){
+      if(peek() && (peek().type === "+" || peek().type === "-")){
+        var op = next().type;
+        var value = parseUnary();
+        return op === "-" ? -value : value;
+      }
+      return parsePrimary();
+    }
+    function parsePrimary(){
+      var tok = peek();
+      if(!tok) throw new Error("Expresión incompleta.");
+      if(tok.type === "num"){ next(); return tok.value; }
+      if(tok.type === "("){
+        next();
+        var value = parseExpr();
+        if(!peek() || peek().type !== ")") throw new Error("Falta cerrar un paréntesis.");
+        next();
+        return value;
+      }
+      throw new Error("Expresión no válida.");
+    }
+    var resultado = parseExpr();
+    if(pos !== tokens.length) throw new Error("Expresión no válida.");
+    return resultado;
+  }
+  function calcEvaluar(expr){
+    var tokens = calcTokenize(expr || "");
+    if(tokens.length === 0) throw new Error("Nada para calcular.");
+    var resultado = calcParse(tokens);
+    if(!isFinite(resultado)) throw new Error("El resultado no es un número válido.");
+    return resultado;
+  }
+
+  // Formato "peso chileno" para el display MIENTRAS SE ESCRIBE (ej.
+  // "123+4560" se muestra como "$123+$4.560"): se le agrega "$" y separador
+  // de miles a cada numero de la expresion cruda, sin tocar el resto de los
+  // caracteres (operadores, parentesis) -- por eso funciona igual para un
+  // "-" que es signo (unario) que para uno que es resta (binario).
+  function calcFormatMiles(digitos){
+    var s = digitos.replace(/^0+(?=\d)/, "");
+    var out = "";
+    for(var i = 0; i < s.length; i++){
+      if(i > 0 && (s.length - i) % 3 === 0) out += ".";
+      out += s.charAt(i);
+    }
+    return out;
+  }
+  function calcFormatearDisplay(expr){
+    if(!expr) return "$0";
+    var conPesos = expr.replace(/\d+/g, function(m){ return "$" + calcFormatMiles(m); });
+    return conPesos.replace(/\*/g, "×").replace(/\//g, "÷");
+  }
+
+  // Abre la calculadora como modal reusable (mismo patron que el resto de la
+  // app, en su propio overlay apilable -- ver comentario del div #calcOverlay
+  // en el HTML). "inputId" es el campo de Monto que la invoco: "Usar este
+  // resultado" le carga el valor calculado (redondeado a peso entero) y
+  // cierra la calculadora, dejando el modal de abajo (si lo hay) intacto.
+  function abrirCalcModal(html){
+    document.getElementById("calcBox").innerHTML = html;
+    document.getElementById("calcOverlay").hidden = false;
+  }
+  function cerrarCalcModal(){
+    document.getElementById("calcOverlay").hidden = true;
+    document.getElementById("calcBox").innerHTML = "";
+  }
+  document.getElementById("calcOverlay").addEventListener("click", function(ev){
+    if(ev.target.id === "calcOverlay") cerrarCalcModal();
+  });
+
+  function abrirCalculadora(inputId){
+    var campoDestino = document.getElementById(inputId);
+    var expr = "";
+    var mostrandoResultado = false;
+    if(campoDestino && campoDestino.value !== "" && !isNaN(Number(campoDestino.value)) && Number(campoDestino.value) > 0){
+      expr = String(Math.round(Number(campoDestino.value)));
+    }
+
+    var html =
+      "<h2>Calculadora</h2>" +
+      "<div class=\"calc-display\" id=\"calcDisplay\"></div>" +
+      "<div class=\"calc-grid\">" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"clear\">C</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"paren-open\">(</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"paren-close\">)</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"back\">⌫</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"digit\" data-val=\"7\">7</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"digit\" data-val=\"8\">8</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"digit\" data-val=\"9\">9</button>" +
+        "<button type=\"button\" class=\"calc-btn calc-op\" data-calc=\"op\" data-val=\"/\">÷</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"digit\" data-val=\"4\">4</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"digit\" data-val=\"5\">5</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"digit\" data-val=\"6\">6</button>" +
+        "<button type=\"button\" class=\"calc-btn calc-op\" data-calc=\"op\" data-val=\"*\">×</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"digit\" data-val=\"1\">1</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"digit\" data-val=\"2\">2</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"digit\" data-val=\"3\">3</button>" +
+        "<button type=\"button\" class=\"calc-btn calc-op\" data-calc=\"op\" data-val=\"-\">−</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"sign\">+/-</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"digit\" data-val=\"0\">0</button>" +
+        "<button type=\"button\" class=\"calc-btn\" data-calc=\"percent\">%</button>" +
+        "<button type=\"button\" class=\"calc-btn calc-op\" data-calc=\"op\" data-val=\"+\">+</button>" +
+        "<button type=\"button\" class=\"calc-btn calc-eq\" data-calc=\"equals\">=</button>" +
+      "</div>" +
+      "<div class=\"note bad\" id=\"calcError\" hidden></div>" +
+      "<div class=\"form-actions\">" +
+        "<button type=\"button\" class=\"btn-ghost\" id=\"calcCerrar\">Cerrar</button>" +
+        "<button type=\"button\" class=\"btn-primary\" id=\"calcUsar\">Usar este resultado</button>" +
+      "</div>";
+    abrirCalcModal(html);
+
+    function mostrarErrorCalc(msg){
+      var errEl = document.getElementById("calcError");
+      if(!errEl) return;
+      errEl.hidden = false;
+      errEl.textContent = msg;
+    }
+    function refrescarDisplay(){
+      var el = document.getElementById("calcDisplay");
+      if(!el) return;
+      el.textContent = calcFormatearDisplay(expr);
+      var errEl = document.getElementById("calcError");
+      if(errEl) errEl.hidden = true;
+    }
+    refrescarDisplay();
+
+    document.getElementById("calcBox").querySelectorAll("[data-calc]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var tipo = btn.dataset.calc;
+        if(mostrandoResultado && (tipo === "digit" || tipo === "paren-open")){
+          expr = "";
+          mostrandoResultado = false;
+        }
+        if(tipo === "digit"){
+          expr += btn.dataset.val;
+        }else if(tipo === "op"){
+          mostrandoResultado = false;
+          if(expr === ""){
+            if(btn.dataset.val === "-") expr = "-";
+          }else if(/[+\-*/]$/.test(expr)){
+            expr = expr.slice(0, -1) + btn.dataset.val;
+          }else{
+            expr += btn.dataset.val;
+          }
+        }else if(tipo === "paren-open"){
+          expr += "(";
+        }else if(tipo === "paren-close"){
+          var abiertos = (expr.match(/\(/g) || []).length;
+          var cerrados = (expr.match(/\)/g) || []).length;
+          if(abiertos > cerrados) expr += ")";
+        }else if(tipo === "percent"){
+          if(expr && /\d$/.test(expr)) expr += "%";
+        }else if(tipo === "sign"){
+          var mDig = expr.match(/\d+$/);
+          if(mDig){
+            var start = expr.length - mDig[0].length;
+            var prevChar = start > 0 ? expr.charAt(start - 1) : "";
+            if(prevChar === "-" && (start - 1 === 0 || "+-*/(".indexOf(expr.charAt(start - 2)) !== -1)){
+              expr = expr.slice(0, start - 1) + expr.slice(start);
+            }else{
+              expr = expr.slice(0, start) + "-" + expr.slice(start);
+            }
+          }
+        }else if(tipo === "clear"){
+          expr = "";
+          mostrandoResultado = false;
+        }else if(tipo === "back"){
+          expr = expr.slice(0, -1);
+          mostrandoResultado = false;
+        }else if(tipo === "equals"){
+          try{
+            var resultado = Math.round(calcEvaluar(expr));
+            expr = String(resultado);
+            mostrandoResultado = true;
+          }catch(e){
+            mostrarErrorCalc(e.message);
+            return;
+          }
+        }
+        refrescarDisplay();
+      });
+    });
+
+    document.getElementById("calcCerrar").addEventListener("click", cerrarCalcModal);
+    document.getElementById("calcUsar").addEventListener("click", function(){
+      var resultado;
+      try{
+        resultado = Math.round(calcEvaluar(expr === "" ? "0" : expr));
+      }catch(e){
+        mostrarErrorCalc(e.message);
+        return;
+      }
+      if(campoDestino){
+        campoDestino.value = resultado;
+        campoDestino.dispatchEvent(new Event("input", {bubbles: true}));
+        campoDestino.dispatchEvent(new Event("change", {bubbles: true}));
+      }
+      cerrarCalcModal();
+    });
+  }
+
   // -------------------------------------------- Estado de Cuenta: edicion/division/adjunte/eliminacion + historial
 
   var CAMPOS_EDITABLES_GASTO = ["fecha", "detalle", "empresa", "cuota_texto"];
@@ -2546,7 +2955,7 @@
       "<h3 style=\"font-size:.85rem;color:var(--text-dim);margin:14px 0 6px;\">Agregar monto manual</h3>" +
       "<div class=\"form-grid\">" +
         "<div class=\"field grow\"><label>Etiqueta</label><input type=\"text\" id=\"scEtiqueta\" placeholder=\"Ej. Alejandro\"></div>" +
-        "<div class=\"field small\"><label>Monto</label><input type=\"number\" id=\"scMonto\" min=\"0\" step=\"1\" placeholder=\"0\"></div>" +
+        "<div class=\"field small\"><label>Monto</label><div class=\"field-with-calc\"><input type=\"number\" id=\"scMonto\" min=\"0\" step=\"1\" placeholder=\"0\"><button type=\"button\" class=\"icon-btn calc-trigger-btn\" id=\"scMontoCalcBtn\" title=\"Abrir calculadora\">🖩</button></div></div>" +
         "<div class=\"field grow\"><label>Detalle (opcional)</label><input type=\"text\" id=\"scDetalle\" placeholder=\"Ej. Deudas compartidas\"></div>" +
       "</div>" +
       "<div class=\"form-actions\" style=\"justify-content:flex-start;margin-bottom:6px;\">" +
@@ -2615,6 +3024,7 @@
     actualizarListaNuevas();
 
     document.getElementById("scCancelar").addEventListener("click", cerrarModal);
+    document.getElementById("scMontoCalcBtn").addEventListener("click", function(){ abrirCalculadora("scMonto"); });
 
     document.getElementById("scAgregarPersona").addEventListener("click", function(){
       var msgEl = document.getElementById("scMensaje");
@@ -3543,6 +3953,7 @@
     document.getElementById("gdBancoTarjetaField").hidden = !esTarjeta;
   }
   document.getElementById("gdMedioPago").addEventListener("change", actualizarCamposTarjetaGD);
+  document.getElementById("gdMontoCalcBtn").addEventListener("click", function(){ abrirCalculadora("gdMonto"); });
 
   function limpiarFormularioGD(){
     editingGastoDiarioId = null;
@@ -5128,6 +5539,61 @@
     reader.readAsArrayBuffer(file);
   });
 
+  // Restaurar desde uno de los respaldos automaticos rotativos (IndexedDB) --
+  // mismo patron de confirmacion "esto reemplaza todo" que la restauracion
+  // desde archivo de arriba, pero eligiendo de una lista con fecha/hora en
+  // vez de un file picker.
+  function formatearFechaRespaldo(iso){
+    try{
+      var d = new Date(iso);
+      return d.toLocaleString("es-CL", {dateStyle:"medium", timeStyle:"short"});
+    }catch(e){ return String(iso); }
+  }
+  function abrirModalRespaldos(){
+    listarRespaldos().then(function(lista){
+      var htmlLista;
+      if(lista.length === 0){
+        htmlLista = "<p class=\"hint\">Todavía no hay respaldos automáticos guardados (se crean solos cada vez que se abre la app).</p>";
+      }else{
+        htmlLista = lista.map(function(r){
+          return "<div class=\"division-row\"><span>" + escapeHtml(formatearFechaRespaldo(r.fecha)) + "</span>" +
+            "<button type=\"button\" class=\"btn-ghost\" data-restaurar-respaldo=\"" + r.id + "\">Restaurar</button></div>";
+        }).join("");
+      }
+      var html =
+        "<h2>Restaurar un respaldo anterior</h2>" +
+        "<p class=\"hint\">Copias automáticas guardadas dentro de este navegador (IndexedDB) cada vez que se abre la app -- se conservan las últimas " + IDB_BACKUP_MAX + ".</p>" +
+        "<div id=\"listaRespaldos\">" + htmlLista + "</div>" +
+        "<div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"respaldosCerrar\">Cerrar</button></div>";
+      abrirModal(html);
+      document.getElementById("respaldosCerrar").addEventListener("click", cerrarModal);
+      document.querySelectorAll("[data-restaurar-respaldo]").forEach(function(btn){
+        btn.addEventListener("click", function(){
+          var id = Number(btn.dataset.restaurarRespaldo);
+          if(!confirm("Esto reemplaza TODOS los datos actuales por los de este respaldo. ¿Continuar?")) return;
+          obtenerRespaldoPorId(id).then(function(row){
+            if(!row){ mostrarErrorFatal("No se encontró ese respaldo (puede que ya se haya rotado por uno más nuevo)."); return; }
+            try{
+              var bytes = row.bytes instanceof Uint8Array ? row.bytes : new Uint8Array(row.bytes);
+              var nuevaDb = new SQL.Database(bytes);
+              nuevaDb.run("PRAGMA foreign_keys = ON");
+              nuevaDb.run(SCHEMA_SQL);
+              aplicarMigracionesEsquema(nuevaDb);
+              db = nuevaDb;
+              scheduleSave();
+              refrescarTodo();
+              cerrarModal();
+              alert("Datos restaurados correctamente desde el respaldo del " + formatearFechaRespaldo(row.fecha) + ".");
+            }catch(err){
+              mostrarErrorFatal("No se pudo restaurar ese respaldo: " + err.message);
+            }
+          }).catch(function(e){ mostrarErrorFatal("No se pudo leer el respaldo: " + e.message); });
+        });
+      });
+    }).catch(function(e){ mostrarErrorFatal("No se pudieron listar los respaldos: " + e.message); });
+  }
+  document.getElementById("btnRestaurarRespaldo").addEventListener("click", abrirModalRespaldos);
+
   // ---------------------------------------------------------------- sync con carpeta local (OneDrive/Drive)
   //
   // Sincronizacion opcional, 100% no-bloqueante, contra dos archivos dentro
@@ -5990,7 +6456,16 @@
     renderPanelDiarioPersonaDetalle: renderPanelDiarioPersonaDetalle,
     renderPanelDiarioPuente: renderPanelDiarioPuente,
     filasGastoDiarioPersona: filasGastoDiarioPersona,
-    agregarGastosDiariosAEstadoCuenta: agregarGastosDiariosAEstadoCuenta
+    agregarGastosDiariosAEstadoCuenta: agregarGastosDiariosAEstadoCuenta,
+    // Respaldo automatico rotativo (IndexedDB): expuesto para poder simular
+    // varios "arranques" seguidos sin recargar la pagina de verdad.
+    guardarRespaldoRotativo: function(){ return guardarRespaldoRotativo(db.export()); },
+    listarRespaldos: listarRespaldos,
+    obtenerRespaldoPorId: obtenerRespaldoPorId,
+    // Combinaciones de personas usadas juntas (para el datalist de Personas)
+    combinacionesPersonasUsadas: combinacionesPersonasUsadas,
+    // Calculadora integrada: evaluador de expresiones (sin eval/Function)
+    calcEvaluar: calcEvaluar
   };
 
   // ---------------------------------------------------------------- arranque
@@ -6040,8 +6515,15 @@
       SQL = SQLNS;
       return idbGet(IDB_KEY);
     }).then(function(saved){
+      var respaldoPromesa = Promise.resolve();
       if(saved){
         db = new SQL.Database(new Uint8Array(saved));
+        // Respaldo automatico rotativo: se guarda el binario TAL COMO ESTABA
+        // en IndexedDB al arrancar, antes de correr migraciones de esquema y
+        // antes de que boot() dispare cualquier fusion de sincronizacion
+        // remota (carpeta/nube) mas abajo. Si esto falla no debe frenar el
+        // arranque de la app -- por eso el catch silencioso (solo consola).
+        respaldoPromesa = guardarRespaldoRotativo(saved).catch(function(e){ try{ console.warn("No se pudo guardar el respaldo automatico:", e); }catch(err){} });
       }else{
         db = new SQL.Database();
       }
@@ -6049,6 +6531,8 @@
       db.run(SCHEMA_SQL);
       aplicarMigracionesEsquema(db);
       scheduleSave();
+      return respaldoPromesa;
+    }).then(function(){
       boot();
     }).catch(function(err){
       mostrarErrorFatal(
