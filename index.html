@@ -5246,6 +5246,19 @@
   var syncNubeExportTimer = null;
   var nubeBusy = false;                        // evita solapar lecturas/escrituras contra sync_blob
   var cambiosLocalesPendientesSyncNube = false; // hay cambios locales sin publicar todavia a la nube
+  // CRITICO (evita el bug real que borro datos en produccion el 22-09-2026):
+  // un dispositivo recien abierto NUNCA debe publicar su estado local a la
+  // nube -- ni siquiera el "cambio" que genera la creacion inicial del
+  // esquema vacio -- hasta que haya terminado de verdad su primera bajada
+  // (pull) de sync_blob. Sin este seguro, en una conexion lenta (datos
+  // moviles) el cronometro de 18s de publicar podia ganarle a la bajada, y
+  // el dispositivo (con la base local todavia vacia) sobreescribia en la
+  // nube los datos reales de otro dispositivo. Mientras esto sea false,
+  // marcarCambioLocalParaSyncNube() deja la marca pendiente pero NO arranca
+  // el cronometro de publicar -- inicializarSyncNubeAlCargar() lo pone en
+  // true recien despues de que la primera bajada termino (haya encontrado
+  // datos o no), y ahi si arranca el envio de lo que haya quedado pendiente.
+  var nubePrimeraBajadaLista = false;
 
   // ---- login/refresh contra GoTrue (auth de Supabase) ----
   function loginNube(){
@@ -5454,6 +5467,11 @@
   // ---- marcar cambio local pendiente (llamado desde scheduleSave) ----
   function marcarCambioLocalParaSyncNube(){
     cambiosLocalesPendientesSyncNube = true;
+    // Seguro critico (ver declaracion de nubePrimeraBajadaLista mas arriba):
+    // mientras la primera bajada no haya terminado, se guarda la marca pero
+    // NO se arranca el cronometro de publicar -- inicializarSyncNubeAlCargar
+    // lo retoma solo apenas la bajada termine.
+    if(!nubePrimeraBajadaLista) return;
     if(syncNubeExportTimer) clearTimeout(syncNubeExportTimer);
     syncNubeExportTimer = setTimeout(function(){
       syncNubeExportTimer = null;
@@ -5466,17 +5484,34 @@
     if(syncNubePollingTimer) return;
     syncNubePollingTimer = setInterval(function(){
       revisarActualizacionesRemotasNube(true).then(function(){
-        if(cambiosLocalesPendientesSyncNube) return exportarASyncNube();
+        _habilitarPublicarSiBajadaOk();
+        if(nubePrimeraBajadaLista && cambiosLocalesPendientesSyncNube) return exportarASyncNube();
       });
     }, SYNC_POLL_MS);
+  }
+
+  // Se llama despues de CUALQUIER intento de bajada (inicial o de cada
+  // ciclo de polling) -- solo habilita el seguro de publicar si esa bajada
+  // en particular termino con exito de verdad (nubeConectada true), nunca
+  // solo porque la promesa se resolvio (revisarActualizacionesRemotasNube
+  // atrapa sus propios errores de red y resuelve igual, para no cortar el
+  // ciclo periodico -- por eso hace falta este chequeo aparte). Si la
+  // primera bajada fallo por una red inestable, el seguro sigue cerrado
+  // hasta que una bajada de un ciclo de polling posterior si tenga exito.
+  function _habilitarPublicarSiBajadaOk(){
+    if(nubePrimeraBajadaLista || !nubeConectada) return;
+    nubePrimeraBajadaLista = true;
+    if(cambiosLocalesPendientesSyncNube) marcarCambioLocalParaSyncNube();
   }
 
   // ---- al cargar la app: esperar el login (disparado en mostrarApp) y arrancar el ciclo ----
   function inicializarSyncNubeAlCargar(){
     return iniciarLoginNube().then(function(){
       if(!nubeAccessToken) return; // login fallo -- ya se avisó, la app sigue local nomas
-      iniciarPollingSyncNube();
       return revisarActualizacionesRemotasNube(false);
+    }).then(function(){
+      _habilitarPublicarSiBajadaOk();
+      iniciarPollingSyncNube();
     });
   }
 
