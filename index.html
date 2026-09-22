@@ -125,6 +125,8 @@
   }
   .data-tools{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px; }
   .sync-status-text{ font-size:.8rem; color:var(--text-dim); }
+  .sync-status-text.sync-status-bad{ color:var(--bad); }
+  .sync-status-text.sync-status-ok{ color:var(--ok); }
   #btnSyncReconectar[hidden]{ display:none; }
   #btnSyncReconectar{ background:var(--bad); color:var(--bad-ink); border-color:transparent; }
 
@@ -414,6 +416,7 @@
       <button id="btnSync" class="btn-ghost" type="button">🔄 Sincronizar con carpeta...</button>
       <button id="btnSyncReconectar" class="btn-ghost" type="button" hidden>⚠ Reconectar carpeta</button>
       <span id="syncStatusText" class="sync-status-text"></span>
+      <span id="syncNubeStatusText" class="sync-status-text"></span>
     </div>
     <nav class="tabs" id="tabsNav">
       <button class="tab-btn" type="button" data-tab="cargarmes">Cargar mes</button>
@@ -1120,7 +1123,14 @@
     // eventualmente hay que publicar en la carpeta compartida, salvo que
     // estemos en medio de aplicar una fusion de datos que ya vinieron de esa
     // misma carpeta (ahi se suprime para no generar un ida-y-vuelta infinito).
-    if(!suprimirMarcaSyncPendiente) marcarCambioLocalParaSync();
+    if(!suprimirMarcaSyncPendiente){
+      marcarCambioLocalParaSync();
+      // Sincronizacion en la nube (Supabase): ver seccion "sync nube" mas
+      // abajo. Independiente de la de carpeta -- puede no existir la funcion
+      // todavia en el primerisimo arranque (orden de definicion de funciones
+      // no importa por hoisting, pero por las dudas se protege).
+      if(typeof marcarCambioLocalParaSyncNube === "function") marcarCambioLocalParaSyncNube();
+    }
   }
   function flushSave(){
     saveTimer = null;
@@ -5203,6 +5213,292 @@
     repartosIguales: repartosIguales
   };
 
+  // ---------------------------------------------------------------- sync con la nube (Supabase)
+  //
+  // Sincronizacion ADICIONAL e independiente de la de carpeta local de arriba
+  // -- corre siempre (no requiere que el usuario elija nada), usando fetch()
+  // normal contra la API REST de Supabase (PostgREST) y de autenticacion
+  // (GoTrue), asi que funciona en cualquier navegador (incluido Safari en
+  // iPhone), a diferencia de la de carpeta que solo anda en Chrome/Edge de
+  // escritorio (File System Access API). Las dos pueden estar activas al
+  // mismo tiempo sin pisarse: escriben/leen contra fuentes distintas (un
+  // archivo local vs esta tabla en la nube) y el merge hacia la base local
+  // siempre pasa por la MISMA funcion fusionarDatosRemotos (idempotente y no
+  // destructiva) usada arriba para la sync de carpeta.
+  //
+  // Si Supabase no responde (sin internet, credenciales rechazadas, etc.)
+  // esto NUNCA debe romper el resto de la app -- todo queda envuelto en
+  // try/catch y promesas con .catch(), y el peor caso es que la app siga
+  // 100% local, igual que hoy si nunca se conecta una carpeta.
+
+  var SUPABASE_URL = "https://vwhkpcuckvkxjltotmna.supabase.co";
+  var SUPABASE_ANON_KEY = "sb_publishable_iVD0jVoT2Kh66m3D6fseSg_6vaXZ5PA";
+  var SUPABASE_EMAIL = "familia@gastos-familiares.app";
+  var SUPABASE_PASSWORD = "DSzAUz0F5FbxlM2yGZj61A6aC3fXCNZq";
+
+  var nubeAccessToken = null;
+  var nubeRefreshToken = null;
+  var nubeExpiresAt = 0;          // timestamp absoluto (ms) en que expira el access token
+  var nubeConectada = false;      // ultimo intento de login/refresh/llamada fue exitoso
+  var nubeUltimoError = null;
+  var nubeLoginPromise = null;    // evita loguear dos veces en paralelo
+  var syncNubePollingTimer = null;
+  var syncNubeExportTimer = null;
+  var nubeBusy = false;                        // evita solapar lecturas/escrituras contra sync_blob
+  var cambiosLocalesPendientesSyncNube = false; // hay cambios locales sin publicar todavia a la nube
+
+  // ---- login/refresh contra GoTrue (auth de Supabase) ----
+  function loginNube(){
+    return fetch(SUPABASE_URL + "/auth/v1/token?grant_type=password", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY},
+      body: JSON.stringify({email: SUPABASE_EMAIL, password: SUPABASE_PASSWORD})
+    }).then(function(resp){
+      if(!resp.ok){
+        return resp.text().then(function(t){ throw new Error("login nube " + resp.status + ": " + t); });
+      }
+      return resp.json();
+    }).then(function(json){
+      nubeAccessToken = json.access_token;
+      nubeRefreshToken = json.refresh_token;
+      nubeExpiresAt = Date.now() + (Number(json.expires_in) || 3600) * 1000;
+      nubeConectada = true;
+      nubeUltimoError = null;
+    });
+  }
+
+  function refrescarTokenNube(){
+    if(!nubeRefreshToken) return loginNube();
+    return fetch(SUPABASE_URL + "/auth/v1/token?grant_type=refresh_token", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY},
+      body: JSON.stringify({refresh_token: nubeRefreshToken})
+    }).then(function(resp){
+      if(!resp.ok){
+        return resp.text().then(function(t){ throw new Error("refresh nube " + resp.status + ": " + t); });
+      }
+      return resp.json();
+    }).then(function(json){
+      nubeAccessToken = json.access_token;
+      nubeRefreshToken = json.refresh_token || nubeRefreshToken;
+      nubeExpiresAt = Date.now() + (Number(json.expires_in) || 3600) * 1000;
+      nubeConectada = true;
+      nubeUltimoError = null;
+    }).catch(function(){
+      // el refresh token pudo haber quedado invalido -- se intenta un login
+      // completo de nuevo antes de rendirse.
+      return loginNube();
+    });
+  }
+
+  // Dispara el primer login apenas se desbloquea la app (ver mostrarApp mas
+  // abajo). Devuelve siempre la MISMA promesa mientras este en vuelo, para
+  // que boot() pueda esperarla sin loguear dos veces.
+  function iniciarLoginNube(){
+    if(nubeLoginPromise) return nubeLoginPromise;
+    nubeLoginPromise = loginNube().then(function(){
+      actualizarEstadoSyncNubeUI();
+    }).catch(function(e){
+      nubeConectada = false;
+      nubeUltimoError = e && e.message ? e.message : String(e);
+      actualizarEstadoSyncNubeUI();
+      mostrarToast("Sincronización en la nube no disponible: " + nubeUltimoError, "bad");
+    });
+    return nubeLoginPromise;
+  }
+
+  // Se llama al inicio de cada ciclo (export o revision) para asegurar un
+  // access token vigente -- si falta menos de ~5 minutos para que expire, lo
+  // refresca antes de seguir. Devuelve una promesa que resuelve a true/false
+  // segun si quedo una sesion utilizable.
+  function asegurarTokenNubeFresco(){
+    if(!nubeAccessToken){
+      return iniciarLoginNube().then(function(){ return !!nubeAccessToken; });
+    }
+    var margenMs = 5 * 60 * 1000;
+    if(Date.now() + margenMs >= nubeExpiresAt){
+      return refrescarTokenNube().then(function(){
+        actualizarEstadoSyncNubeUI();
+        return true;
+      }).catch(function(e){
+        nubeConectada = false;
+        nubeUltimoError = e && e.message ? e.message : String(e);
+        actualizarEstadoSyncNubeUI();
+        return false;
+      });
+    }
+    return Promise.resolve(true);
+  }
+
+  function headersNube(){
+    return {
+      "Content-Type": "application/json",
+      "apikey": SUPABASE_ANON_KEY,
+      "Authorization": "Bearer " + nubeAccessToken
+    };
+  }
+
+  // ---- estado visible en el header ----
+  function actualizarEstadoSyncNubeUI(){
+    var el = document.getElementById("syncNubeStatusText");
+    if(!el) return;
+    if(!nubeAccessToken && !nubeUltimoError){
+      el.textContent = "";
+      el.className = "sync-status-text";
+      return;
+    }
+    if(nubeConectada){
+      var texto = "☁ Nube conectada";
+      var ultima = null;
+      try{ ultima = localStorage.getItem("gf_cloudSyncLastLocalExportAt"); }catch(e){}
+      if(ultima){
+        try{
+          var d = new Date(ultima);
+          texto += " -- último envío " + d.toLocaleTimeString("es-CL", {hour: "2-digit", minute: "2-digit"});
+        }catch(e){}
+      }
+      el.textContent = texto;
+      el.className = "sync-status-text sync-status-ok";
+    }else{
+      el.textContent = "☁ Nube sin conexión" + (nubeUltimoError ? " (" + nubeUltimoError + ")" : "");
+      el.className = "sync-status-text sync-status-bad";
+    }
+  }
+
+  // ---- publicar el estado local en sync_blob ----
+  function exportarASyncNube(){
+    if(!db) return Promise.resolve(); // la base local todavia no esta lista
+    if(nubeBusy) return Promise.resolve();
+    nubeBusy = true;
+    return asegurarTokenNubeFresco().then(function(ok){
+      if(!ok) return;
+      var ts = new Date().toISOString();
+      var device = obtenerDeviceIdSync();
+      var payload = {version: 1, updated_at: ts, device: device, data: construirDatosSync()};
+      return fetch(SUPABASE_URL + "/rest/v1/sync_blob", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "apikey": SUPABASE_ANON_KEY,
+          "Authorization": "Bearer " + nubeAccessToken,
+          "Prefer": "resolution=merge-duplicates,return=representation"
+        },
+        body: JSON.stringify({id: true, data: payload, device: device, updated_at: ts})
+      }).then(function(resp){
+        if(!resp.ok){
+          return resp.text().then(function(t){ throw new Error("sync_blob " + resp.status + ": " + t); });
+        }
+        try{
+          localStorage.setItem("gf_cloudSyncLastLocalExportAt", ts);
+          // esto es LO QUE ACABAMOS de publicar -- si despues lo releemos no
+          // hay que volver a "aplicarlo" (mismo criterio que la sync de carpeta).
+          localStorage.setItem("gf_cloudSyncLastAppliedUpdatedAt", ts);
+        }catch(e){}
+        cambiosLocalesPendientesSyncNube = false;
+        nubeConectada = true;
+        nubeUltimoError = null;
+        actualizarEstadoSyncNubeUI();
+      });
+    }).catch(function(e){
+      nubeConectada = false;
+      nubeUltimoError = e && e.message ? e.message : String(e);
+      actualizarEstadoSyncNubeUI();
+      mostrarToast("No se pudo publicar en la nube: " + nubeUltimoError, "bad");
+    }).then(function(){
+      nubeBusy = false;
+    });
+  }
+
+  // ---- revisar si hay una version mas nueva en sync_blob y aplicarla ----
+  function revisarActualizacionesRemotasNube(avisar){
+    if(!db) return Promise.resolve();
+    if(nubeBusy) return Promise.resolve();
+    nubeBusy = true;
+    return asegurarTokenNubeFresco().then(function(ok){
+      if(!ok) return;
+      return fetch(SUPABASE_URL + "/rest/v1/sync_blob?select=*", {
+        method: "GET",
+        headers: headersNube()
+      }).then(function(resp){
+        if(!resp.ok){
+          return resp.text().then(function(t){ throw new Error("sync_blob " + resp.status + ": " + t); });
+        }
+        return resp.json();
+      }).then(function(filas){
+        nubeConectada = true;
+        nubeUltimoError = null;
+        var fila = filas && filas[0];
+        if(!fila || !fila.data || !fila.data.data){ actualizarEstadoSyncNubeUI(); return; }
+        var remotoUpdatedAt = fila.data.updated_at || fila.updated_at;
+        if(!remotoUpdatedAt){ actualizarEstadoSyncNubeUI(); return; }
+        var ultimaAplicada = null;
+        try{ ultimaAplicada = localStorage.getItem("gf_cloudSyncLastAppliedUpdatedAt"); }catch(e){}
+        if(ultimaAplicada && new Date(remotoUpdatedAt).getTime() <= new Date(ultimaAplicada).getTime()){
+          actualizarEstadoSyncNubeUI();
+          return;
+        }
+        var huboCambios = fusionarDatosRemotos(fila.data.data);
+        try{ localStorage.setItem("gf_cloudSyncLastAppliedUpdatedAt", remotoUpdatedAt); }catch(e){}
+        actualizarEstadoSyncNubeUI();
+        if(avisar && huboCambios) mostrarToast("Datos actualizados desde la nube.", "ok");
+      });
+    }).catch(function(e){
+      nubeConectada = false;
+      nubeUltimoError = e && e.message ? e.message : String(e);
+      actualizarEstadoSyncNubeUI();
+    }).then(function(){
+      nubeBusy = false;
+    });
+  }
+
+  // ---- marcar cambio local pendiente (llamado desde scheduleSave) ----
+  function marcarCambioLocalParaSyncNube(){
+    cambiosLocalesPendientesSyncNube = true;
+    if(syncNubeExportTimer) clearTimeout(syncNubeExportTimer);
+    syncNubeExportTimer = setTimeout(function(){
+      syncNubeExportTimer = null;
+      exportarASyncNube();
+    }, SYNC_DEBOUNCE_MS);
+  }
+
+  // ---- polling cada 30 segundos (mismo intervalo que la sync de carpeta, en paralelo) ----
+  function iniciarPollingSyncNube(){
+    if(syncNubePollingTimer) return;
+    syncNubePollingTimer = setInterval(function(){
+      revisarActualizacionesRemotasNube(true).then(function(){
+        if(cambiosLocalesPendientesSyncNube) return exportarASyncNube();
+      });
+    }, SYNC_POLL_MS);
+  }
+
+  // ---- al cargar la app: esperar el login (disparado en mostrarApp) y arrancar el ciclo ----
+  function inicializarSyncNubeAlCargar(){
+    return iniciarLoginNube().then(function(){
+      if(!nubeAccessToken) return; // login fallo -- ya se avisó, la app sigue local nomas
+      iniciarPollingSyncNube();
+      return revisarActualizacionesRemotasNube(false);
+    });
+  }
+
+  // Mismo criterio que __gfSyncDebug de la sync de carpeta: expone la logica
+  // de la sync de nube para poder probarla desde headless/consola sin
+  // depender de timers reales.
+  window.__gfSyncNubeDebug = {
+    loginNube: loginNube,
+    refrescarTokenNube: refrescarTokenNube,
+    asegurarTokenNubeFresco: asegurarTokenNubeFresco,
+    exportarASyncNube: exportarASyncNube,
+    revisarActualizacionesRemotasNube: revisarActualizacionesRemotasNube,
+    estado: function(){
+      return {
+        conectada: nubeConectada,
+        ultimoError: nubeUltimoError,
+        tieneToken: !!nubeAccessToken,
+        expiraEn: nubeExpiresAt ? Math.round((nubeExpiresAt - Date.now()) / 1000) : null
+      };
+    }
+  };
+
   // Mismo criterio que __gfSyncDebug de arriba: expone la logica de
   // exportacion de Estado de Cuenta para poder probarla desde headless sin
   // depender de descargas de archivo reales (jsPDF/html2canvas si generan
@@ -5281,6 +5577,12 @@
     // aparte y en segundo plano (revisa si ya habia una carpeta elegida en
     // una visita anterior).
     inicializarSyncAlCargar().catch(function(e){ try{ console.warn(e); }catch(err){} });
+
+    // Sync con la nube (Supabase): igual de no-bloqueante. El login ya se
+    // disparo en mostrarApp() justo al desbloquear -- aca solo se espera esa
+    // misma promesa (no se loguea de nuevo) y, si salio bien, arranca el
+    // ciclo de lectura/escritura contra sync_blob.
+    inicializarSyncNubeAlCargar().catch(function(e){ try{ console.warn(e); }catch(err){} });
   }
 
   function iniciarAppReal(){
@@ -5325,6 +5627,11 @@
   function mostrarApp(){
     document.getElementById("lockScreen").hidden = true;
     iniciarAppReal();
+    // Login contra Supabase para la sync en la nube: se dispara aca, en
+    // paralelo con iniciarAppReal() (no depende de que la base local este
+    // lista), y no bloquea nada -- boot() espera esta misma promesa mas
+    // adelante para arrancar el ciclo de lectura/escritura.
+    iniciarLoginNube();
   }
 
   (function inicializarLock(){
