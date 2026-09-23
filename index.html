@@ -298,6 +298,11 @@
   .cov-filtros{ display:flex; gap:6px; }
   .cov-filtro-btn{ padding:6px 10px; font-size:.78rem; }
   .cov-filtro-btn.active{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+  /* "Sin asignar" en Gastos Diarios usa el color de aviso (no el accent
+     azul de los demas filtros) para distinguirse de los chips de
+     tarjeta/medio de pago que estan justo al lado -- mismo criterio que la
+     app de escritorio (COLOR_WARNING en vez de COLOR_ACCENT). */
+  #gdSinAsignarBtn.active{ background:var(--warn); border-color:var(--warn); color:var(--warn-ink); }
   .list-row.cov-falta{ box-shadow:inset 3px 0 0 var(--warn); }
   .list-row.cov-ok{ box-shadow:inset 3px 0 0 var(--ok); }
   .cov-agregar-btn{ font-size:.78rem; padding:6px 10px; white-space:normal; text-align:right; }
@@ -648,6 +653,13 @@
         <div class="field small"><label>Año</label><select id="ecAnio"></select></div>
         <div class="field grow"><label>Teléfono (WhatsApp)</label><input type="text" id="ecTelefono" placeholder="+56 9 1234 5678"></div>
       </div>
+      <input type="text" id="ecBuscar" placeholder="Buscar deuda... (ej. Furgón, Netflix, Agua)" style="margin-bottom:8px;">
+      <div class="cov-filtros" id="ecFiltroOrigen" style="flex-wrap:wrap; margin-bottom:10px;">
+        <button type="button" class="btn-ghost cov-filtro-btn active" data-ecforigen="">Todas</button>
+        <button type="button" class="btn-ghost cov-filtro-btn" data-ecforigen="IMPORTADO_PDF">Importado (Falabella/Líder)</button>
+        <button type="button" class="btn-ghost cov-filtro-btn" data-ecforigen="MANUAL">Manual</button>
+        <button type="button" class="btn-ghost cov-filtro-btn" data-ecforigen="IMPORTADO_DEUDAS_ADICIONALES">Deudas Adicionales</button>
+      </div>
       <div class="ec-toolbar">
         <button type="button" class="btn-ghost" id="ecBtnPdf">📄 Exportar PDF</button>
         <button type="button" class="btn-ghost" id="ecBtnImagen">🖼 Exportar imagen</button>
@@ -751,7 +763,11 @@
           <div class="field small"><select id="gdAnio"></select></div>
         </div>
       </div>
-      <input type="text" id="gdBuscar" placeholder="Buscar... (ej. Café, Comida)">
+      <div class="sec-head-row" style="margin-bottom:8px;">
+        <input type="text" id="gdBuscar" placeholder="Buscar... (ej. Café, Comida)" style="flex:1 1 220px; margin:0;">
+        <button type="button" class="btn-ghost cov-filtro-btn" id="gdSinAsignarBtn">Sin asignar</button>
+      </div>
+      <div class="cov-filtros" id="gdFiltroTarjeta" style="flex-wrap:wrap; margin-bottom:10px;" hidden></div>
       <div id="gdLista"></div>
       <div class="totals-line" id="gdTotales"></div>
     </div>
@@ -2062,6 +2078,20 @@
   // (_editar_item/_abrir_dividir_compra/_adjuntar/_eliminar) y de
   // repositories/historial_repo.py (registrar_ajuste/eliminar_ajuste_y_deshacer).
   var ecItemsActuales = [];
+  // Filtro "Ver solo" por origen (puerto de _filtro_origen en
+  // estado_cuenta_screen.py) -- pedido explicito del usuario: poder revisar
+  // rapido que a una persona le quedo todo bien cargado desde una fuente en
+  // particular. El escritorio distingue Falabella de Lider porque en su
+  // base ese import queda marcado con origen='MANUAL' + empresa='Lider'
+  // como caso especial (ver _categoria_item); la web no guarda esa marca
+  // (ambos PDF quedan como IMPORTADO_PDF), asi que ese balde queda unido
+  // aca como "Importado (Falabella/Líder)" en vez de separarlo en dos.
+  var ecFiltroOrigen = null;
+  function ecCategoriaOrigen(origen){
+    if(origen === "IMPORTADO_PDF") return "IMPORTADO_PDF";
+    if(origen === "IMPORTADO_DEUDAS_ADICIONALES") return "IMPORTADO_DEUDAS_ADICIONALES";
+    return "MANUAL";
+  }
 
   function estadoActual(){
     var nombre = document.getElementById("ecPersona").value.trim();
@@ -2131,8 +2161,8 @@
     };
   }
 
-  function renderTablaEstadoCuenta(items){
-    if(items.length === 0) return "<p class=\"hint\">Sin movimientos.</p>";
+  function renderTablaEstadoCuenta(items, mensajeVacio){
+    if(items.length === 0) return "<p class=\"hint\">" + escapeHtml(mensajeVacio || "Sin movimientos.") + "</p>";
     var filas = items.map(function(it){
       return "<tr><td>" + it.fecha + "</td><td>" + escapeHtml(it.detalle) + "</td><td>" + escapeHtml(it.empresa||"") +
         "</td><td class=\"center\">" + escapeHtml(it.cuota||"-") + "</td><td class=\"money\">" + money(it.monto) + "</td>" +
@@ -2209,14 +2239,36 @@
     var hayIncluidos = ajustes.some(function(a){ return a.incluir_en_total; });
     var totalMostrado = hayIncluidos ? total + incluidos : total;
     var statTotalLabel = hayIncluidos ? "Total combinado " + MESES_ES[estado.mes] + " " + estado.anio : "Total " + MESES_ES[estado.mes] + " " + estado.anio;
+
+    // "Ver solo" (origen) + buscador de texto -- SOLO afectan lo que se ve
+    // en pantalla (tabla + stat "filtrado"): ecItemsActuales, el total real
+    // del mes y el veredicto de cuadre siempre usan el mes COMPLETO sin
+    // filtrar, igual que en el escritorio (_filtro_origen/busqueda en
+    // _renderizar_items nunca tocan estado.items ni estado.total_mostrado).
+    var busqueda = document.getElementById("ecBuscar").value.trim().toLowerCase();
+    var itemsFiltrados = items.filter(function(it){
+      if(ecFiltroOrigen !== null && ecCategoriaOrigen(it.origen) !== ecFiltroOrigen) return false;
+      if(!busqueda) return true;
+      return (it.detalle||"").toLowerCase().indexOf(busqueda) >= 0 || (it.empresa||"").toLowerCase().indexOf(busqueda) >= 0;
+    });
+    var hayFiltroEc = !!busqueda || ecFiltroOrigen !== null;
+    var mensajeVacio = "Sin movimientos este mes.";
+    if(items.length > 0 && itemsFiltrados.length === 0){
+      mensajeVacio = busqueda ? "Ninguna deuda coincide con \"" + busqueda + "\"." : "Ningún movimiento de ese origen este mes.";
+    }
+
+    var statsHtml = "<div class=\"stat\"><div class=\"k\">Movimientos" + (hayFiltroEc ? " (filtrado)" : "") + "</div><div class=\"v\">" + itemsFiltrados.length + "</div></div>";
+    if(hayFiltroEc && items.length){
+      var totalFiltrado = itemsFiltrados.reduce(function(a, it){ return a + it.monto; }, 0);
+      statsHtml += "<div class=\"stat\"><div class=\"k\">Total filtrado</div><div class=\"v\">" + money(totalFiltrado) + "</div></div>";
+    }
+    statsHtml += "<div class=\"stat\"><div class=\"k\">" + escapeHtml(statTotalLabel) + "</div><div class=\"v\">" + money(totalMostrado) + "</div></div>";
+
     cont.innerHTML =
       (avisoCuadre ? "<div class=\"note warn\">" + escapeHtml(avisoCuadre) + "</div>" : "") +
-      "<div class=\"stat-bar\">" +
-        "<div class=\"stat\"><div class=\"k\">Movimientos</div><div class=\"v\">" + items.length + "</div></div>" +
-        "<div class=\"stat\"><div class=\"k\">" + escapeHtml(statTotalLabel) + "</div><div class=\"v\">" + money(totalMostrado) + "</div></div>" +
-      "</div>" +
+      "<div class=\"stat-bar\">" + statsHtml + "</div>" +
       (hayIncluidos ? "<p class=\"hint\">Incluye " + money(incluidos) + " agregado desde Subtotal combinado (total real sin agregados: " + money(total) + ").</p>" : "") +
-      renderTablaEstadoCuenta(items) +
+      renderTablaEstadoCuenta(itemsFiltrados, mensajeVacio) +
       (ajustes.length ? "<h3 style=\"font-size:.85rem;color:var(--text-dim);margin:14px 0 8px;\">Ajustes de Subtotal combinado</h3>" + renderFilasAjusteEc(ajustes, true) : "");
     cont.querySelectorAll("[data-ec-editar]").forEach(function(b){
       b.addEventListener("click", function(){ abrirEditarItem(buscarItemEc(Number(b.dataset.ecEditar))); });
@@ -2237,6 +2289,14 @@
   document.getElementById("ecPersona").addEventListener("input", renderEstadoCuenta);
   document.getElementById("ecMes").addEventListener("change", renderEstadoCuenta);
   document.getElementById("ecAnio").addEventListener("change", renderEstadoCuenta);
+  document.getElementById("ecBuscar").addEventListener("input", renderEstadoCuenta);
+  document.getElementById("ecFiltroOrigen").addEventListener("click", function(ev){
+    var btn = ev.target.closest("[data-ecforigen]");
+    if(!btn) return;
+    ecFiltroOrigen = btn.dataset.ecforigen || null;
+    document.querySelectorAll("#ecFiltroOrigen .cov-filtro-btn").forEach(function(b){ b.classList.toggle("active", b === btn); });
+    renderEstadoCuenta();
+  });
 
   // -------------------------------------------- modal generico (sin dependencias)
 
@@ -4138,24 +4198,102 @@
   document.getElementById("gdLimpiar").addEventListener("click", limpiarFormularioGD);
   document.getElementById("gdCancelarEdicion").addEventListener("click", limpiarFormularioGD);
 
+  // Filtro por tarjeta/medio de pago (puerto de _filtro_tarjeta en
+  // gastos_diarios_screen.py) -- pedido explicito del usuario: "hay un
+  // filtro que yo puedo filtrar por tarjeta para saber si tengo todo
+  // anotado en cada tarjeta". gdFiltroTarjeta es null ("Todas") o el string
+  // JSON de [medio_pago, tipo_tarjeta, banco_tarjeta] elegido.
+  var gdSoloSinAsignar = false;
+  var gdFiltroTarjeta = null;
+
+  function gdClaveTarjeta(f){
+    return JSON.stringify([f.medio_pago || null, f.tipo_tarjeta || null, f.banco_tarjeta || null]);
+  }
+
+  function renderGdFiltroTarjeta(claves){
+    var cont = document.getElementById("gdFiltroTarjeta");
+    if(claves.length <= 1){
+      // un solo medio de pago este mes -- no hay nada que filtrar, mismo
+      // criterio que el escritorio.
+      cont.hidden = true;
+      cont.innerHTML = "";
+      return;
+    }
+    cont.hidden = false;
+    claves.sort(function(a, b){
+      return etiquetaMedioPago(a.medio, a.tipo, a.banco).localeCompare(etiquetaMedioPago(b.medio, b.tipo, b.banco));
+    });
+    var html = "<button type=\"button\" class=\"btn-ghost cov-filtro-btn" + (gdFiltroTarjeta === null ? " active" : "") +
+      "\" data-gdftarjeta=\"\">Todas</button>";
+    html += claves.map(function(c){
+      var activo = gdFiltroTarjeta === c.clave;
+      return "<button type=\"button\" class=\"btn-ghost cov-filtro-btn" + (activo ? " active" : "") +
+        "\" data-gdftarjeta=\"" + escapeHtml(c.clave) + "\">" + escapeHtml(etiquetaMedioPago(c.medio, c.tipo, c.banco)) + "</button>";
+    }).join("");
+    cont.innerHTML = html;
+    cont.querySelectorAll("[data-gdftarjeta]").forEach(function(b){
+      b.addEventListener("click", function(){
+        gdFiltroTarjeta = b.dataset.gdftarjeta || null;
+        renderListaGastosDiarios();
+      });
+    });
+  }
+
   function renderListaGastosDiarios(){
     var anio = Number(document.getElementById("gdAnio").value);
     var mes = Number(document.getElementById("gdMes").value);
     var busqueda = document.getElementById("gdBuscar").value.trim().toLowerCase();
-    var filas = dbAll(
+    var todasDelMes = dbAll(
       "SELECT gd.*, COALESCE(c.nombre,'Sin categoría') AS categoria FROM gastos_diarios gd " +
       "LEFT JOIN categorias c ON c.id=gd.categoria_id WHERE gd.anio=? AND gd.mes=? ORDER BY gd.fecha DESC, gd.id DESC",
       [anio, mes]
     );
+
+    // los chips se arman con TODO el mes (no con lo ya filtrado por texto o
+    // "Sin asignar"), igual que el escritorio -- y si la tarjeta elegida ya
+    // no tiene movimientos este mes, se vuelve a "Todas" en vez de mostrar
+    // una lista vacia sin explicacion.
+    var clavesVistas = {};
+    var claves = [];
+    todasDelMes.forEach(function(f){
+      var clave = gdClaveTarjeta(f);
+      if(!clavesVistas[clave]){
+        clavesVistas[clave] = true;
+        claves.push({clave: clave, medio: f.medio_pago, tipo: f.tipo_tarjeta, banco: f.banco_tarjeta});
+      }
+    });
+    if(gdFiltroTarjeta !== null && !clavesVistas[gdFiltroTarjeta]) gdFiltroTarjeta = null;
+    renderGdFiltroTarjeta(claves);
+
+    var idsConReparto = {};
+    dbAll(
+      "SELECT DISTINCT gdp.gasto_diario_id AS id FROM gasto_diario_persona gdp " +
+      "JOIN gastos_diarios gd ON gd.id=gdp.gasto_diario_id WHERE gd.anio=? AND gd.mes=?",
+      [anio, mes]
+    ).forEach(function(r){ idsConReparto[r.id] = true; });
+
+    var filas = todasDelMes;
     if(busqueda){
       filas = filas.filter(function(f){
         return (f.detalle||"").toLowerCase().indexOf(busqueda) >= 0 ||
                (f.categoria||"").toLowerCase().indexOf(busqueda) >= 0;
       });
     }
+    if(gdSoloSinAsignar){
+      filas = filas.filter(function(f){ return !idsConReparto[f.id]; });
+    }
+    if(gdFiltroTarjeta !== null){
+      filas = filas.filter(function(f){ return gdClaveTarjeta(f) === gdFiltroTarjeta; });
+    }
+    var hayFiltro = !!busqueda || gdSoloSinAsignar || gdFiltroTarjeta !== null;
+
     var cont = document.getElementById("gdLista");
     if(filas.length === 0){
-      cont.innerHTML = "<p class=\"hint\">No hay gastos diarios para este período.</p>";
+      var msgVacio = "Todavía no hay gastos este mes.";
+      if(busqueda) msgVacio = "No se encontraron gastos con ese texto.";
+      else if(gdSoloSinAsignar) msgVacio = "Todos los gastos de este mes ya tienen a alguien asignado.";
+      else if(gdFiltroTarjeta !== null) msgVacio = "No hay gastos con ese medio de pago este mes.";
+      cont.innerHTML = "<p class=\"hint\">" + msgVacio + "</p>";
     }else{
       cont.innerHTML = filas.map(function(f){
         var marca = f.prescindible ? "🔻 " : "";
@@ -4183,7 +4321,7 @@
     var total = filas.reduce(function(a, f){ return a + f.monto; }, 0);
     var totalPrescindible = filas.reduce(function(a, f){ return a + (f.prescindible ? f.monto : 0); }, 0);
     document.getElementById("gdTotales").innerHTML =
-      "Gastos: <b>" + filas.length + "</b> · Total: <b>" + money(total) + "</b> · Prescindible: <b>" + money(totalPrescindible) + "</b>";
+      "Gastos: <b>" + filas.length + "</b> · " + (hayFiltro ? "Total filtrado" : "Total") + ": <b>" + money(total) + "</b> · Prescindible: <b>" + money(totalPrescindible) + "</b>";
     cont.querySelectorAll("[data-gdreparto]").forEach(function(b){ b.addEventListener("click", function(){ abrirRepartoGastoDiario(Number(b.dataset.gdreparto)); }); });
     cont.querySelectorAll("[data-gdedit]").forEach(function(b){ b.addEventListener("click", function(){ editarGastoDiarioForm(Number(b.dataset.gdedit)); }); });
     cont.querySelectorAll("[data-gddel]").forEach(function(b){ b.addEventListener("click", function(){ borrarGastoDiario(Number(b.dataset.gddel)); }); });
@@ -4192,6 +4330,11 @@
   document.getElementById("gdMes").addEventListener("change", renderListaGastosDiarios);
   document.getElementById("gdAnio").addEventListener("change", renderListaGastosDiarios);
   document.getElementById("gdBuscar").addEventListener("input", renderListaGastosDiarios);
+  document.getElementById("gdSinAsignarBtn").addEventListener("click", function(){
+    gdSoloSinAsignar = !gdSoloSinAsignar;
+    document.getElementById("gdSinAsignarBtn").classList.toggle("active", gdSoloSinAsignar);
+    renderListaGastosDiarios();
+  });
 
   // ---------------------------------------------------------------- Gastos Diarios: comprobador de cobertura
   // Puerto de checklist_cobertura_diarios (gastos_diarios_repo.py): compara
