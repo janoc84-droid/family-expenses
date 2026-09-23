@@ -53,6 +53,27 @@
       --warn-ink:#ffffff;
     }
   }
+  /* ---------------- breakpoints responsive (telefono/tablet) ----------------
+     Unico @media de LAYOUT del archivo (el de arriba es solo de colores).
+     La mayoria de los arreglos de mobile van directo en las reglas de cada
+     clase (overflow-wrap:anywhere / flex-wrap:wrap) y no necesitan @media
+     porque no cambian nada cuando sobra espacio -- ver .list-detalle,
+     .list-nombres, .stat .v, .checklist-detalle, etc. mas arriba. Lo unico
+     que SI depende del ancho de pantalla son los anchos fijos en px de los
+     <input> de la tabla de "Cargar mes" (se arman con style="width:..."
+     inline desde JS -- ver renderTablaCargarMes) y el padding de las
+     tablas: en telefono (<=600px) se angostan para que la tabla necesite
+     menos scroll horizontal dentro de .table-wrap. Llevan !important a
+     proposito: un estilo inline SIEMPRE le gana a una regla de CSS externa
+     salvo que esta tenga !important -- por eso no alcanza con poner la
+     regla nueva aca, tiene que llevar !important si o si. */
+  @media (max-width:600px){
+    .cm-empresa, .cm-categoria{ width:90px !important; }
+    .cm-monto{ width:78px !important; }
+    .cm-cuota{ width:50px !important; }
+    .cm-personas{ width:110px !important; }
+    table.data-table th, table.data-table td{ padding:6px 4px !important; }
+  }
   /* boton de tema: fuerza un modo aunque el sistema prefiera el otro */
   :root[data-theme="light"]{
     --bg:#f4f6f8;
@@ -161,7 +182,7 @@
   /* ---------------- navegacion de pestanas ---------------- */
   nav.tabs{
     display:flex; gap:6px; overflow-x:auto; padding-block:10px;
-    -ms-overflow-style:none; scrollbar-width:thin;
+    -ms-overflow-style:none; scrollbar-width:thin; -webkit-overflow-scrolling:touch;
   }
   .tab-btn{
     flex:none; background:var(--surface-2); border:1px solid var(--border); color:var(--text-dim);
@@ -199,7 +220,7 @@
 
   .reparto-box{ background:var(--surface-2); border:1px dashed var(--border); border-radius:10px; padding:10px; margin-bottom:10px; }
   .reparto-row{ display:flex; align-items:center; gap:10px; padding:5px 2px; }
-  .reparto-nombre{ flex:1; font-size:.9rem; }
+  .reparto-nombre{ flex:1; font-size:.9rem; overflow-wrap:anywhere; }
   .reparto-monto{ width:110px; }
 
   .note{ font-size:.82rem; padding:8px 10px; border-radius:8px; background:var(--surface-2); margin-top:4px; }
@@ -215,9 +236,9 @@
   .list-row:first-child{ border-top:none; }
   .list-row-main{ display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; flex:1 1 220px; }
   .list-fecha{ color:var(--text-dim); font-size:.8rem; font-variant-numeric:tabular-nums; }
-  .list-detalle{ font-weight:600; }
-  .list-nombres{ color:var(--text-dim); font-size:.82rem; }
-  .list-row-side{ display:flex; align-items:center; gap:6px; }
+  .list-detalle{ font-weight:600; overflow-wrap:anywhere; }
+  .list-nombres{ color:var(--text-dim); font-size:.82rem; overflow-wrap:anywhere; }
+  .list-row-side{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
   .list-monto{ font-weight:700; color:var(--accent-strong); font-variant-numeric:tabular-nums; }
   .icon-btn{
     background:var(--surface-2); border:1px solid var(--border); color:var(--text-dim);
@@ -233,7 +254,7 @@
   .stat-bar{ display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; margin-bottom:14px; }
   .stat{ background:var(--surface-2); border:1px solid var(--border); border-radius:10px; padding:10px 12px; }
   .stat .k{ font-size:.68rem; text-transform:uppercase; letter-spacing:1px; color:var(--text-dim); }
-  .stat .v{ font-size:1.25rem; font-weight:700; color:var(--accent-strong); font-variant-numeric:tabular-nums; }
+  .stat .v{ font-size:1.25rem; font-weight:700; color:var(--accent-strong); font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
 
   /* ---------------- graficos de barra (css puro) ---------------- */
   .bar-chart{ display:flex; flex-direction:column; gap:12px; }
@@ -269,7 +290,7 @@
   .person-detail{ padding:8px 10px; }
 
   /* ---------------- tablas ---------------- */
-  .table-wrap{ overflow-x:auto; }
+  .table-wrap{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
   table.data-table{ width:100%; border-collapse:collapse; font-size:.86rem; }
   table.data-table th{
     text-align:left; font-size:.66rem; text-transform:uppercase; letter-spacing:.5px; color:var(--text-dim);
@@ -295,7 +316,7 @@
   .cm-heredado-txt.cm-heredado-ambiguo{ color:var(--warn); }
 
   /* ---------------- "Ingreso Manual": comprobador de cobertura ---------- */
-  .cov-filtros{ display:flex; gap:6px; }
+  .cov-filtros{ display:flex; gap:6px; flex-wrap:wrap; }
   .cov-filtro-btn{ padding:6px 10px; font-size:.78rem; }
   .cov-filtro-btn.active{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
   /* "Sin asignar" en Gastos Diarios usa el color de aviso (no el accent
@@ -313,7 +334,7 @@
   }
   .checklist-item:first-child{ border-top:none; }
   .checklist-item input{ width:18px; height:18px; flex:none; }
-  .checklist-detalle{ flex:1; }
+  .checklist-detalle{ flex:1; overflow-wrap:anywhere; }
   .checklist-monto{ font-weight:700; color:var(--accent-strong); font-variant-numeric:tabular-nums; }
 
   /* ---------------- Estado de Cuenta: acciones por movimiento + historial ---------------- */
@@ -322,7 +343,7 @@
   .modal-overlay{
     position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:200;
     display:flex; align-items:flex-start; justify-content:center;
-    padding:40px 16px; overflow-y:auto;
+    padding:40px 16px; overflow-y:auto; -webkit-overflow-scrolling:touch;
   }
   .modal-overlay[hidden]{ display:none; }
   .modal-box{
@@ -335,11 +356,13 @@
     background:var(--surface-2); border:1px solid var(--border); border-radius:8px;
     padding:8px 10px; margin-bottom:6px; display:flex; align-items:center; gap:10px; justify-content:space-between;
   }
-  .historial-item p{ font-size:.82rem; color:var(--text-dim); }
+  .historial-item p{ font-size:.82rem; color:var(--text-dim); overflow-wrap:anywhere; }
   .division-row{
     display:flex; align-items:center; justify-content:space-between; gap:8px;
     background:var(--surface-2); border-radius:6px; padding:6px 8px; margin-bottom:4px;
+    flex-wrap:wrap;
   }
+  .division-row > span:first-child{ overflow-wrap:anywhere; min-width:0; flex:1 1 auto; }
 
   /* ---------------- calculadora integrada ---------------- */
   .field-with-calc{ display:flex; gap:6px; align-items:flex-end; }
