@@ -5095,8 +5095,15 @@
   var RX_LIDER_SUBTOTAL = new RegExp("^\\$?\\s*" + RX_MONTO + "\\s*$");
 
   function parsearLineaLider(linea){
+    // RX_LIDER_CUOTAS tiene 7 grupos: 1=lugar 2=fecha 3=descripcion
+    // 4=montoOperacion 5=montoTotal 6=cuotas("NN/NN") 7=valorCuota -- el
+    // monto a cobrar ESTE mes es el valor de la cuota (grupo 7), no el
+    // monto total de la compra, y el texto de cuota es el grupo 6, no un
+    // monto. (Antes estaban cambiados: m[6]/m[5] en vez de m[7]/m[6], asi
+    // que una compra en cuotas de Lider quedaba con un monto absurdo tipo
+    // "3" en vez del valor real de la cuota.)
     var m = RX_LIDER_CUOTAS.exec(linea);
-    if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[6]), cuota: m[5]};
+    if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[7]), cuota: m[6]};
     m = RX_LIDER_SIMPLE.exec(linea);
     if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[4]), cuota: "01/01"};
     return null;
