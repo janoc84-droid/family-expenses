@@ -306,14 +306,27 @@
   tr.cm-row-alerta td{ background:color-mix(in srgb, var(--warn) 8%, transparent); }
   .cm-alerta-txt{ font-size:.72rem; color:var(--warn); margin-top:4px; max-width:220px; }
 
+  /* ---------------- "Cargar mes": fila con una PROPUESTA (no un hecho
+     consumado) de nombre precargado desde Gastos Diarios -- ver
+     aplicarMatchingAutomatico/encontrarMatchGastoDiario. Estilo a proposito
+     distinto del aviso naranja de arriba (esto no es un problema, es una
+     sugerencia positiva que igual necesita tu clic de "Confirmar e
+     importar" para quedar guardada). --------------------------------- */
+  tr.cm-row-sugerencia-diaria{ box-shadow:inset 3px 0 0 var(--accent-strong); }
+  tr.cm-row-sugerencia-diaria td{ background:color-mix(in srgb, var(--accent-strong) 8%, transparent); }
+
   /* ---------------- "Cargar mes": marca de reparto heredado del mes
      anterior por matching automatico (ver aplicarMatchingAutomatico) --
      "ok" = heredado con confianza (fecha+detalle, o detalle+monto
      aproximado); "ambiguo" = hubo mas de un candidato y se desempato por
-     monto, requiere revision humana (misma idea que cm-alerta-txt). ------ */
+     monto, requiere revision humana (misma idea que cm-alerta-txt);
+     "gasto_diario" = precargado desde un Gasto Diario ya anotado este mes
+     (ver domain/matching_gasto_diario.py del escritorio), no del mes
+     anterior -- color propio para que se note que es un origen distinto. */
   .cm-heredado-txt{ font-size:.72rem; margin-top:4px; max-width:220px; }
   .cm-heredado-txt.cm-heredado-ok{ color:var(--ok); }
   .cm-heredado-txt.cm-heredado-ambiguo{ color:var(--warn); }
+  .cm-heredado-txt.cm-heredado-gasto-diario{ color:var(--accent-strong); }
 
   /* ---------------- "Ingreso Manual": comprobador de cobertura ---------- */
   .cov-filtros{ display:flex; gap:6px; flex-wrap:wrap; }
@@ -2121,6 +2134,27 @@
     if(String(empresa || "").trim().toLowerCase() === "lider") return "LIDER";
     return "MANUAL";
   }
+  // Orden y etiquetas para agrupar el Estado de Cuenta EXPORTADO (PDF/
+  // imagen) por tarjeta -- puerto de CATEGORIAS_ORIGEN/agrupar_por_categoria
+  // en app/domain/categoria_origen.py (escritorio). Pedido explicito del
+  // usuario: "debe quedar separado, pero igual debe especificar con un
+  // subtotal y un total de ambas tarjetas". Reusa ecCategoriaOrigen (mismo
+  // criterio que el filtro "Ver solo" de la pantalla) para que la
+  // clasificacion nunca quede duplicada/desincronizada entre pantalla y
+  // exportacion, mismo motivo que llevo a compartirla en un solo lugar en
+  // el escritorio.
+  var EC_CATEGORIAS_EXPORT = [
+    ["IMPORTADO_PDF", "Falabella"], ["LIDER", "Líder"],
+    ["MANUAL", "Manual"], ["IMPORTADO_DEUDAS_ADICIONALES", "Deudas Adicionales"],
+  ];
+  function agruparEcParaExportar(items){
+    var porClave = {};
+    EC_CATEGORIAS_EXPORT.forEach(function(c){ porClave[c[0]] = []; });
+    items.forEach(function(it){ porClave[ecCategoriaOrigen(it.origen, it.empresa)].push(it); });
+    return EC_CATEGORIAS_EXPORT
+      .map(function(c){ return {etiqueta: c[1], items: porClave[c[0]]}; })
+      .filter(function(g){ return g.items.length > 0; });
+  }
 
   function estadoActual(){
     var nombre = document.getElementById("ecPersona").value.trim();
@@ -3299,7 +3333,7 @@
     else if(total > 1) fraseTotal = "Total a pagar: " + money(total) + ".";
     else fraseTotal = "Estas al dia, sin diferencia este mes.";
     return "Hola " + nombre + ", te comparto tu estado de cuenta de " + MESES_ES[mes] + " " + anio + ". " +
-      fraseTotal + " Te adjunto el detalle en PDF.";
+      fraseTotal + " Te adjunto el detalle por tarjeta en PDF.";
   }
   // Puerto de construir_link_whatsapp (whatsapp_link.py).
   function construirLinkWhatsapp(telefono, mensaje){
@@ -3356,30 +3390,73 @@
     var rowH = 7;
 
     function dibujarEncabezado(){
+      // Bug real de jsPDF 4.2.1 (confirmado con pruebas aisladas, preexistente
+      // desde siempre, no relacionado con el agrupado de mas abajo): llamar
+      // doc.text() INTERCALADO entre llamadas a doc.rect(..., "FD") hace que
+      // pierda el color de relleno del rect SIGUIENTE (queda negro) -- por
+      // eso "Fecha" salia bien (primer rect) pero "Detalle/Empresa/Cuota/
+      // Monto" salian como una franja negra sin texto legible. El resto de
+      // la tabla (filas normales, encabezados de grupo) nunca tuvo este
+      // problema porque ya dibujan TODOS los rects de la fila antes de
+      // llamar a ningun text() -- mismo patron aca: dos pasadas separadas,
+      // nunca alternar rect()/text().
       doc.setFillColor(220, 220, 220); doc.setDrawColor(0, 0, 0);
       doc.setFont("helvetica", "bold"); doc.setFontSize(10); doc.setTextColor(0, 0, 0);
-      cols.forEach(function(c, i){
-        doc.rect(xs[i], y, c.w, rowH, "FD");
-        doc.text(c.label, xs[i] + 2, y + 5);
-      });
+      cols.forEach(function(c, i){ doc.rect(xs[i], y, c.w, rowH, "FD"); });
+      cols.forEach(function(c, i){ doc.text(c.label, xs[i] + 2, y + 5); });
       y += rowH;
     }
     dibujarEncabezado();
 
-    doc.setFont("helvetica", "normal"); doc.setFontSize(9);
-    items.forEach(function(it, idx){
+    function _saltoDePaginaSiHaceFalta(){
       if(y + rowH > pageBottom){ doc.addPage(); y = 18; dibujarEncabezado(); doc.setFont("helvetica", "normal"); doc.setFontSize(9); }
-      doc.setFillColor(idx % 2 === 0 ? 245 : 255, idx % 2 === 0 ? 245 : 255, idx % 2 === 0 ? 245 : 255);
-      cols.forEach(function(c, i){ doc.rect(xs[i], y, c.w, rowH, "FD"); });
-      doc.setTextColor(0, 0, 0);
-      doc.text(String(it.fecha || "").slice(0, 14), xs[0] + 1.5, y + 5);
-      doc.text(String(it.detalle || "").slice(0, 40), xs[1] + 1.5, y + 5);
-      doc.text(String(it.empresa || "").slice(0, 28), xs[2] + 1.5, y + 5);
-      doc.text(String(it.cuota || "-").slice(0, 8), xs[3] + 1.5, y + 5);
-      var montoTxt = money(it.monto);
-      var montoW = doc.getTextWidth(montoTxt);
-      doc.text(montoTxt, xs[4] + cols[4].w - 2 - montoW, y + 5);
+    }
+
+    // Agrupado por tarjeta/origen (Falabella, Lider, Manual, Deudas
+    // Adicionales) -- pedido explicito del usuario: "debe quedar separado,
+    // pero igual debe especificar con un subtotal y un total de ambas
+    // tarjetas". Mismo criterio y mismo orden que ya tiene el escritorio
+    // (ver agruparEcParaExportar / app/domain/categoria_origen.py) -- cada
+    // grupo no vacio: encabezado en negrita a todo el ancho, sus filas
+    // (mismo sombreado alternado de siempre, que arranca de nuevo en cada
+    // grupo), y una fila de subtotal en negrita antes del siguiente grupo.
+    doc.setFont("helvetica", "normal"); doc.setFontSize(9);
+    agruparEcParaExportar(items).forEach(function(grupo){
+      _saltoDePaginaSiHaceFalta();
+      doc.setFillColor(235, 235, 235); doc.setDrawColor(0, 0, 0);
+      doc.setFont("helvetica", "bold"); doc.setFontSize(10); doc.setTextColor(0, 0, 0);
+      doc.rect(marginX, y, tableRight - marginX, rowH, "FD");
+      doc.text(grupo.etiqueta, marginX + 2, y + 5);
       y += rowH;
+
+      doc.setFont("helvetica", "normal"); doc.setFontSize(9);
+      grupo.items.forEach(function(it, idx){
+        _saltoDePaginaSiHaceFalta();
+        doc.setFillColor(idx % 2 === 0 ? 245 : 255, idx % 2 === 0 ? 245 : 255, idx % 2 === 0 ? 245 : 255);
+        cols.forEach(function(c, i){ doc.rect(xs[i], y, c.w, rowH, "FD"); });
+        doc.setTextColor(0, 0, 0);
+        doc.text(String(it.fecha || "").slice(0, 14), xs[0] + 1.5, y + 5);
+        doc.text(String(it.detalle || "").slice(0, 40), xs[1] + 1.5, y + 5);
+        doc.text(String(it.empresa || "").slice(0, 28), xs[2] + 1.5, y + 5);
+        doc.text(String(it.cuota || "-").slice(0, 8), xs[3] + 1.5, y + 5);
+        var montoTxt = money(it.monto);
+        var montoW = doc.getTextWidth(montoTxt);
+        doc.text(montoTxt, xs[4] + cols[4].w - 2 - montoW, y + 5);
+        y += rowH;
+      });
+
+      _saltoDePaginaSiHaceFalta();
+      var subtotalGrupo = grupo.items.reduce(function(a, it){ return a + it.monto; }, 0);
+      doc.setFillColor(235, 235, 235); doc.setDrawColor(0, 0, 0);
+      doc.setFont("helvetica", "bold"); doc.setFontSize(10); doc.setTextColor(0, 0, 0);
+      doc.rect(marginX, y, tableRight - marginX - cols[4].w, rowH, "FD");
+      doc.rect(xs[4], y, cols[4].w, rowH, "FD");
+      doc.text("Subtotal " + grupo.etiqueta, marginX + 2, y + 5);
+      var subtotalTxt = money(subtotalGrupo);
+      var subtotalW = doc.getTextWidth(subtotalTxt);
+      doc.text(subtotalTxt, xs[4] + cols[4].w - 2 - subtotalW, y + 5);
+      y += rowH;
+      doc.setFont("helvetica", "normal"); doc.setFontSize(9);
     });
 
     y += 10;
@@ -3432,16 +3509,32 @@
             " (" + tipoTxt + ")" + (a.detalle ? " — " + escapeHtml(a.detalle) : "") + "</div>";
         }).join("") +
       "</div>" : "";
-    var filasHtml = items.map(function(it, i){
-      var bg = (i % 2 === 0) ? "#f0f0f0" : "#ffffff";
-      var montoColor = it.monto >= 0 ? "#0a5abe" : "#be1e23";
-      return "<tr style=\"background:" + bg + ";\">" +
-        "<td style=\"padding:10px 14px;white-space:nowrap;\">" + escapeHtml(it.fecha) + "</td>" +
-        "<td style=\"padding:10px 14px;\">" + escapeHtml(it.detalle) + "</td>" +
-        "<td style=\"padding:10px 14px;color:#5a5a5a;\">" + escapeHtml(it.empresa || "") + "</td>" +
-        "<td style=\"padding:10px 14px;color:#5a5a5a;white-space:nowrap;\">" + escapeHtml(it.cuota || "-") + "</td>" +
-        "<td style=\"padding:10px 14px;text-align:right;color:" + montoColor + ";font-weight:600;white-space:nowrap;\">" + escapeHtml(money(it.monto)) + "</td>" +
+    // Agrupado por tarjeta/origen, mismo criterio y mismo orden que el PDF
+    // (agruparEcParaExportar) -- pedido explicito del usuario: separado por
+    // tarjeta, cada una con su subtotal. Encabezado de grupo y fila de
+    // subtotal usan un fondo gris propio (distinto del sombreado alternado
+    // de las filas normales) para que se distingan de un vistazo.
+    var filasHtml = agruparEcParaExportar(items).map(function(grupo){
+      var encabezado = "<tr style=\"background:#e0e0e0;\">" +
+        "<td colspan=\"5\" style=\"padding:10px 14px;font-weight:700;font-size:19px;\">" + escapeHtml(grupo.etiqueta) + "</td>" +
       "</tr>";
+      var filasGrupo = grupo.items.map(function(it, i){
+        var bg = (i % 2 === 0) ? "#f0f0f0" : "#ffffff";
+        var montoColor = it.monto >= 0 ? "#0a5abe" : "#be1e23";
+        return "<tr style=\"background:" + bg + ";\">" +
+          "<td style=\"padding:10px 14px;white-space:nowrap;\">" + escapeHtml(it.fecha) + "</td>" +
+          "<td style=\"padding:10px 14px;\">" + escapeHtml(it.detalle) + "</td>" +
+          "<td style=\"padding:10px 14px;color:#5a5a5a;\">" + escapeHtml(it.empresa || "") + "</td>" +
+          "<td style=\"padding:10px 14px;color:#5a5a5a;white-space:nowrap;\">" + escapeHtml(it.cuota || "-") + "</td>" +
+          "<td style=\"padding:10px 14px;text-align:right;color:" + montoColor + ";font-weight:600;white-space:nowrap;\">" + escapeHtml(money(it.monto)) + "</td>" +
+        "</tr>";
+      }).join("");
+      var subtotalGrupo = grupo.items.reduce(function(a, it){ return a + it.monto; }, 0);
+      var subtotal = "<tr style=\"background:#e0e0e0;\">" +
+        "<td colspan=\"4\" style=\"padding:10px 14px;font-weight:700;\">Subtotal " + escapeHtml(grupo.etiqueta) + "</td>" +
+        "<td style=\"padding:10px 14px;text-align:right;font-weight:700;white-space:nowrap;\">" + escapeHtml(money(subtotalGrupo)) + "</td>" +
+      "</tr>";
+      return encabezado + filasGrupo + subtotal;
     }).join("");
     var subtitulo = estado.nombre + "  —  " + MESES_ES[estado.mes] + " " + estado.anio;
     var html =
@@ -5094,11 +5187,42 @@
   // Traduccion directa de pdf_lider.py -- a diferencia de Falabella, aca se
   // extraen TODOS los cargos de "1. Total Operaciones" sin distinguir
   // seccion (LIDER / OTROS COMERCIOS se ignoran, todo queda en una lista
-  // plana), igual que hace el dialogo de escritorio.
+  // plana), igual que hace el dialogo de escritorio. Desde el 23/09/2026
+  // tambien se leen los cargos reales (monto positivo) de "3. Cargos /
+  // Comisiones, Impuestos / Abonos" y el CUADRE contra los totales que
+  // declara el propio PDF (secciones "I", "II.1 Periodo Anterior" y "III"),
+  // mismo criterio que Falabella en el escritorio -- ver el docstring
+  // completo de pdf_lider.py para el detalle de cada campo/chequeo, y
+  // calcularAvisosCuadreLider() mas abajo para el calculo en si.
+  //
+  // Particularidad real de este PDF (confirmada extrayendo el texto con
+  // pdf.js, no asumida): a diferencia de pdfplumber en el escritorio (que
+  // mangla las tildes a "�", ej. "Per�odo"), pdf.js las trae bien
+  // ("Período") -- pero igual se usa "." (cualquier caracter) en el lugar
+  // de la letra acentuada en los regex de cuadre, mismo criterio defensivo
+  // que pdf_lider.py, para no depender de que la codificacion de un PDF
+  // futuro (u otra version de pdf.js) venga bien.
 
   var RX_LIDER_CUOTAS = new RegExp("^(.*?)\\s*(" + RX_FECHA + ")\\s+(.+?)\\s+\\(T\\)\\s+\\$?\\s*(" + RX_MONTO + ")\\s+\\$?\\s*(" + RX_MONTO + ")\\s+(" + RX_CUOTAS + ")\\s+\\$?\\s*(" + RX_MONTO + ")\\s*$");
   var RX_LIDER_SIMPLE = new RegExp("^(.*?)\\s*(" + RX_FECHA + ")\\s+(.+?)\\s+\\(T\\)\\s+\\$?\\s*(" + RX_MONTO + ")\\s*$");
   var RX_LIDER_SUBTOTAL = new RegExp("^\\$?\\s*" + RX_MONTO + "\\s*$");
+  // Linea de PAGO dentro de "3. Cargos/Comisiones/Impuestos/Abonos" (ej.
+  // "30/06/2026 PAGO $ -742.533") -- a diferencia de CUALQUIER otra linea
+  // de esa seccion, un pago hecho A la tarjeta nunca trae la marca "(T)"
+  // (esa marca es solo para cargos hechos CON la tarjeta en un comercio).
+  // Se usa como respaldo dentro de parsearLineaSeccion3Lider, solo cuando
+  // RX_LIDER_SIMPLE no calzo.
+  var RX_LIDER_PAGO_SECCION_3 = new RegExp("^(" + RX_FECHA + ")\\s+(.+?)\\s+\\$?\\s*(" + RX_MONTO + ")\\s*$");
+
+  // Campos de cuadre (secciones "I. INFORMACION GENERAL", "II. DETALLE > 1.
+  // Periodo Anterior" y "III. INFORMACION DE PAGO") -- traduccion directa
+  // de _RE_PERIODO_FACTURADO / _RE_MONTO_FACTURADO_ANTERIOR /
+  // _RE_MONTO_PAGADO_ANTERIOR / _RE_TOTAL_FACTURADO en pdf_lider.py.
+  var RX_LIDER_PERIODO_FACTURADO = new RegExp("Per.odo Facturado\\s*(" + RX_FECHA + ")\\s*(" + RX_FECHA + ")");
+  var RX_LIDER_MONTO_FACTURADO_ANTERIOR = new RegExp("Monto Facturado Per.odo Anterior\\s*\\$?\\s*(-?[\\d.]+)");
+  var RX_LIDER_MONTO_PAGADO_ANTERIOR = new RegExp("Monto Pagado Per.odo Anterior\\s*\\$?\\s*(-?[\\d.]+)");
+  // Sin tilde en "Facturado" -- no necesita el comodin ".".
+  var RX_LIDER_TOTAL_FACTURADO = new RegExp("Monto Total Facturado\\s*\\$?\\s*([\\d.]+)");
 
   function parsearLineaLider(linea){
     // RX_LIDER_CUOTAS tiene 7 grupos: 1=lugar 2=fecha 3=descripcion
@@ -5115,19 +5239,164 @@
     return null;
   }
 
+  // Traduccion directa de _parse_linea_seccion_3 (pdf_lider.py): una linea
+  // de "3. Cargos / Comisiones, Impuestos / Abonos" es UNA de dos cosas,
+  // segun el SIGNO del monto -- nunca segun el texto de la descripcion (ej.
+  // "PAGO"), para no depender de que esa palabra no cambie de un mes a
+  // otro:
+  //  - Negativo: plata que ya salio de la familia hacia la tarjeta (un pago
+  //    real, o una devolucion/reembolso de una compra) -- nunca se
+  //    reparte, solo se suma para validar el cuadre (ver montoAbono).
+  //  - Positivo: un cargo real (impuesto, comision, traspaso de deuda
+  //    internacional, etc.) que si hay que cobrarle a alguien (ver item).
+  //  - Cero: ni una cosa ni la otra, se descarta.
+  // RX_LIDER_SIMPLE (arriba) sirve tal cual para esta seccion tambien -- el
+  // grupo "lugar" simplemente calza vacio cuando no hay lugar antes de la
+  // fecha (las lineas de la seccion 3 nunca traen Lugar). RX_LIDER_PAGO_SECCION_3
+  // es el respaldo para la unica linea de esta seccion que no trae "(T)".
+  function parsearLineaSeccion3Lider(linea){
+    var fecha, descripcion, monto;
+    var m = RX_LIDER_SIMPLE.exec(linea);
+    if(m){
+      fecha = m[2]; descripcion = m[3]; monto = aMonto(m[4]);
+    }else{
+      m = RX_LIDER_PAGO_SECCION_3.exec(linea);
+      if(!m) return {montoAbono: null, item: null};
+      fecha = m[1]; descripcion = m[2]; monto = aMonto(m[3]);
+    }
+    if(monto < 0) return {montoAbono: monto, item: null};
+    if(monto === 0) return {montoAbono: null, item: null};
+    return {montoAbono: null, item: {fecha: fechaISOdesdeDDMMYYYY(fecha), detalle: descripcion.trim(), monto: monto, cuota: "01/01"}};
+  }
+
+  // A diferencia de parseFalabellaLineas (que solo devuelve las filas),
+  // devuelve {filas, cuadre} -- cuadre trae los mismos campos que
+  // EstadoCuentaLiderPdf en pdf_lider.py (montoTotalFacturado, periodo
+  // desde/hasta, totalAbonos, montoPagado/FacturadoPeriodoAnterior), para
+  // que procesarPdfCargarMes pueda calcular los mismos avisos de cuadre
+  // que ya calcula el escritorio (ver calcularAvisosCuadreLider).
   function parseLiderLineas(lineas){
     var filas = [];
     var enPeriodo = false;
+    var enSeccion3 = false;
+    var montoTotalFacturado = null;
+    var periodoDesde = null;
+    var periodoHasta = null;
+    var montoFacturadoPeriodoAnterior = null;
+    var montoPagadoPeriodoAnterior = null;
+    var totalAbonos = 0;
+
     lineas.forEach(function(lineaCruda){
       var linea = lineaCruda.trim();
       if(!linea) return;
+
+      // Estos 4 campos de cuadre pueden aparecer en cualquier linea, sin
+      // importar la seccion en la que estemos (estan antes de "1. Total
+      // Operaciones" o despues de "3. Cargos...") -- se revisan SIEMPRE,
+      // igual patron que _procesar_lineas en pdf_lider.py. El guard de "es
+      // null" evita que un texto repetido en una pagina siguiente pise el
+      // valor ya encontrado.
+      if(montoTotalFacturado === null){
+        var mTotal = RX_LIDER_TOTAL_FACTURADO.exec(linea);
+        if(mTotal) montoTotalFacturado = aMonto(mTotal[1]);
+      }
+      if(periodoDesde === null){
+        var mPeriodo = RX_LIDER_PERIODO_FACTURADO.exec(linea);
+        if(mPeriodo){ periodoDesde = mPeriodo[1]; periodoHasta = mPeriodo[2]; }
+      }
+      if(montoFacturadoPeriodoAnterior === null){
+        var mFactAnt = RX_LIDER_MONTO_FACTURADO_ANTERIOR.exec(linea);
+        if(mFactAnt) montoFacturadoPeriodoAnterior = aMonto(mFactAnt[1]);
+      }
+      if(montoPagadoPeriodoAnterior === null){
+        var mPagadoAnt = RX_LIDER_MONTO_PAGADO_ANTERIOR.exec(linea);
+        if(mPagadoAnt) montoPagadoPeriodoAnterior = aMonto(mPagadoAnt[1]);
+      }
+
       if(linea === "1. Total Operaciones"){ enPeriodo = true; return; }
-      if(linea.indexOf("2. Productos") === 0 || linea.indexOf("3. Cargos") === 0){ enPeriodo = false; return; }
+      if(linea.indexOf("2. Productos") === 0){ enPeriodo = false; return; }
+      if(linea.indexOf("3. Cargos") === 0){ enPeriodo = false; enSeccion3 = true; return; }
+      if(linea.indexOf("III.") === 0){ enSeccion3 = false; return; }
+
+      if(enSeccion3){
+        if(RX_LIDER_SUBTOTAL.test(linea)) return;
+        var resultadoS3 = parsearLineaSeccion3Lider(linea);
+        if(resultadoS3.montoAbono !== null){
+          totalAbonos += resultadoS3.montoAbono;
+        }else if(resultadoS3.item){
+          resultadoS3.item.personas = "";
+          filas.push(resultadoS3.item);
+        }
+        return;
+      }
+
       if(!enPeriodo || RX_LIDER_SUBTOTAL.test(linea)) return;
       var item = parsearLineaLider(linea);
       if(item){ item.personas = ""; filas.push(item); }
     });
-    return filas;
+
+    return {
+      filas: filas,
+      cuadre: {
+        montoTotalFacturado: montoTotalFacturado,
+        periodoDesde: periodoDesde,
+        periodoHasta: periodoHasta,
+        totalAbonos: totalAbonos,
+        montoPagadoPeriodoAnterior: montoPagadoPeriodoAnterior,
+        montoFacturadoPeriodoAnterior: montoFacturadoPeriodoAnterior,
+      }
+    };
+  }
+
+  // Traduccion directa del bloque "if lider_path:" de import_service.py:
+  // dos chequeos de cuadre independientes (mismo espiritu que Falabella),
+  // nunca silenciosos y nunca inventando una causa unica -- si algo no
+  // calza, se muestran los numeros reales para que se revise a mano. Los
+  // montos se formatean con money() (estilo chileno, "$ 1.234") y no con el
+  // formato `:,.0f` que usa el string de Python -- ver el comentario de
+  // formatear_pesos (app/domain/currency.py) en el escritorio: esa coma no
+  // corresponde en Chile, asi que aca se usa la MISMA funcion de formato
+  // que el resto de la app web. `filas` son las YA parseadas por
+  // parseLiderLineas (seccion 1 + cargos positivos de seccion 3), para
+  // sumar el mismo "monto_conciliado_lider" que el escritorio (suma de
+  // valor_cuota de TODOS los cargos).
+  function calcularAvisosCuadreLider(cuadre, filas){
+    var avisos = [];
+    var montoConciliadoLider = filas.reduce(function(a, f){ return a + (Number(f.monto) || 0); }, 0);
+    var excesoPagadoPeriodoAnterior = 0;
+
+    if(cuadre.montoPagadoPeriodoAnterior !== null){
+      var diferenciaAbonos = Math.abs(cuadre.totalAbonos - cuadre.montoPagadoPeriodoAnterior);
+      if(diferenciaAbonos > 1){
+        avisos.push(
+          "⚠ Los abonos/devoluciones que encontré en el PDF Líder suman " + money(cuadre.totalAbonos) +
+          " pero el PDF declara " + money(cuadre.montoPagadoPeriodoAnterior) + " de 'Monto Pagado Período " +
+          "Anterior' (diferencia: " + money(diferenciaAbonos) + "). Puede que se me haya escapado o mal " +
+          "leído una línea de la sección '3. Cargos / Comisiones, Impuestos / Abonos', o puede ser algo " +
+          "real del PDF -- revisá el PDF Líder a mano para este mes."
+        );
+      }
+      if(cuadre.montoFacturadoPeriodoAnterior !== null){
+        excesoPagadoPeriodoAnterior = Math.max(0, Math.abs(cuadre.montoPagadoPeriodoAnterior) - cuadre.montoFacturadoPeriodoAnterior);
+      }
+    }
+
+    if(cuadre.montoTotalFacturado !== null){
+      var montoNetoLider = montoConciliadoLider - excesoPagadoPeriodoAnterior;
+      var diferenciaCuadre = Math.abs(montoNetoLider - cuadre.montoTotalFacturado);
+      if(diferenciaCuadre > 10){
+        avisos.push(
+          "⚠ El cuadre de Líder no calzó: sumando los cargos del mes (" + money(montoConciliadoLider) +
+          ") y restando el abono por adelantado del mes anterior (" + money(excesoPagadoPeriodoAnterior) +
+          ") da " + money(montoNetoLider) + ", pero el PDF declara " + money(cuadre.montoTotalFacturado) +
+          " de 'Monto Total Facturado' (diferencia: " + money(diferenciaCuadre) + "). Puede ser un abono " +
+          "adelantado no detectado, una devolución, una compra facturada en otro mes, o una línea que no " +
+          "leí bien -- revisá el PDF Líder a mano para este mes."
+        );
+      }
+    }
+
+    return avisos;
   }
 
   function parseLiderDesdeBytes(bytes){
@@ -5330,34 +5599,138 @@
     return mejor;
   }
 
+  // ---------------------------------------------------------------- Cargar mes: red de contencion adicional contra Gastos Diarios
+  // Puerto de domain/matching_gasto_diario.py del escritorio: cuando un
+  // cargo de Falabella/Lider NO calzo contra el mes anterior
+  // (encontrarMatchMesAnterior arriba), antes de dejarlo sin nombre se
+  // prueba con los Gastos Diarios que el usuario YA anoto a mano ESE MISMO
+  // mes (ver candidatosGastoDiarioParaMatching) -- caso real: alguien
+  // anota a diario, con tarjeta, una compra "para no olvidar de quien es"
+  // (varias personas de la familia usan la misma tarjeta Falabella/Lider),
+  // y despues el PDF del mes trae ese mismo cargo sin nombre. A diferencia
+  // del matching contra el mes anterior, aca el monto tiene que calzar
+  // EXACTO (nunca la tolerancia del 2%, porque es el MISMO cargo real, no
+  // una compra parecida de otro mes), y si el cargo nuevo trae una cuota
+  // real (no "01/01"), el candidato TAMBIEN tiene que traer esa misma
+  // cuota -- pero solo si el candidato especifico una cuota (si no la
+  // especifico, no se exige). Si hay MAS de un candidato que calza, no se
+  // propone ninguno: adivinar entre varios es peor que no proponer nada
+  // (mismo criterio que el match ambiguo de arriba, salvo que aca ni
+  // siquiera se deja como alerta -- si empata, la fila sigue como estaba,
+  // sin nombre). Gastos Diarios nunca se modifica/marca/oculta por esto, es
+  // solo lectura.
+  function esCuotaRealGD(cuotaTexto){
+    return cuotaTexto !== null && cuotaTexto !== undefined && cuotaTexto !== "" && cuotaTexto !== "01/01";
+  }
+
+  // Gastos Diarios de un anio/mes dado que YA tienen a alguien asignado
+  // (via "Compartir con"/"Dividir..."), con su reparto completo (nombres +
+  // monto, no solo el total) -- uno por gasto_diario_id. Puerto de
+  // gastos_diarios_repo.listar_candidatos_gasto_diario: INNER JOIN contra
+  // gasto_diario_persona (no LEFT JOIN, como usa el filtro "Sin asignar" de
+  // la pestana Gastos Diarios) porque una fila sin nadie asignado todavia
+  // no tiene nada que proponer.
+  function candidatosGastoDiarioParaMatching(anio, mes){
+    var filas = dbAll(
+      "SELECT gd.id AS gastoDiarioId, gd.detalle AS detalle, gd.fecha AS fecha, gd.cuota_texto AS cuotaTexto, " +
+      "gdp.persona AS nombre, gdp.monto AS monto " +
+      "FROM gastos_diarios gd JOIN gasto_diario_persona gdp ON gdp.gasto_diario_id = gd.id " +
+      "WHERE gd.anio=? AND gd.mes=? ORDER BY gd.id",
+      [anio, mes]
+    );
+    var porGasto = {};
+    filas.forEach(function(f){
+      if(!porGasto[f.gastoDiarioId]){
+        porGasto[f.gastoDiarioId] = {
+          gastoDiarioId: f.gastoDiarioId, detalle: f.detalle, fecha: f.fecha, cuotaTexto: f.cuotaTexto, reparto: []
+        };
+      }
+      porGasto[f.gastoDiarioId].reparto.push({nombre: f.nombre, monto: f.monto});
+    });
+    return Object.keys(porGasto).map(function(k){ return porGasto[k]; });
+  }
+
+  // Traduccion directa de encontrar_match_gasto_diario (matching_gasto_diario.py):
+  // filtra por monto EXACTO (redondeado a 2 decimales, solo para no fallar
+  // por ruido de coma flotante al sumar el reparto) y, solo si AMBOS lados
+  // traen una cuota real, exige que ademas coincida esa cuota. Devuelve el
+  // candidato solo si queda EXACTAMENTE UNO.
+  function encontrarMatchGastoDiario(candidatos, monto, cuotaTexto){
+    var montoRedondeado = Math.round((Number(monto) || 0) * 100) / 100;
+    var coincidentes = candidatos.filter(function(c){
+      var montoCandidato = Math.round(c.reparto.reduce(function(a, r){ return a + (Number(r.monto) || 0); }, 0) * 100) / 100;
+      return montoCandidato === montoRedondeado;
+    });
+    if(esCuotaRealGD(cuotaTexto)){
+      coincidentes = coincidentes.filter(function(c){ return !esCuotaRealGD(c.cuotaTexto) || c.cuotaTexto === cuotaTexto; });
+    }
+    return coincidentes.length === 1 ? coincidentes[0] : null;
+  }
+
   // Aplica el matching EN EL LUGAR a un arreglo de filas de revision de
   // "Cargar mes" (mismo formato que cmFilasActuales): solo completa
   // "personas" en las que llegaron vacias, y deja f.heredado
-  // ("automatico" | "aproximado" | "ambiguo") para que la tabla de revision
-  // lo muestre (ver renderTablaCargarMes). Cachea los candidatos por mes
-  // para no repetir la consulta fila a fila.
-  function aplicarMatchingAutomatico(filas){
+  // ("automatico" | "aproximado" | "ambiguo" | "gasto_diario") para que la
+  // tabla de revision lo muestre (ver renderTablaCargarMes). Cachea los
+  // candidatos por mes para no repetir la consulta fila a fila.
+  //
+  // intentarGastoDiario (default false/undefined): solo procesarPdfCargarMes
+  // lo pasa en true -- la red de contencion de Gastos Diarios de arriba es
+  // SOLO para filas de Falabella/Lider (PDF), nunca para Deudas Adicionales
+  // (que ya trae su propio reparto explicito del Excel, ver
+  // construirFilasDesdeDeudasAdicionales) ni para filas agregadas a mano.
+  function aplicarMatchingAutomatico(filas, intentarGastoDiario){
     var cache = {};
+    var cacheGastoDiario = {};
     filas.forEach(function(f){
       var nombresActuales = String(f.personas || "").split(/\s+/).filter(Boolean);
       if(nombresActuales.length || !f.fecha || !f.detalle) return;
       var d = new Date(f.fecha + "T00:00:00");
       if(isNaN(d.getTime())) return;
+
       var prev = mesAnteriorDe(d.getFullYear(), d.getMonth() + 1);
       var key = prev.anio + "-" + prev.mes;
       if(!(key in cache)) cache[key] = candidatosGastosParaMatching(prev.anio, prev.mes);
       var resultado = encontrarMatchMesAnterior(f.fecha, f.detalle, f.monto, cache[key]);
-      if(!resultado) return;
-      var vistos = {};
-      var nombres = resultado.candidato.reparto.map(function(r){ return r.nombre; }).filter(function(n){
+      if(resultado){
+        var vistos = {};
+        var nombres = resultado.candidato.reparto.map(function(r){ return r.nombre; }).filter(function(n){
+          var k = n.toLowerCase();
+          if(vistos[k]) return false;
+          vistos[k] = true;
+          return true;
+        });
+        if(!nombres.length) return;
+        f.personas = nombres.join(" ");
+        f.heredado = resultado.ambiguo ? "ambiguo" : (resultado.razon === "fecha_y_descripcion" ? "automatico" : "aproximado");
+        return;
+      }
+
+      // Sin match con el mes anterior: antes de resignarse a dejar la fila
+      // sin nombre, se prueba la red de contencion de Gastos Diarios (ver
+      // comentario arriba) -- "ese mismo mes" es el de la FILA (f.fecha),
+      // no el mes anterior.
+      if(!intentarGastoDiario) return;
+      var claveGD = d.getFullYear() + "-" + (d.getMonth() + 1);
+      if(!(claveGD in cacheGastoDiario)) cacheGastoDiario[claveGD] = candidatosGastoDiarioParaMatching(d.getFullYear(), d.getMonth() + 1);
+      var candidatoDiario = encontrarMatchGastoDiario(cacheGastoDiario[claveGD], f.monto, f.cuota);
+      if(!candidatoDiario) return;
+      var vistosGD = {};
+      var nombresGD = candidatoDiario.reparto.map(function(r){ return r.nombre; }).filter(function(n){
         var k = n.toLowerCase();
-        if(vistos[k]) return false;
-        vistos[k] = true;
+        if(vistosGD[k]) return false;
+        vistosGD[k] = true;
         return true;
       });
-      if(!nombres.length) return;
-      f.personas = nombres.join(" ");
-      f.heredado = resultado.ambiguo ? "ambiguo" : (resultado.razon === "fecha_y_descripcion" ? "automatico" : "aproximado");
+      if(!nombresGD.length) return;
+      f.personas = nombresGD.join(" ");
+      // Nunca autoasignar en silencio (pedido explicito y repetido del
+      // usuario): f.heredado="gasto_diario" deja la fila claramente
+      // marcada como PROPUESTA a aprobar (ver renderTablaCargarMes), no un
+      // hecho consumado -- sigue necesitando el mismo clic final de
+      // "Confirmar e importar" que cualquier otra fila.
+      f.heredado = "gasto_diario";
+      f.gastoDiarioOrigen = {detalle: candidatoDiario.detalle, fecha: candidatoDiario.fecha};
     });
   }
 
@@ -5458,6 +5831,14 @@
     return null;
   }
 
+  // "2026-08-05" -> "05/08" -- solo para el texto de la sugerencia de
+  // Gasto Diario (ver renderTablaCargarMes); si la fecha no viniera en
+  // formato ISO por algun motivo, se devuelve tal cual en vez de romper.
+  function formatearFechaDDMM(fechaIso){
+    var p = String(fechaIso || "").split("-");
+    return p.length === 3 ? (p[2] + "/" + p[1]) : (fechaIso || "");
+  }
+
   function actualizarTotalesCargarMes(){
     var trs = document.querySelectorAll("#cmTablaBody tr[data-idx]");
     var total = 0;
@@ -5478,9 +5859,15 @@
       var alerta = calcularAlertaPersonas(f.personas, f.nombresMesAnteriorList);
       var etiquetaHeredado = f.heredado === "automatico" ? {texto: "✓ heredado automáticamente del mes anterior", cls: "cm-heredado-ok"} :
         f.heredado === "aproximado" ? {texto: "✓ heredado por monto aproximado", cls: "cm-heredado-ok"} :
-        f.heredado === "ambiguo" ? {texto: "⚠ match ambiguo, revisar", cls: "cm-heredado-ambiguo"} : null;
+        f.heredado === "ambiguo" ? {texto: "⚠ match ambiguo, revisar", cls: "cm-heredado-ambiguo"} :
+        f.heredado === "gasto_diario" ? {
+          texto: "💡 Precargado desde tu gasto diario del " + formatearFechaDDMM(f.gastoDiarioOrigen && f.gastoDiarioOrigen.fecha) +
+            ": \"" + (f.gastoDiarioOrigen ? f.gastoDiarioOrigen.detalle : "") + "\" -- revisá si es la misma compra.",
+          cls: "cm-heredado-gasto-diario"
+        } : null;
       var filaNecesitaRevision = alerta || f.heredado === "ambiguo";
-      return "<tr data-idx=\"" + i + "\"" + (filaNecesitaRevision ? " class=\"cm-row-alerta\"" : "") + ">" +
+      var filaSugerenciaDiaria = !filaNecesitaRevision && f.heredado === "gasto_diario";
+      return "<tr data-idx=\"" + i + "\"" + (filaNecesitaRevision ? " class=\"cm-row-alerta\"" : (filaSugerenciaDiaria ? " class=\"cm-row-sugerencia-diaria\"" : "")) + ">" +
         "<td><input type=\"date\" class=\"cm-fecha\" value=\"" + escapeHtml(f.fecha) + "\"></td>" +
         "<td><input type=\"text\" class=\"cm-detalle\" value=\"" + escapeHtml(f.detalle) + "\"></td>" +
         "<td><input type=\"text\" class=\"cm-empresa\" list=\"empresasList\" value=\"" + escapeHtml(f.empresa || "") + "\" style=\"width:120px;\"></td>" +
@@ -5512,11 +5899,15 @@
         var idx = Number(tr.dataset.idx);
         var f = cmFilasActuales[idx] || {};
         // El usuario tomo el control de "Personas" a mano -- la marca de
-        // heredado automatico/aproximado/ambiguo queda obsoleta, se saca.
+        // heredado automatico/aproximado/ambiguo/gasto_diario queda
+        // obsoleta, se saca (incluyendo el resaltado de fila propio de la
+        // sugerencia de Gasto Diario, que no se maneja mas abajo como
+        // cm-row-alerta).
         if(f.heredado){
           f.heredado = null;
           var divH = tr.querySelector(".cm-heredado-txt");
           if(divH) divH.remove();
+          tr.classList.remove("cm-row-sugerencia-diaria");
         }
         var alerta = calcularAlertaPersonas(inp.value, f.nombresMesAnteriorList);
         var div = tr.querySelector(".cm-alerta-txt");
@@ -5540,7 +5931,13 @@
     reader.onload = function(){
       var bytes = new Uint8Array(reader.result);
       var promesa = tipo === "lider" ? parseLiderDesdeBytes(bytes) : parseFalabellaDesdeBytes(bytes);
-      promesa.then(function(filasNuevas){
+      promesa.then(function(resultado){
+        // parseLiderDesdeBytes ahora devuelve {filas, cuadre} (ver
+        // parseLiderLineas) para poder calcular los avisos de cuadre;
+        // parseFalabellaDesdeBytes sigue devolviendo solo el arreglo de
+        // filas -- Falabella todavia no tiene cuadre propio en la web.
+        var filasNuevas = tipo === "lider" ? resultado.filas : resultado;
+        var avisosCuadreLider = tipo === "lider" ? calcularAvisosCuadreLider(resultado.cuadre, filasNuevas) : [];
         if(tipo === "lider"){
           // origen/empresa propios para Lider (antes quedaban en el default
           // "IMPORTADO_PDF" mezclados con Falabella) -- asi el filtro "Ver
@@ -5550,12 +5947,21 @@
           // ninguna migracion para usarlo.
           filasNuevas.forEach(function(f){ f.origen = "LIDER"; f.empresa = "Lider"; });
         }
-        if(filasNuevas.length === 0){
-          mostrarMensajeCargarMes("No se detectó ningún gasto en el PDF -- revisa que sea el archivo correcto, o agregá filas a mano abajo.", "warn");
-        }else{
-          mostrarMensajeCargarMes("Se detectaron " + filasNuevas.length + " gastos. Revisalos abajo antes de confirmar.", "ok");
+        var msg = filasNuevas.length === 0
+          ? "No se detectó ningún gasto en el PDF -- revisa que sea el archivo correcto, o agregá filas a mano abajo."
+          : "Se detectaron " + filasNuevas.length + " gastos. Revisalos abajo antes de confirmar.";
+        // Avisos de cuadre de Lider: SIEMPRE visibles, nunca silenciosos --
+        // concatenados con un espacio en el mismo mensaje (mismo patron que
+        // ya usa el aviso de Deudas Adicionales mas abajo), porque ".note"
+        // no soporta saltos de linea.
+        if(avisosCuadreLider.length){
+          msg += " " + avisosCuadreLider.join(" ");
         }
-        aplicarMatchingAutomatico(filasNuevas);
+        mostrarMensajeCargarMes(msg, (filasNuevas.length === 0 || avisosCuadreLider.length) ? "warn" : "ok");
+        // 2do argumento "true": la red de contencion de Gastos Diarios (ver
+        // aplicarMatchingAutomatico/encontrarMatchGastoDiario) aplica para
+        // Falabella Y Lider por igual -- ambas pasan por aca.
+        aplicarMatchingAutomatico(filasNuevas, true);
         // El PDF no trae categoria propia (a diferencia de Deudas
         // Adicionales) -- se precarga con la sugerencia combinada (regla por
         // palabra clave primero, heuristica de "ultimo gasto igual" de
@@ -6688,6 +7094,15 @@
     aplicarMatchingAutomatico: aplicarMatchingAutomatico,
     candidatosGastosParaMatching: candidatosGastosParaMatching,
     encontrarMatchMesAnterior: encontrarMatchMesAnterior,
+    // Expuestos para probar el cuadre de Lider y el enganche con Gastos
+    // Diarios sin depender de simular la subida de un archivo (ver reporte
+    // final de esta tarea para el detalle de las pruebas).
+    parseLiderLineas: parseLiderLineas,
+    parseLiderDesdeBytes: parseLiderDesdeBytes,
+    parseFalabellaLineas: parseFalabellaLineas,
+    calcularAvisosCuadreLider: calcularAvisosCuadreLider,
+    candidatosGastoDiarioParaMatching: candidatosGastoDiarioParaMatching,
+    encontrarMatchGastoDiario: encontrarMatchGastoDiario,
     checklistCoberturaIngreso: checklistCoberturaIngreso,
     verificarCuadreMes: verificarCuadreMes,
     getCmFilas: function(){ return cmFilasActuales; },
