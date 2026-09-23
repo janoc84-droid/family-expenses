@@ -679,7 +679,8 @@
       <input type="text" id="ecBuscar" placeholder="Buscar deuda... (ej. Furgón, Netflix, Agua)" style="margin-bottom:8px;">
       <div class="cov-filtros" id="ecFiltroOrigen" style="flex-wrap:wrap; margin-bottom:10px;">
         <button type="button" class="btn-ghost cov-filtro-btn active" data-ecforigen="">Todas</button>
-        <button type="button" class="btn-ghost cov-filtro-btn" data-ecforigen="IMPORTADO_PDF">Importado (Falabella/Líder)</button>
+        <button type="button" class="btn-ghost cov-filtro-btn" data-ecforigen="IMPORTADO_PDF">Falabella</button>
+        <button type="button" class="btn-ghost cov-filtro-btn" data-ecforigen="LIDER">Líder</button>
         <button type="button" class="btn-ghost cov-filtro-btn" data-ecforigen="MANUAL">Manual</button>
         <button type="button" class="btn-ghost cov-filtro-btn" data-ecforigen="IMPORTADO_DEUDAS_ADICIONALES">Deudas Adicionales</button>
       </div>
@@ -2104,15 +2105,20 @@
   // Filtro "Ver solo" por origen (puerto de _filtro_origen en
   // estado_cuenta_screen.py) -- pedido explicito del usuario: poder revisar
   // rapido que a una persona le quedo todo bien cargado desde una fuente en
-  // particular. El escritorio distingue Falabella de Lider porque en su
-  // base ese import queda marcado con origen='MANUAL' + empresa='Lider'
-  // como caso especial (ver _categoria_item); la web no guarda esa marca
-  // (ambos PDF quedan como IMPORTADO_PDF), asi que ese balde queda unido
-  // aca como "Importado (Falabella/Líder)" en vez de separarlo en dos.
+  // particular, separando Falabella de Lider (antes quedaban juntos bajo
+  // "IMPORTADO_PDF" porque el parser de Lider en "Cargar mes" no marcaba
+  // origen propio -- ver procesarPdfCargarMes, que ahora si le pone
+  // origen="LIDER"). El fallback por empresa es para las pocas filas viejas
+  // que se cargaron ANTES de este cambio (quedaron con origen="MANUAL" +
+  // empresa="Lider", mismo criterio historico que usa el escritorio) -- sin
+  // eso, esas filas desaparecerian del filtro "Lider" y solo se verian en
+  // "Todas".
   var ecFiltroOrigen = null;
-  function ecCategoriaOrigen(origen){
+  function ecCategoriaOrigen(origen, empresa){
+    if(origen === "LIDER") return "LIDER";
     if(origen === "IMPORTADO_PDF") return "IMPORTADO_PDF";
     if(origen === "IMPORTADO_DEUDAS_ADICIONALES") return "IMPORTADO_DEUDAS_ADICIONALES";
+    if(String(empresa || "").trim().toLowerCase() === "lider") return "LIDER";
     return "MANUAL";
   }
 
@@ -2270,7 +2276,7 @@
     // _renderizar_items nunca tocan estado.items ni estado.total_mostrado).
     var busqueda = document.getElementById("ecBuscar").value.trim().toLowerCase();
     var itemsFiltrados = items.filter(function(it){
-      if(ecFiltroOrigen !== null && ecCategoriaOrigen(it.origen) !== ecFiltroOrigen) return false;
+      if(ecFiltroOrigen !== null && ecCategoriaOrigen(it.origen, it.empresa) !== ecFiltroOrigen) return false;
       if(!busqueda) return true;
       return (it.detalle||"").toLowerCase().indexOf(busqueda) >= 0 || (it.empresa||"").toLowerCase().indexOf(busqueda) >= 0;
     });
@@ -5535,6 +5541,15 @@
       var bytes = new Uint8Array(reader.result);
       var promesa = tipo === "lider" ? parseLiderDesdeBytes(bytes) : parseFalabellaDesdeBytes(bytes);
       promesa.then(function(filasNuevas){
+        if(tipo === "lider"){
+          // origen/empresa propios para Lider (antes quedaban en el default
+          // "IMPORTADO_PDF" mezclados con Falabella) -- asi el filtro "Ver
+          // solo" de Estado de Cuenta los puede separar (ver
+          // ecCategoriaOrigen). "LIDER" es un valor nuevo, sin CHECK en el
+          // esquema (gastos.origen es TEXT libre) asi que no hace falta
+          // ninguna migracion para usarlo.
+          filasNuevas.forEach(function(f){ f.origen = "LIDER"; f.empresa = "Lider"; });
+        }
         if(filasNuevas.length === 0){
           mostrarMensajeCargarMes("No se detectó ningún gasto en el PDF -- revisa que sea el archivo correcto, o agregá filas a mano abajo.", "warn");
         }else{
