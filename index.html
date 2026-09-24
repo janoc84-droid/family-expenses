@@ -5221,6 +5221,16 @@
     var montoPagadoPeriodoAnterior = null;
     var montoFacturadoPeriodoAnterior = null;
     var totalAbonos = 0;
+    // "2.2 Productos o servicios voluntariamente contratados" -- confirmado
+    // con los PDF reales del proyecto que viene SIEMPRE vacia (nada entre
+    // esta linea y "2.3"), pero puede traer un costo real (seguro de
+    // tarjeta, mantencion, etc.) que hoy no se procesa automatico -- se
+    // acumula tal cual para que procesarPdfCargarMes avise, nunca en
+    // silencio (mismo patron que enDetalle/enSeccion23 de arriba). Una
+    // linea sola con un "." (celda vacia de la tabla del PDF, ver el mismo
+    // caso en Lider) no cuenta como contenido real.
+    var enProductosVoluntarios = false;
+    var lineasProductosVoluntarios = [];
 
     lineas.forEach(function(lineaCruda){
       var linea = lineaCruda.trim();
@@ -5248,9 +5258,16 @@
         if(mFactAnt) montoFacturadoPeriodoAnterior = aMonto(mFactAnt[1]);
       }
 
-      if(linea === "2.1 Total Operaciones"){ enDetalle = true; enSeccion23 = false; return; }
-      if(linea.indexOf("2.3") === 0){ enDetalle = false; seccionActual = null; enSeccion23 = true; return; }
-      if(linea.indexOf("2.2") === 0 || linea.indexOf("III.") === 0){ enDetalle = false; seccionActual = null; enSeccion23 = false; return; }
+      if(linea === "2.1 Total Operaciones"){ enDetalle = true; enSeccion23 = false; enProductosVoluntarios = false; return; }
+      if(linea.indexOf("2.3") === 0){ enDetalle = false; seccionActual = null; enSeccion23 = true; enProductosVoluntarios = false; return; }
+      if(linea.indexOf("2.2") === 0 && /productos/i.test(linea)){ enDetalle = false; seccionActual = null; enSeccion23 = false; enProductosVoluntarios = true; return; }
+      if(linea.indexOf("2.2") === 0 || linea.indexOf("III.") === 0){ enDetalle = false; seccionActual = null; enSeccion23 = false; enProductosVoluntarios = false; return; }
+
+      if(enProductosVoluntarios){
+        // "." suelto = celda vacia de la tabla del PDF, no es contenido real.
+        if(linea !== ".") lineasProductosVoluntarios.push(linea);
+        return;
+      }
 
       if(enSeccion23){
         // "Pago tarjeta cmr" (con forma de RX_ABONO) es un abono -- plata ya
@@ -5297,6 +5314,7 @@
         totalAbonos: totalAbonos,
         montoPagadoPeriodoAnterior: montoPagadoPeriodoAnterior,
         montoFacturadoPeriodoAnterior: montoFacturadoPeriodoAnterior,
+        contenidoProductosVoluntarios: lineasProductosVoluntarios.length ? lineasProductosVoluntarios.join("\n") : null,
       }
     };
   }
@@ -5394,6 +5412,27 @@
   // Sin tilde en "Facturado" -- no necesita el comodin ".".
   var RX_LIDER_TOTAL_FACTURADO = new RegExp("Monto Total Facturado\\s*\\$?\\s*([\\d.]+)");
 
+  // ---- "ESTADO DE CUENTA INTERNACIONAL" (pagina aparte que Lider agrega
+  // SOLO el mes que hubo compras en el extranjero) -- agregado 24/09/2026.
+  // Confirmado extrayendo con pdf.js el PDF real de agosto (que este mes
+  // trae esta pagina, cerrando un saldo viejo en cero, sin compras nuevas):
+  // a diferencia del resto del PDF de Lider, estos 4 campos vienen con
+  // COMA decimal ("23,49"), no punto de miles -- por eso NO se puede
+  // reusar aMonto (asume punto de miles): aMontoDecimalUS reemplaza la
+  // PRIMERA coma por un punto antes de parseFloat. Ninguna de las 4
+  // etiquetas lleva tilde, asi que no hace falta el comodin "." ahi -- pero
+  // "Informaci.n de Transacciones" si lo lleva (misma razon defensiva que
+  // el resto de los regex de cuadre de Lider: pdf.js trajo la tilde bien en
+  // el PDF real que se probo, pero no hay garantia de que sea asi siempre).
+  function aMontoDecimalUS(t){ return parseFloat(String(t).replace(",", ".")) || 0; }
+
+  var RX_MONTO_DECIMAL_US = "-?[\\d.,]+";
+  var RX_LIDER_INTERNACIONAL_SALDO_ANTERIOR = new RegExp("Saldo Anterior Facturado US\\$\\s*(" + RX_MONTO_DECIMAL_US + ")");
+  var RX_LIDER_INTERNACIONAL_ABONO = new RegExp("Abono Realizado US\\$\\s*(" + RX_MONTO_DECIMAL_US + ")");
+  var RX_LIDER_INTERNACIONAL_TRASPASO = new RegExp("Traspaso Deuda Nacional US\\$\\s*(" + RX_MONTO_DECIMAL_US + ")");
+  var RX_LIDER_INTERNACIONAL_DEUDA_TOTAL = new RegExp("Deuda Total Facturada del Mes US\\$\\s*(" + RX_MONTO_DECIMAL_US + ")");
+  var RX_LIDER_INTERNACIONAL_INICIO_TRANSACCIONES = new RegExp("^2\\.\\s*Informaci.n de Transacciones");
+
   function parsearLineaLider(linea){
     // RX_LIDER_CUOTAS tiene 7 grupos: 1=lugar 2=fecha 3=descripcion
     // 4=montoOperacion 5=montoTotal 6=cuotas("NN/NN") 7=valorCuota -- el
@@ -5462,6 +5501,29 @@
     var montoFacturadoPeriodoAnterior = null;
     var montoPagadoPeriodoAnterior = null;
     var totalAbonos = 0;
+    // "2. Productos o Servicios Voluntariamente Contratados" -- confirmado
+    // con el PDF real del proyecto que viene vacia (solo un "." suelto,
+    // celda vacia de la tabla del PDF, entre esta linea y "3. Cargos"), pero
+    // puede traer un costo real (seguro de tarjeta, mantencion, etc.) que
+    // hoy no se procesa automatico -- se acumula tal cual para que
+    // procesarPdfCargarMes avise, nunca en silencio (mismo patron que
+    // enPeriodo/enSeccion3 de arriba, y que enProductosVoluntarios en
+    // parseFalabellaLineas).
+    var enProductosVoluntarios = false;
+    var lineasProductosVoluntarios = [];
+    // "ESTADO DE CUENTA INTERNACIONAL": pagina aparte que Lider agrega SOLO
+    // el mes que hubo compras en el extranjero -- ver aMontoDecimalUS/
+    // RX_LIDER_INTERNACIONAL_* mas arriba para el detalle de los 4 campos.
+    // Una vez visto el marcador, TODO lo que sigue se trata como parte de
+    // esta seccion (nunca como cargos/operaciones normales de la tarjeta
+    // nacional), asi que queda completamente aislada del resto del parseo.
+    var enSeccionInternacional = false;
+    var enInternacionalTransacciones = false;
+    var lineasInternacionalTransacciones = [];
+    var internacionalSaldoAnterior = null;
+    var internacionalAbono = null;
+    var internacionalTraspaso = null;
+    var internacionalDeudaTotalMes = null;
 
     lineas.forEach(function(lineaCruda){
       var linea = lineaCruda.trim();
@@ -5490,10 +5552,51 @@
         if(mPagadoAnt) montoPagadoPeriodoAnterior = aMonto(mPagadoAnt[1]);
       }
 
-      if(linea === "1. Total Operaciones"){ enPeriodo = true; return; }
-      if(linea.indexOf("2. Productos") === 0){ enPeriodo = false; return; }
-      if(linea.indexOf("3. Cargos") === 0){ enPeriodo = false; enSeccion3 = true; return; }
-      if(linea.indexOf("III.") === 0){ enSeccion3 = false; return; }
+      if(linea === "1. Total Operaciones"){ enPeriodo = true; enProductosVoluntarios = false; return; }
+      if(linea.indexOf("2. Productos") === 0){ enPeriodo = false; enProductosVoluntarios = true; return; }
+      if(linea.indexOf("3. Cargos") === 0){ enPeriodo = false; enSeccion3 = true; enProductosVoluntarios = false; return; }
+      if(linea.indexOf("III.") === 0){ enSeccion3 = false; enProductosVoluntarios = false; return; }
+
+      if(enProductosVoluntarios){
+        // "." suelto = celda vacia de la tabla del PDF, no es contenido real.
+        if(linea !== ".") lineasProductosVoluntarios.push(linea);
+        return;
+      }
+
+      // Marcador de la pagina aparte -- ver comentario de enSeccionInternacional
+      // arriba. No lleva tilde, no hace falta el comodin ".".
+      if(linea.indexOf("ESTADO DE CUENTA INTERNACIONAL") === 0){
+        enSeccionInternacional = true;
+        enInternacionalTransacciones = false;
+        return;
+      }
+
+      if(enSeccionInternacional){
+        if(internacionalSaldoAnterior === null){
+          var mSaldoAnt = RX_LIDER_INTERNACIONAL_SALDO_ANTERIOR.exec(linea);
+          if(mSaldoAnt) internacionalSaldoAnterior = aMontoDecimalUS(mSaldoAnt[1]);
+        }
+        if(internacionalAbono === null){
+          var mAbonoInt = RX_LIDER_INTERNACIONAL_ABONO.exec(linea);
+          if(mAbonoInt) internacionalAbono = aMontoDecimalUS(mAbonoInt[1]);
+        }
+        if(internacionalTraspaso === null){
+          var mTraspasoInt = RX_LIDER_INTERNACIONAL_TRASPASO.exec(linea);
+          if(mTraspasoInt) internacionalTraspaso = aMontoDecimalUS(mTraspasoInt[1]);
+        }
+        if(internacionalDeudaTotalMes === null){
+          var mDeudaTotalInt = RX_LIDER_INTERNACIONAL_DEUDA_TOTAL.exec(linea);
+          if(mDeudaTotalInt) internacionalDeudaTotalMes = aMontoDecimalUS(mDeudaTotalInt[1]);
+        }
+        // Texto crudo, tal cual, entre "2. Informacion de Transacciones" y
+        // "COPIA EMISOR" (pedido explicito: no se intenta estructurar esto,
+        // el formato con contenido real es desconocido -- ver comentario de
+        // parseFalabellaLineas/enProductosVoluntarios para el mismo criterio).
+        if(linea.indexOf("COPIA EMISOR") === 0){ enInternacionalTransacciones = false; return; }
+        if(RX_LIDER_INTERNACIONAL_INICIO_TRANSACCIONES.test(linea)){ enInternacionalTransacciones = true; return; }
+        if(enInternacionalTransacciones) lineasInternacionalTransacciones.push(linea);
+        return;
+      }
 
       if(enSeccion3){
         if(RX_LIDER_SUBTOTAL.test(linea)) return;
@@ -5533,6 +5636,12 @@
         totalAbonos: totalAbonos,
         montoPagadoPeriodoAnterior: montoPagadoPeriodoAnterior,
         montoFacturadoPeriodoAnterior: montoFacturadoPeriodoAnterior,
+        contenidoProductosVoluntarios: lineasProductosVoluntarios.length ? lineasProductosVoluntarios.join("\n") : null,
+        internacionalSaldoAnterior: internacionalSaldoAnterior,
+        internacionalAbono: internacionalAbono,
+        internacionalTraspaso: internacionalTraspaso,
+        internacionalDeudaTotalMes: internacionalDeudaTotalMes,
+        internacionalContenidoCrudo: lineasInternacionalTransacciones.length ? lineasInternacionalTransacciones.join("\n") : null,
       }
     };
   }
@@ -6138,6 +6247,46 @@
         var avisosCuadre = tipo === "lider"
           ? calcularAvisosCuadreLider(resultado.cuadre, filasNuevas)
           : calcularAvisosCuadreFalabella(resultado.cuadre, filasNuevas);
+        // Avisos nuevos (24/09/2026): "Productos o servicios voluntariamente
+        // contratados" (Falabella y Lider) y, solo Lider, "Estado de Cuenta
+        // Internacional" -- ver parseFalabellaLineas/parseLiderLineas para
+        // el detalle de que se detecta y por que NUNCA se procesan solos
+        // (el formato con contenido real es desconocido, adivinarlo es
+        // peligroso). Si traen algo, se avisa tal cual como texto crudo
+        // para que se revise a mano -- mismo mecanismo (nunca silencioso,
+        // mismo array "avisosCuadre" que ya se muestra con
+        // mostrarMensajeCargarMes) que los avisos de cuadre de arriba.
+        if(resultado.cuadre.contenidoProductosVoluntarios !== null){
+          var nombreBancoAviso = tipo === "lider" ? "Líder" : "Falabella";
+          var nombreSeccionAviso = tipo === "lider" ? "Productos o Servicios Voluntariamente Contratados" : "Productos o servicios voluntariamente contratados";
+          avisosCuadre.push(
+            "ℹ️ El PDF de " + nombreBancoAviso + " trae algo en '" + nombreSeccionAviso + "' que no se " +
+            "procesa automático (puede ser un seguro de tarjeta, mantención u otro costo real): \"" +
+            resultado.cuadre.contenidoProductosVoluntarios + "\". Revisalo a mano -- si corresponde asignarle un " +
+            "costo a alguien, agregalo a mano abajo en la tabla. Si no se revisa, podría explicar un descuadre que " +
+            "no se detecte en los otros chequeos."
+          );
+        }
+        // Disparador: SOLO si queda deuda internacional pendiente de verdad
+        // (> 1 centavo, para no disparar por ruido de coma flotante en
+        // 0.00) -- internacionalContenidoCrudo (encabezados de columna +
+        // la linea de traspaso rutinaria) va a estar presente TODOS los
+        // meses que esta pagina exista, tenga o no compras nuevas, asi que
+        // NO sirve como condicion del disparador (si lo fuera, avisaria
+        // hasta en un mes que solo cierra un saldo viejo en cero, sin nada
+        // real que decidir) -- confirmado con el PDF real de Lider de
+        // agosto. Igual se sigue capturando e incluyendo en el texto del
+        // aviso mas abajo -- solo dejo de ser LA razon para avisar.
+        if(tipo === "lider" && resultado.cuadre.internacionalDeudaTotalMes !== null &&
+           resultado.cuadre.internacionalDeudaTotalMes > 0.01){
+          avisosCuadre.push(
+            "ℹ️ Este mes el PDF de Líder también trae un Estado de Cuenta Internacional (compras en el extranjero). " +
+            "Deuda Total Facturada del Mes: US$ " + resultado.cuadre.internacionalDeudaTotalMes.toFixed(2) + ". " +
+            (resultado.cuadre.internacionalContenidoCrudo ? "Detalle: \"" + resultado.cuadre.internacionalContenidoCrudo + "\". " : "") +
+            "El traspaso a pesos ya se incluye como cargo normal en el estado de cuenta nacional, pero este detalle " +
+            "en dólares no se procesa más allá de eso -- revisalo a mano si necesitas saber a qué compra corresponde."
+          );
+        }
         if(tipo === "lider"){
           // origen/empresa propios para Lider (antes quedaban en el default
           // "IMPORTADO_PDF" mezclados con Falabella) -- asi el filtro "Ver
@@ -7313,6 +7462,12 @@
     parseFalabellaDesdeBytes: parseFalabellaDesdeBytes,
     calcularAvisosCuadreLider: calcularAvisosCuadreLider,
     calcularAvisosCuadreFalabella: calcularAvisosCuadreFalabella,
+    // Extraccion cruda de lineas de pdf.js -- expuesta para poder comparar
+    // el texto real que da pdf.js contra lo que asumen los regex de cuadre
+    // (mismo criterio que el resto de este objeto: probar sin simular la
+    // subida de un archivo).
+    extraerLineasPdf: extraerLineasPdf,
+    extraerLineasPdfConClave: extraerLineasPdfConClave,
     candidatosGastoDiarioParaMatching: candidatosGastoDiarioParaMatching,
     encontrarMatchGastoDiario: encontrarMatchGastoDiario,
     checklistCoberturaIngreso: checklistCoberturaIngreso,
