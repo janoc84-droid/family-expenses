@@ -67,12 +67,21 @@
      proposito: un estilo inline SIEMPRE le gana a una regla de CSS externa
      salvo que esta tenga !important -- por eso no alcanza con poner la
      regla nueva aca, tiene que llevar !important si o si. */
+  .btn-herramientas{ display:none; }  /* solo aparece en telefono (dentro del @media, mas abajo) */
   @media (max-width:600px){
     .cm-empresa, .cm-categoria{ width:90px !important; }
     .cm-monto{ width:78px !important; }
     .cm-cuota{ width:50px !important; }
     .cm-personas{ width:110px !important; }
     table.data-table th, table.data-table td{ padding:6px 4px !important; }
+    /* En telefono los botones de respaldo/sincronizacion (siempre disponibles,
+       por si hace falta en una emergencia) se pliegan detras de un solo
+       boton: si no, ocupan mas de la mitad de la primera pantalla y el
+       formulario de Gastos Diarios -- lo que mas se usa desde el celular --
+       queda escondido debajo. Los textos de estado y el aviso "Reconectar
+       carpeta" NO se pliegan: siguen visibles. */
+    .btn-herramientas{ display:inline-flex; }
+    .data-tools:not(.abierto) > .btn-ghost:not(.btn-herramientas):not(#btnSyncReconectar){ display:none; }
   }
   /* boton de tema: fuerza un modo aunque el sistema prefiera el otro */
   :root[data-theme="light"]{
@@ -481,7 +490,8 @@
         <button id="themeToggle" class="theme-btn" type="button" title="Cambiar tema">🌙</button>
       </div>
     </div>
-    <div class="data-tools">
+    <div class="data-tools" id="dataTools">
+      <button id="btnHerramientas" class="btn-ghost btn-herramientas" type="button" aria-expanded="false" aria-controls="dataTools">⋯ Respaldo y sincronización</button>
       <button id="btnExportar" class="btn-ghost" type="button">⬇ Descargar copia de la base</button>
       <button id="btnImportarTrigger" class="btn-ghost" type="button">⬆ Restaurar desde un archivo</button>
       <input type="file" id="inputImportar" accept=".sqlite,.db,.sqlite3" hidden>
@@ -1520,6 +1530,25 @@
   document.querySelectorAll(".tab-btn").forEach(function(btn){
     btn.addEventListener("click", function(){ activarTab(btn.dataset.tab); });
   });
+
+  // Boton "Respaldo y sincronizacion" (solo visible en telefono, ver el
+  // @media de arriba): abre/cierra el panel de herramientas de datos, y lo
+  // vuelve a cerrar apenas se usa una de ellas para que no quede tapando la
+  // pantalla (el encabezado es "sticky").
+  (function(){
+    var panel = document.getElementById("dataTools");
+    var toggle = document.getElementById("btnHerramientas");
+    if(!panel || !toggle) return;
+    function fijar(abierto){
+      panel.classList.toggle("abierto", abierto);
+      toggle.setAttribute("aria-expanded", abierto ? "true" : "false");
+    }
+    toggle.addEventListener("click", function(){ fijar(!panel.classList.contains("abierto")); });
+    panel.addEventListener("click", function(e){
+      var b = e.target.closest ? e.target.closest("button") : null;
+      if(b && b !== toggle) fijar(false);
+    });
+  })();
 
   // ---------------------------------------------------------------- atajos de teclado
   // Puerto de los atajos del escritorio (F1-F8 saltan directo a cada
@@ -7542,7 +7571,10 @@
 
     var lastTab = null;
     try{ lastTab = localStorage.getItem("gf_lastTab"); }catch(e){}
-    activarTab(lastTab || "ingreso");
+    // La primera vez (o con el almacenamiento vacio) se abre en Gastos Diarios:
+    // es para lo que mas se usa la web (anotar gastos del dia desde el
+    // celular). Despues recuerda la ultima pestana usada, como siempre.
+    activarTab(lastTab || "gastosdiarios");
 
     document.getElementById("appLoading").hidden = true;
 
