@@ -5074,10 +5074,13 @@
   // ---------------------------------------------------------------- Cargar mes: parser Falabella/CMR
   // Traduccion directa de las expresiones regulares de pdf_falabella.py --
   // ver ese archivo para la explicacion completa de cada seccion del PDF.
-  // Simplificacion a proposito: no se valida el "cuadre" contra los totales
-  // que declara el propio PDF (monto_total_facturado, abonos, etc.) -- esa
-  // reconciliacion es solo informativa en la app de escritorio, y aca se
-  // prioriza que el flujo de extraccion + revision funcione de punta a punta.
+  // Desde el 23/09/2026 esta seccion TAMBIEN calcula el cuadre real contra
+  // los totales que declara el propio PDF (monto_total_facturado, abonos,
+  // etc.), igual que ya lo hace la app de escritorio desde siempre y que
+  // Lider ya tiene en la web -- ya no es "solo informativo en el
+  // escritorio", asi que la simplificacion que habia aca (extraer los
+  // cargos pero nunca cuadrarlos) quedo eliminada. Ver parseFalabellaLineas
+  // (devuelve {filas, cuadre}) y calcularAvisosCuadreFalabella() mas abajo.
 
   var FALABELLA_SECCIONES = ["FALABELLA", "HOMECENTER - SODIMAC", "TOTTUS", "PAT", "COMPRAS NACIONALES", "COMPRAS INTERNACIONALES", "OTROS"];
   var MESES_ABR_A_NUM = {ene:1, feb:2, mar:3, abr:4, may:5, jun:6, jul:7, ago:8, sep:9, oct:10, nov:11, dic:12};
@@ -5092,6 +5095,21 @@
   var RX_CARGO_SIN_PRIMER = new RegExp("^(.*?)\\s*(" + RX_FECHA + ")\\s+(.+?)\\s+T\\s+(" + RX_MONTO + ")\\s+(" + RX_MONTO + ")\\s+(" + RX_CUOTAS + ")\\s+(" + RX_MONTO + ")\\s*$");
   var RX_ABONO = new RegExp("^(.*?)\\s*(" + RX_FECHA + ")\\s+(.+?)\\s+T\\s+(" + RX_MONTO + ")\\s+(" + RX_MONTO + ")\\s+(" + RX_CUOTAS + ")\\s*$");
   var RX_SECCION_23 = new RegExp("^(" + RX_FECHA + ")\\s+(.+?)\\s+(" + RX_MONTO + ")\\s+(" + RX_MONTO + ")\\s+(" + RX_MONTO + ")\\s*$");
+
+  // Campos de cuadre (nivel documento, no por linea de cargo) -- traduccion
+  // directa de _RE_TOTAL_FACTURADO / _RE_PERIODO_FACTURADO /
+  // _RE_MONTO_PAGADO_ANTERIOR / _RE_MONTO_FACTURADO_ANTERIOR en
+  // pdf_falabella.py. A diferencia de Lider, se confirmo extrayendo un PDF
+  // Falabella real con pdf.js (mismo motor que usa extraerLineasPdf) que
+  // aca las tildes SI vienen bien codificadas ("Período", no un caracter
+  // mutilado) -- pero se usa igual "." (cualquier caracter) en el lugar de
+  // la letra acentuada, mismo criterio defensivo que ya usan los regex de
+  // cuadre de Lider, para no depender de que la codificacion de un PDF
+  // futuro (u otra version de pdf.js) venga bien.
+  var RX_FALABELLA_TOTAL_FACTURADO = new RegExp("Monto Total Facturado a Pagar\\s*\\$?\\s*([\\d.]+)");
+  var RX_FALABELLA_PERIODO_FACTURADO = new RegExp("Per.odo Facturado\\s*(" + RX_FECHA + ")\\s*(" + RX_FECHA + ")");
+  var RX_FALABELLA_MONTO_PAGADO_ANTERIOR = new RegExp("Monto pagado per.odo anterior\\s*(-?[\\d.]+)");
+  var RX_FALABELLA_MONTO_FACTURADO_ANTERIOR = new RegExp("Monto facturado o a pagar per.odo anterior\\s*(-?[\\d.]+)");
 
   function aMonto(t){ return parseFloat(String(t).replace(/\./g, "")) || 0; }
   function fechaISOdesdeDDMMYYYY(txt){
@@ -5142,12 +5160,49 @@
     return null;
   }
 
+  // Devuelve {filas, cuadre} -- mismo patron que parseLiderLineas. `cuadre`
+  // trae los mismos campos que EstadoCuentaPdf en pdf_falabella.py
+  // (montoTotalFacturado, periodo desde/hasta, totalAbonos, montoPagado/
+  // FacturadoPeriodoAnterior), para que procesarPdfCargarMes pueda calcular
+  // los avisos de cuadre (ver calcularAvisosCuadreFalabella mas abajo). El
+  // parseo de cada LINEA de cargo (parsearLineaCargoFalabella, RX_CARGO_*)
+  // no cambio -- esta funcion solo ahora tambien junta los campos de cuadre
+  // a nivel de documento y la suma de abonos de la seccion 2.3.
   function parseFalabellaLineas(lineas){
     var filas = [];
     var enDetalle = false, enSeccion23 = false, seccionActual = null;
+    var montoTotalFacturado = null;
+    var periodoDesde = null;
+    var periodoHasta = null;
+    var montoPagadoPeriodoAnterior = null;
+    var montoFacturadoPeriodoAnterior = null;
+    var totalAbonos = 0;
+
     lineas.forEach(function(lineaCruda){
       var linea = lineaCruda.trim();
       if(!linea) return;
+
+      // Campos de cuadre: pueden aparecer en cualquier linea (estan en "DE
+      // PAGO" e "I." antes de "2.1 Total Operaciones", o en "III." despues
+      // de "2.3") -- se revisan SIEMPRE, mismo patron que parseLiderLineas y
+      // que parse_pdf en pdf_falabella.py. El guard de "es null" evita que
+      // un texto repetido en una pagina siguiente pise el valor ya encontrado.
+      if(montoTotalFacturado === null){
+        var mTotal = RX_FALABELLA_TOTAL_FACTURADO.exec(linea);
+        if(mTotal) montoTotalFacturado = aMonto(mTotal[1]);
+      }
+      if(periodoDesde === null){
+        var mPeriodo = RX_FALABELLA_PERIODO_FACTURADO.exec(linea);
+        if(mPeriodo){ periodoDesde = mPeriodo[1]; periodoHasta = mPeriodo[2]; }
+      }
+      if(montoPagadoPeriodoAnterior === null){
+        var mPagadoAnt = RX_FALABELLA_MONTO_PAGADO_ANTERIOR.exec(linea);
+        if(mPagadoAnt) montoPagadoPeriodoAnterior = aMonto(mPagadoAnt[1]);
+      }
+      if(montoFacturadoPeriodoAnterior === null){
+        var mFactAnt = RX_FALABELLA_MONTO_FACTURADO_ANTERIOR.exec(linea);
+        if(mFactAnt) montoFacturadoPeriodoAnterior = aMonto(mFactAnt[1]);
+      }
 
       if(linea === "2.1 Total Operaciones"){ enDetalle = true; enSeccion23 = false; return; }
       if(linea.indexOf("2.3") === 0){ enDetalle = false; seccionActual = null; enSeccion23 = true; return; }
@@ -5155,9 +5210,12 @@
 
       if(enSeccion23){
         // "Pago tarjeta cmr" (con forma de RX_ABONO) es un abono -- plata ya
-        // pagada, nunca un gasto a repartir. Cualquier otra linea con 3
-        // montos (RX_SECCION_23, ej. un impuesto mensual) SI es un cargo real.
-        if(RX_ABONO.exec(linea)) return;
+        // pagada, nunca un gasto a repartir; se suma a totalAbonos solo para
+        // poder validar el cuadre (ver calcularAvisosCuadreFalabella).
+        // Cualquier otra linea con 3 montos (RX_SECCION_23, ej. un impuesto
+        // mensual) SI es un cargo real.
+        var mAbono23 = RX_ABONO.exec(linea);
+        if(mAbono23){ totalAbonos += aMonto(mAbono23[4]); return; }
         var mCargo23 = RX_SECCION_23.exec(linea);
         if(mCargo23){
           filas.push({fecha: fechaISOdesdeDDMMYYYY(mCargo23[1]), detalle: mCargo23[2].trim(), monto: aMonto(mCargo23[5]), cuota: "01/01", personas: ""});
@@ -5176,7 +5234,66 @@
       var fechaFila = cargo.primerCargoMes ? fechaDesdeMesAnio(cargo.primerCargoMes, cargo.primerCargoAnio, 1) : cargo.fechaCompra;
       filas.push({fecha: fechaFila || cargo.fechaCompra, detalle: detalleFinal, monto: cargo.valorCuota, cuota: cargo.cuotaTexto || "01/01", personas: ""});
     });
-    return filas;
+
+    return {
+      filas: filas,
+      cuadre: {
+        montoTotalFacturado: montoTotalFacturado,
+        periodoDesde: periodoDesde,
+        periodoHasta: periodoHasta,
+        totalAbonos: totalAbonos,
+        montoPagadoPeriodoAnterior: montoPagadoPeriodoAnterior,
+        montoFacturadoPeriodoAnterior: montoFacturadoPeriodoAnterior,
+      }
+    };
+  }
+
+  // Traduccion directa del bloque "if pdf_path:" de import_service.py: dos
+  // chequeos de cuadre independientes (mismo espiritu que Lider, ver
+  // calcularAvisosCuadreLider justo abajo del parser de Lider), nunca
+  // silenciosos -- si algo no calza, se muestran los numeros reales para que
+  // se revise a mano. Los mensajes siguen el texto de import_service.py (no
+  // el de Lider -- son avisos mas cortos, sin "(diferencia: ...)", porque
+  // asi esta escrito el original de Falabella) formateados con money() en
+  // vez del `:,.0f` que usa Python. `filas` son las YA parseadas por
+  // parseFalabellaLineas (seccion 2.1 + cargos positivos de 2.3), para sumar
+  // el mismo "monto_conciliado_pdf" que el escritorio (suma de valor_cuota
+  // de TODOS los cargos).
+  function calcularAvisosCuadreFalabella(cuadre, filas){
+    var avisos = [];
+    var montoConciliadoPdf = filas.reduce(function(a, f){ return a + (Number(f.monto) || 0); }, 0);
+    var excesoPagadoPeriodoAnterior = 0;
+
+    if(cuadre.montoPagadoPeriodoAnterior !== null){
+      var diferencia = Math.abs(cuadre.totalAbonos - cuadre.montoPagadoPeriodoAnterior);
+      if(diferencia > 1){
+        avisos.push(
+          "⚠ Los pagos a la tarjeta que encontré en el PDF suman " + money(cuadre.totalAbonos) +
+          " pero el PDF declara " + money(cuadre.montoPagadoPeriodoAnterior) + " de 'Monto pagado período " +
+          "anterior' -- puede que se me haya escapado una línea de pago en la sección 'Cargos, Comisiones, " +
+          "Impuestos y Abonos'. Revisá el PDF a mano para este mes."
+        );
+      }
+      if(cuadre.montoFacturadoPeriodoAnterior !== null){
+        excesoPagadoPeriodoAnterior = Math.max(0, Math.abs(cuadre.montoPagadoPeriodoAnterior) - cuadre.montoFacturadoPeriodoAnterior);
+      }
+    }
+
+    if(cuadre.montoTotalFacturado !== null){
+      var montoNetoPdf = montoConciliadoPdf - excesoPagadoPeriodoAnterior;
+      var diferenciaCuadre = Math.abs(montoNetoPdf - cuadre.montoTotalFacturado);
+      if(diferenciaCuadre > 10){
+        avisos.push(
+          "⚠ El cuadre de la Falabella no calzó: sumando las cuotas del mes (" + money(montoConciliadoPdf) +
+          ") y restando el abono por adelantado del mes anterior (" + money(excesoPagadoPeriodoAnterior) +
+          ") da " + money(montoNetoPdf) + ", pero el PDF declara " + money(cuadre.montoTotalFacturado) +
+          " de 'Monto Total Facturado a Pagar'. Puede que se me haya escapado o mal leído una línea de " +
+          "cargo en la sección '2.1 Total Operaciones'. Revisá el PDF a mano para este mes."
+        );
+      }
+    }
+
+    return avisos;
   }
 
   function parseFalabellaDesdeBytes(bytes){
@@ -5232,10 +5349,14 @@
     // monto. (Antes estaban cambiados: m[6]/m[5] en vez de m[7]/m[6], asi
     // que una compra en cuotas de Lider quedaba con un monto absurdo tipo
     // "3" en vez del valor real de la cuota.)
+    // "lugar" (grupo 1, ciudad/sucursal donde se hizo la compra) se agrega
+    // al objeto igual que ya hace parsearLineaCargoFalabella -- quien
+    // llama (parseLiderLineas) lo pega al detalle final, mismo criterio
+    // que Falabella (ver detalleFinal en parseFalabellaLineas).
     var m = RX_LIDER_CUOTAS.exec(linea);
-    if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[7]), cuota: m[6]};
+    if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[7]), cuota: m[6], lugar: m[1] ? m[1].trim() : ""};
     m = RX_LIDER_SIMPLE.exec(linea);
-    if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[4]), cuota: "01/01"};
+    if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[4]), cuota: "01/01", lugar: m[1] ? m[1].trim() : ""};
     return null;
   }
 
@@ -5332,7 +5453,14 @@
 
       if(!enPeriodo || RX_LIDER_SUBTOTAL.test(linea)) return;
       var item = parsearLineaLider(linea);
-      if(item){ item.personas = ""; filas.push(item); }
+      if(item){
+        // mismo criterio que parseFalabellaLineas (ver detalleFinal ahi):
+        // el lugar se pega al detalle final entre parentesis, solo cuando
+        // el PDF lo trajo.
+        item.detalle = item.detalle + (item.lugar ? " (" + item.lugar + ")" : "");
+        item.personas = "";
+        filas.push(item);
+      }
     });
 
     return {
@@ -5932,12 +6060,14 @@
       var bytes = new Uint8Array(reader.result);
       var promesa = tipo === "lider" ? parseLiderDesdeBytes(bytes) : parseFalabellaDesdeBytes(bytes);
       promesa.then(function(resultado){
-        // parseLiderDesdeBytes ahora devuelve {filas, cuadre} (ver
-        // parseLiderLineas) para poder calcular los avisos de cuadre;
-        // parseFalabellaDesdeBytes sigue devolviendo solo el arreglo de
-        // filas -- Falabella todavia no tiene cuadre propio en la web.
-        var filasNuevas = tipo === "lider" ? resultado.filas : resultado;
-        var avisosCuadreLider = tipo === "lider" ? calcularAvisosCuadreLider(resultado.cuadre, filasNuevas) : [];
+        // parseLiderDesdeBytes y parseFalabellaDesdeBytes devuelven ambas
+        // {filas, cuadre} (ver parseLiderLineas / parseFalabellaLineas) para
+        // poder calcular los avisos de cuadre de cada una con su propia
+        // funcion (mismos campos de cuadre, formulas propias de cada banco).
+        var filasNuevas = resultado.filas;
+        var avisosCuadre = tipo === "lider"
+          ? calcularAvisosCuadreLider(resultado.cuadre, filasNuevas)
+          : calcularAvisosCuadreFalabella(resultado.cuadre, filasNuevas);
         if(tipo === "lider"){
           // origen/empresa propios para Lider (antes quedaban en el default
           // "IMPORTADO_PDF" mezclados con Falabella) -- asi el filtro "Ver
@@ -5950,14 +6080,14 @@
         var msg = filasNuevas.length === 0
           ? "No se detectó ningún gasto en el PDF -- revisa que sea el archivo correcto, o agregá filas a mano abajo."
           : "Se detectaron " + filasNuevas.length + " gastos. Revisalos abajo antes de confirmar.";
-        // Avisos de cuadre de Lider: SIEMPRE visibles, nunca silenciosos --
-        // concatenados con un espacio en el mismo mensaje (mismo patron que
-        // ya usa el aviso de Deudas Adicionales mas abajo), porque ".note"
-        // no soporta saltos de linea.
-        if(avisosCuadreLider.length){
-          msg += " " + avisosCuadreLider.join(" ");
+        // Avisos de cuadre (Lider o Falabella, segun tipo): SIEMPRE
+        // visibles, nunca silenciosos -- concatenados con un espacio en el
+        // mismo mensaje (mismo patron que ya usa el aviso de Deudas
+        // Adicionales mas abajo), porque ".note" no soporta saltos de linea.
+        if(avisosCuadre.length){
+          msg += " " + avisosCuadre.join(" ");
         }
-        mostrarMensajeCargarMes(msg, (filasNuevas.length === 0 || avisosCuadreLider.length) ? "warn" : "ok");
+        mostrarMensajeCargarMes(msg, (filasNuevas.length === 0 || avisosCuadre.length) ? "warn" : "ok");
         // 2do argumento "true": la red de contencion de Gastos Diarios (ver
         // aplicarMatchingAutomatico/encontrarMatchGastoDiario) aplica para
         // Falabella Y Lider por igual -- ambas pasan por aca.
@@ -7094,13 +7224,15 @@
     aplicarMatchingAutomatico: aplicarMatchingAutomatico,
     candidatosGastosParaMatching: candidatosGastosParaMatching,
     encontrarMatchMesAnterior: encontrarMatchMesAnterior,
-    // Expuestos para probar el cuadre de Lider y el enganche con Gastos
-    // Diarios sin depender de simular la subida de un archivo (ver reporte
-    // final de esta tarea para el detalle de las pruebas).
+    // Expuestos para probar el cuadre de Lider y Falabella y el enganche
+    // con Gastos Diarios sin depender de simular la subida de un archivo
+    // (ver reporte final de esta tarea para el detalle de las pruebas).
     parseLiderLineas: parseLiderLineas,
     parseLiderDesdeBytes: parseLiderDesdeBytes,
     parseFalabellaLineas: parseFalabellaLineas,
+    parseFalabellaDesdeBytes: parseFalabellaDesdeBytes,
     calcularAvisosCuadreLider: calcularAvisosCuadreLider,
+    calcularAvisosCuadreFalabella: calcularAvisosCuadreFalabella,
     candidatosGastoDiarioParaMatching: candidatosGastoDiarioParaMatching,
     encontrarMatchGastoDiario: encontrarMatchGastoDiario,
     checklistCoberturaIngreso: checklistCoberturaIngreso,
