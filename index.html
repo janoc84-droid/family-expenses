@@ -6882,15 +6882,21 @@
               var cRow = dbGet("SELECT nombre FROM categorias WHERE id=?", [existente.categoria_id]);
               catActualNombre = cRow ? cRow.nombre : "";
             }
+            // descripcion (texto original del banco) vacia en lo que llega =
+            // "ese dispositivo no la conoce" (ej. la app de escritorio, hasta
+            // que se actualice para enviarla, o cualquier version vieja) --
+            // NUNCA debe borrar la que ya tenemos guardada localmente; solo
+            // se pisa cuando llega una con contenido.
+            var descripcionFinal = descripcionOriginal || String(existente.descripcion || "");
             var igual = (existente.empresa || "") === empresa &&
                         catActualNombre === categoriaNombre &&
                         (existente.cuota_texto || "1") === cuota &&
-                        (existente.descripcion || "") === descripcionOriginal &&
+                        (existente.descripcion || "") === descripcionFinal &&
                         repartosIguales(repartoActual, repartoIn);
             if(igual) return;
             var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
             db.run("UPDATE gastos SET empresa=?, categoria_id=?, cuota_texto=?, descripcion=? WHERE id=?",
-              [empresa || null, categoriaId, cuota, descripcionOriginal || null, existente.id]);
+              [empresa || null, categoriaId, cuota, descripcionFinal || null, existente.id]);
             db.run("DELETE FROM gasto_persona WHERE gasto_id=?", [existente.id]);
             Object.keys(repartoIn).forEach(function(nombre){
               var personaId = obtenerOCrearPersona(nombre);
