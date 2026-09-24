@@ -971,6 +971,7 @@
     "  mes INTEGER NOT NULL CHECK (mes BETWEEN 1 AND 12),",
     "  fecha TEXT NOT NULL,",
     "  detalle TEXT NOT NULL,",
+    "  descripcion TEXT,",
     "  empresa TEXT,",
     "  categoria_id INTEGER REFERENCES categorias(id),",
     "  monto_total REAL NOT NULL,",
@@ -1175,6 +1176,16 @@
         dbRef.run("ALTER TABLE gastos_diarios ADD COLUMN " + def);
       }
     });
+    // gastos.descripcion: texto CRUDO tal cual vino del banco (Falabella/
+    // Lider), capturado ANTES de pisar detalle con el nombre amigable
+    // (heredado del mes anterior o precargado desde un Gasto Diario) -- para
+    // poder confirmar que la fila no se equivoco de compra, aunque el banco
+    // la haya escrito distinto (ver boton "Ver texto original del banco" en
+    // Cargar mes/Estado de Cuenta). Mismo campo que Gastos.descripcion en el
+    // escritorio -- instalaciones previas de la web no tenian esta columna.
+    if(!tieneColumna("gastos", "descripcion")){
+      dbRef.run("ALTER TABLE gastos ADD COLUMN descripcion TEXT");
+    }
   }
 
   // ---------------------------------------------------------------- utiles
@@ -1436,7 +1447,16 @@
   // fecha original del gasto diario se conserva pero el "balde" anio/mes de
   // destino puede ser otro mes elegido por el usuario (igual idea que
   // mes_importado_id, desacoplado de fecha_compra, en el escritorio).
-  function insertarGastoConReparto(fecha, detalle, empresa, categoriaNombre, monto, cuotaTexto, reparto, origen, anioMesOverride){
+  // descripcionOriginal (ultimo parametro, opcional): texto CRUDO tal cual
+  // vino del banco (Falabella/Lider, ver parseFalabellaLineas/
+  // parseLiderLineas), separado de detalle -- el nombre "amigable" que
+  // puede heredarse del mes anterior o precargarse desde un Gasto Diario.
+  // Va al final de la firma a proposito para no romper los llamados
+  // existentes que no lo pasan (Ingreso Manual, puente Gastos Diarios ->
+  // Estado de Cuenta, fusion de sync remoto): ahi queda null, que es
+  // correcto -- no vinieron de un PDF, no hay nada que mostrar en el boton
+  // "Ver texto original del banco".
+  function insertarGastoConReparto(fecha, detalle, empresa, categoriaNombre, monto, cuotaTexto, reparto, origen, anioMesOverride, descripcionOriginal){
     var anio, mes;
     if(anioMesOverride){
       anio = anioMesOverride[0];
@@ -1447,8 +1467,8 @@
       mes = d.getMonth() + 1;
     }
     var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
-    db.run("INSERT INTO gastos (anio, mes, fecha, detalle, empresa, categoria_id, monto_total, cuota_texto, origen) VALUES (?,?,?,?,?,?,?,?,?)",
-      [anio, mes, fecha, detalle, empresa || null, categoriaId, monto, cuotaTexto || "1", origen || "MANUAL"]);
+    db.run("INSERT INTO gastos (anio, mes, fecha, detalle, empresa, categoria_id, monto_total, cuota_texto, origen, descripcion) VALUES (?,?,?,?,?,?,?,?,?,?)",
+      [anio, mes, fecha, detalle, empresa || null, categoriaId, monto, cuotaTexto || "1", origen || "MANUAL", descripcionOriginal || null]);
     var gastoId = lastId();
     Object.keys(reparto).forEach(function(nombre){
       var personaId = obtenerOCrearPersona(nombre);
@@ -2230,6 +2250,7 @@
       return "<tr><td>" + it.fecha + "</td><td>" + escapeHtml(it.detalle) + "</td><td>" + escapeHtml(it.empresa||"") +
         "</td><td class=\"center\">" + escapeHtml(it.cuota||"-") + "</td><td class=\"money\">" + money(it.monto) + "</td>" +
         "<td><div class=\"ec-row-acciones\">" +
+          (it.descripcion ? "<button type=\"button\" class=\"icon-btn\" data-ec-vertexto=\"" + it.gastoId + "\" title=\"Ver texto original del banco\">👁</button>" : "") +
           "<button type=\"button\" class=\"icon-btn\" data-ec-editar=\"" + it.gastoId + "\" title=\"Editar\">✎</button>" +
           "<button type=\"button\" class=\"icon-btn\" data-ec-dividir=\"" + it.gastoId + "\" title=\"Dividir...\">⑂</button>" +
           "<button type=\"button\" class=\"icon-btn\" data-ec-adjuntar=\"" + it.gastoId + "\" title=\"Adjuntar a...\">↪</button>" +
@@ -2289,7 +2310,7 @@
     refrescarTelefonoEc(estado.nombre);
     var items = dbAll(
       "SELECT g.id AS gastoId, g.fecha AS fecha, g.detalle AS detalle, g.empresa AS empresa, g.cuota_texto AS cuota, " +
-      "gp.monto AS monto, g.origen AS origen " +
+      "gp.monto AS monto, g.origen AS origen, g.descripcion AS descripcion " +
       "FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
       "WHERE p.nombre=? COLLATE NOCASE AND g.anio=? AND g.mes=? ORDER BY g.fecha",
       [estado.nombre, estado.anio, estado.mes]
@@ -2333,6 +2354,12 @@
       (hayIncluidos ? "<p class=\"hint\">Incluye " + money(incluidos) + " agregado desde Subtotal combinado (total real sin agregados: " + money(total) + ").</p>" : "") +
       renderTablaEstadoCuenta(itemsFiltrados, mensajeVacio) +
       (ajustes.length ? "<h3 style=\"font-size:.85rem;color:var(--text-dim);margin:14px 0 8px;\">Ajustes de Subtotal combinado</h3>" + renderFilasAjusteEc(ajustes, true) : "");
+    cont.querySelectorAll("[data-ec-vertexto]").forEach(function(b){
+      b.addEventListener("click", function(){
+        var it = buscarItemEc(Number(b.dataset.ecVertexto));
+        abrirModalTextoOriginal(it ? it.descripcion : "");
+      });
+    });
     cont.querySelectorAll("[data-ec-editar]").forEach(function(b){
       b.addEventListener("click", function(){ abrirEditarItem(buscarItemEc(Number(b.dataset.ecEditar))); });
     });
@@ -2374,6 +2401,23 @@
   document.getElementById("modalOverlay").addEventListener("click", function(ev){
     if(ev.target.id === "modalOverlay") cerrarModal();
   });
+
+  // Modal de solo lectura para el texto CRUDO que trajo el PDF del banco
+  // (gastos.descripcion) -- usado desde el boton "Ver texto original del
+  // banco" (👁) tanto en la tabla de revision de "Cargar mes" como en Estado
+  // de Cuenta (ver renderTablaCargarMes / renderTablaEstadoCuenta), para que
+  // el usuario pueda confirmar que el programa no se equivoco de compra
+  // aunque el nombre "amigable" (detalle) se haya heredado del mes anterior
+  // o precargado desde un Gasto Diario.
+  function abrirModalTextoOriginal(texto){
+    var html =
+      "<h2>Texto original del banco</h2>" +
+      "<p class=\"hint\">Tal cual aparece en el PDF, sin editar.</p>" +
+      "<p style=\"white-space:pre-wrap;\">" + escapeHtml(texto || "") + "</p>" +
+      "<div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"totCerrar\">Cerrar</button></div>";
+    abrirModal(html);
+    document.getElementById("totCerrar").addEventListener("click", cerrarModal);
+  }
 
   // -------------------------------------------- Calculadora integrada
   //
@@ -5218,7 +5262,12 @@
         if(mAbono23){ totalAbonos += aMonto(mAbono23[4]); return; }
         var mCargo23 = RX_SECCION_23.exec(linea);
         if(mCargo23){
-          filas.push({fecha: fechaISOdesdeDDMMYYYY(mCargo23[1]), detalle: mCargo23[2].trim(), monto: aMonto(mCargo23[5]), cuota: "01/01", personas: ""});
+          // descripcionOriginal: aca el texto crudo del banco (mCargo23[2],
+          // ej. un impuesto/comision) y detalle son el mismo valor -- esta
+          // seccion nunca trae "lugar" -- se guarda igual para que el boton
+          // "Ver texto original del banco" (Cargar mes/Estado de Cuenta)
+          // tambien aparezca en estos cargos (ver aplicarMigracionesEsquema).
+          filas.push({fecha: fechaISOdesdeDDMMYYYY(mCargo23[1]), detalle: mCargo23[2].trim(), monto: aMonto(mCargo23[5]), cuota: "01/01", personas: "", descripcionOriginal: mCargo23[2].trim()});
         }
         return;
       }
@@ -5230,9 +5279,13 @@
       var cargo = parsearLineaCargoFalabella(linea);
       if(!cargo || cargo.valorCuota === null) return; // sin monto definido para este periodo -- se omite
 
+      // descripcionOriginal: texto TAL CUAL vino del PDF (cargo.detalle), sin
+      // el "(lugar)" que se le agrega a detalleFinal justo abajo -- para el
+      // boton "Ver texto original del banco" (Cargar mes/Estado de Cuenta).
+      // Ver aplicarMigracionesEsquema (columna gastos.descripcion).
       var detalleFinal = cargo.detalle + (cargo.lugar ? " (" + cargo.lugar + ")" : "");
       var fechaFila = cargo.primerCargoMes ? fechaDesdeMesAnio(cargo.primerCargoMes, cargo.primerCargoAnio, 1) : cargo.fechaCompra;
-      filas.push({fecha: fechaFila || cargo.fechaCompra, detalle: detalleFinal, monto: cargo.valorCuota, cuota: cargo.cuotaTexto || "01/01", personas: ""});
+      filas.push({fecha: fechaFila || cargo.fechaCompra, detalle: detalleFinal, monto: cargo.valorCuota, cuota: cargo.cuotaTexto || "01/01", personas: "", descripcionOriginal: cargo.detalle});
     });
 
     return {
@@ -5387,7 +5440,10 @@
     }
     if(monto < 0) return {montoAbono: monto, item: null};
     if(monto === 0) return {montoAbono: null, item: null};
-    return {montoAbono: null, item: {fecha: fechaISOdesdeDDMMYYYY(fecha), detalle: descripcion.trim(), monto: monto, cuota: "01/01"}};
+    // descripcionOriginal: esta seccion nunca trae "lugar", asi que es el
+    // mismo texto crudo que detalle -- se guarda igual para que el boton
+    // "Ver texto original del banco" tambien aparezca en estos cargos.
+    return {montoAbono: null, item: {fecha: fechaISOdesdeDDMMYYYY(fecha), detalle: descripcion.trim(), monto: monto, cuota: "01/01", descripcionOriginal: descripcion.trim()}};
   }
 
   // A diferencia de parseFalabellaLineas (que solo devuelve las filas),
@@ -5454,6 +5510,11 @@
       if(!enPeriodo || RX_LIDER_SUBTOTAL.test(linea)) return;
       var item = parsearLineaLider(linea);
       if(item){
+        // descripcionOriginal: texto TAL CUAL vino del PDF (item.detalle),
+        // capturado ANTES de pisar detalle con el agregado de lugar de abajo
+        // -- para el boton "Ver texto original del banco" (Cargar mes/Estado
+        // de Cuenta). Ver aplicarMigracionesEsquema (columna gastos.descripcion).
+        item.descripcionOriginal = item.detalle;
         // mismo criterio que parseFalabellaLineas (ver detalleFinal ahi):
         // el lugar se pega al detalle final entre parentesis, solo cuando
         // el PDF lo trajo.
@@ -6006,9 +6067,18 @@
           (alerta ? "<div class=\"cm-alerta-txt\">" + escapeHtml(alerta.texto) + "</div>" : "") +
           (etiquetaHeredado ? "<div class=\"cm-heredado-txt " + etiquetaHeredado.cls + "\">" + escapeHtml(etiquetaHeredado.texto) + "</div>" : "") +
         "</td>" +
-        "<td><button type=\"button\" class=\"icon-btn danger\" data-cmdel=\"" + i + "\" title=\"Borrar fila\">✕</button></td>" +
+        "<td><div class=\"ec-row-acciones\">" +
+          (f.descripcionOriginal ? "<button type=\"button\" class=\"icon-btn\" data-vertexto=\"" + i + "\" title=\"Ver texto original del banco\">👁</button>" : "") +
+          "<button type=\"button\" class=\"icon-btn danger\" data-cmdel=\"" + i + "\" title=\"Borrar fila\">✕</button>" +
+        "</div></td>" +
       "</tr>";
     }).join("");
+    tbody.querySelectorAll("[data-vertexto]").forEach(function(b){
+      b.addEventListener("click", function(){
+        var f = cmFilasActuales[Number(b.dataset.vertexto)] || {};
+        abrirModalTextoOriginal(f.descripcionOriginal);
+      });
+    });
     tbody.querySelectorAll("[data-cmdel]").forEach(function(b){
       b.addEventListener("click", function(){
         sincronizarFilasCargarMesDesdeDOM();
@@ -6250,7 +6320,11 @@
         var empresaFinal = (f.empresa && String(f.empresa).trim()) ? String(f.empresa).trim() : f.detalle.trim();
         var categoriaFinal = f.categoria ? String(f.categoria).trim() : "";
         var origenFinal = f.origen || "IMPORTADO_PDF";
-        insertarGastoConReparto(f.fecha, f.detalle.trim(), empresaFinal, categoriaFinal, f.monto, f.cuota || "1", reparto, origenFinal);
+        // f.descripcionOriginal: solo las filas que vinieron de un PDF
+        // (Falabella/Lider, ver parseFalabellaLineas/parseLiderLineas) lo
+        // traen -- Deudas Adicionales y filas agregadas a mano quedan con
+        // descripcion null, a proposito (nunca hubo un PDF que citar).
+        insertarGastoConReparto(f.fecha, f.detalle.trim(), empresaFinal, categoriaFinal, f.monto, f.cuota || "1", reparto, origenFinal, null, f.descripcionOriginal);
 
         if(origenFinal === "IMPORTADO_PDF"){
           var dFila = new Date(f.fecha + "T00:00:00");
@@ -6541,6 +6615,10 @@
         anio: g.anio, mes: g.mes, fecha: g.fecha, detalle: g.detalle, empresa: g.empresa || "",
         categoria: g.categoria_nombre || "", monto_total: g.monto_total, cuota_texto: g.cuota_texto || "1",
         origen: g.origen || "manual",
+        // descripcion: texto original del banco (ver aplicarMigracionesEsquema)
+        // -- viaja por sync para que el boton "Ver texto original del banco"
+        // tambien funcione en otro dispositivo, no solo en el que importo el PDF.
+        descripcion: g.descripcion || "",
         personas: reparto.map(function(r){ return {nombre: r.nombre, monto: r.monto}; })
       };
     });
@@ -6632,6 +6710,7 @@
           var empresa = String(g.empresa || "").trim();
           var cuota = String(g.cuota_texto || "1").trim() || "1";
           var origen = String(g.origen || "sync").trim() || "sync";
+          var descripcionOriginal = String(g.descripcion || "").trim();
           var repartoIn = {};
           (g.personas || []).forEach(function(p){
             var nombre = p && String(p.nombre || "").trim();
@@ -6657,11 +6736,12 @@
             var igual = (existente.empresa || "") === empresa &&
                         catActualNombre === categoriaNombre &&
                         (existente.cuota_texto || "1") === cuota &&
+                        (existente.descripcion || "") === descripcionOriginal &&
                         repartosIguales(repartoActual, repartoIn);
             if(igual) return;
             var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
-            db.run("UPDATE gastos SET empresa=?, categoria_id=?, cuota_texto=? WHERE id=?",
-              [empresa || null, categoriaId, cuota, existente.id]);
+            db.run("UPDATE gastos SET empresa=?, categoria_id=?, cuota_texto=?, descripcion=? WHERE id=?",
+              [empresa || null, categoriaId, cuota, descripcionOriginal || null, existente.id]);
             db.run("DELETE FROM gasto_persona WHERE gasto_id=?", [existente.id]);
             Object.keys(repartoIn).forEach(function(nombre){
               var personaId = obtenerOCrearPersona(nombre);
@@ -6669,7 +6749,7 @@
             });
             huboCambios = true;
           }else{
-            insertarGastoConReparto(g.fecha, g.detalle, empresa, categoriaNombre, monto, cuota, repartoIn, origen);
+            insertarGastoConReparto(g.fecha, g.detalle, empresa, categoriaNombre, monto, cuota, repartoIn, origen, null, descripcionOriginal);
             huboCambios = true;
           }
         });
