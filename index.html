@@ -423,6 +423,15 @@
     .conc-acciones{ flex-direction:row; flex-wrap:wrap; align-items:center; }
   }
 
+  /* ---------------- ultimas cuotas / cuotas proyectadas ---------------- */
+  .cuota-ultima{ color:var(--bad); font-weight:700; }
+  .cuota-penultima{ color:var(--warn); font-weight:700; }
+  .cuota-tag{ font-size:.75rem; margin-left:4px; white-space:nowrap; }
+  .ec-proyectada{ color:var(--text-dim); }
+  #ecSoloUltimas.active{ background:var(--bad); color:var(--bad-ink); border-color:transparent; }
+  .ult-persona{ font-weight:700; margin:10px 0 4px; }
+  .ult-fila{ font-size:.85rem; padding:2px 0 2px 10px; overflow-wrap:anywhere; }
+
   /* ---------------- guardia de datos repetidos ---------------- */
   .dup-aviso{ display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; margin-top:8px; padding:6px 10px;
     border:1px solid var(--bad); border-radius:8px; color:var(--bad); font-size:.85rem; font-weight:600; }
@@ -755,6 +764,7 @@
         <button type="button" class="btn-ghost cov-filtro-btn" data-ecforigen="LIDER">Líder</button>
         <button type="button" class="btn-ghost cov-filtro-btn" data-ecforigen="MANUAL">Manual</button>
         <button type="button" class="btn-ghost cov-filtro-btn" data-ecforigen="IMPORTADO_DEUDAS_ADICIONALES">Deudas Adicionales</button>
+        <button type="button" class="btn-ghost" id="ecSoloUltimas" title="Solo las compras que terminan (rojo) o a las que les queda 1 cuota (naranja)">⏰ Últimas cuotas</button>
       </div>
       <div class="ec-toolbar">
         <button type="button" class="btn-ghost" id="ecBtnPdf">📄 Exportar PDF</button>
@@ -763,6 +773,7 @@
         <button type="button" class="btn-primary" id="ecBtnWhatsapp">💬 Enviar por WhatsApp</button>
         <button type="button" class="btn-ghost" id="ecBtnHistorial">🕘 Historial de ajustes...</button>
         <button type="button" class="btn-ghost" id="ecBtnSubtotal">➕ Subtotal combinado...</button>
+        <button type="button" class="btn-ghost" id="ecBtnUltimasMes">⏰ Últimas cuotas del mes (todos)...</button>
       </div>
       <div class="note" id="ecExportMensaje" hidden></div>
       <div id="ecResultado"></div>
@@ -1052,6 +1063,7 @@
     "  valor_cuota REAL,",
     "  cuota_texto TEXT NOT NULL DEFAULT '1',",
     "  origen TEXT NOT NULL DEFAULT 'MANUAL',",
+    "  proyectado INTEGER NOT NULL DEFAULT 0,",
     "  created_at TEXT NOT NULL DEFAULT (datetime('now'))",
     ");",
     "CREATE TABLE IF NOT EXISTS gasto_persona (",
@@ -1291,6 +1303,11 @@
     if(!tieneColumna("gastos", "valor_cuota")){
       dbRef.run("ALTER TABLE gastos ADD COLUMN valor_cuota REAL");
     }
+    // gastos.proyectado: cuota PROYECTADA (la siguiente de una compra en cuotas), creada por el escritorio al
+    // confirmar el mes anterior -- se ve marcada ⏳ y se reemplaza por la real cuando llega el PDF de ese mes.
+    if(!tieneColumna("gastos", "proyectado")){
+      dbRef.run("ALTER TABLE gastos ADD COLUMN proyectado INTEGER NOT NULL DEFAULT 0");
+    }
   }
 
   // ---------------------------------------------------------------- utiles
@@ -1489,10 +1506,32 @@
       if(typeof marcarCambioLocalParaSyncNube === "function") marcarCambioLocalParaSyncNube();
     }
   }
+  // sql.js CIERRA Y REABRE la base en cada db.export(), y eso apaga "PRAGMA foreign_keys" (vuelve al valor por
+  // defecto). Sin claves foraneas, borrar un gasto no borra su reparto (ON DELETE CASCADE no corre): quedaba reparto
+  // huerfano, y si un gasto nuevo reutilizaba ese numero interno heredaba nombres ajenos (encontrado el 28-09-2026).
+  // Por eso TODA exportacion pasa por aca y las vuelve a encender.
+  function exportarBytesDb(){
+    var bytes = db.export();
+    db.run("PRAGMA foreign_keys = ON");
+    return bytes;
+  }
+  // Reparto/decisiones que quedaron colgando de gastos o notas ya borrados mientras las claves foraneas estaban
+  // apagadas (ver exportarBytesDb). Se limpia al abrir. Devuelve cuantas filas quito.
+  function limpiarHuerfanos(dbRef){
+    var total = 0;
+    [["gasto_persona", "gasto_id", "gastos"], ["gasto_diario_persona", "gasto_diario_id", "gastos_diarios"],
+     ["conciliacion_diario", "gasto_id", "gastos"], ["conciliacion_diario", "gasto_diario_id", "gastos_diarios"],
+     ["conciliacion_rechazados", "gasto_id", "gastos"], ["conciliacion_rechazados", "gasto_diario_id", "gastos_diarios"],
+     ["conciliacion_ignorados", "gasto_diario_id", "gastos_diarios"]].forEach(function(t){
+      dbRef.run("DELETE FROM " + t[0] + " WHERE " + t[1] + " NOT IN (SELECT id FROM " + t[2] + ")");
+      total += dbRef.getRowsModified();
+    });
+    return total;
+  }
   function flushSave(){
     saveTimer = null;
     try{
-      var bytes = db.export();
+      var bytes = exportarBytesDb();
       idbSet(IDB_KEY, bytes).catch(function(e){ mostrarErrorFatal("No se pudo guardar en IndexedDB: " + e.message); });
     }catch(e){
       mostrarErrorFatal("No se pudo exportar la base para guardarla: " + e.message);
@@ -2383,8 +2422,9 @@
   function renderTablaEstadoCuenta(items, mensajeVacio){
     if(items.length === 0) return "<p class=\"hint\">" + escapeHtml(mensajeVacio || "Sin movimientos.") + "</p>";
     var filas = items.map(function(it){
-      return "<tr><td>" + it.fecha + "</td><td>" + escapeHtml(it.detalle) + "</td><td>" + escapeHtml(it.empresa||"") +
-        "</td><td class=\"center\">" + escapeHtml(it.cuota||"-") + "</td><td class=\"money\">" + money(it.monto) + "</td>" +
+      return "<tr" + (it.proyectado ? " class=\"ec-proyectada\" title=\"Cuota proyectada: todavía no llega el PDF de este mes\"" : "") + "><td>" + it.fecha + "</td><td>" +
+        (it.proyectado ? "⏳ " : "") + escapeHtml(it.detalle) + "</td><td>" + escapeHtml(it.empresa||"") +
+        "</td><td class=\"center\">" + cuotaCeldaHtml(it.cuota) + "</td><td class=\"money\">" + money(it.monto) + "</td>" +
         "<td><div class=\"ec-row-acciones\">" +
           (it.descripcion ? "<button type=\"button\" class=\"icon-btn\" data-ec-vertexto=\"" + it.gastoId + "\" title=\"Ver texto original del banco\">👁</button>" : "") +
           "<button type=\"button\" class=\"icon-btn\" data-ec-editar=\"" + it.gastoId + "\" title=\"Editar\">✎</button>" +
@@ -2446,11 +2486,12 @@
     refrescarTelefonoEc(estado.nombre);
     var items = dbAll(
       "SELECT g.id AS gastoId, g.fecha AS fecha, g.detalle AS detalle, g.empresa AS empresa, g.cuota_texto AS cuota, " +
-      "gp.monto AS monto, g.origen AS origen, g.descripcion AS descripcion " +
+      "gp.monto AS monto, g.origen AS origen, g.descripcion AS descripcion, COALESCE(g.proyectado,0) AS proyectado " +
       "FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
       "WHERE p.nombre=? COLLATE NOCASE AND g.anio=? AND g.mes=? ORDER BY g.fecha",
       [estado.nombre, estado.anio, estado.mes]
     );
+    items.forEach(function(it){ it.estadoCuota = cuotaEstado(it.cuota); it.proyectado = !!it.proyectado; });
     ecItemsActuales = items;
     var total = items.reduce(function(a, it){ return a + it.monto; }, 0);
     var avisoCuadre = verificarCuadreMes(estado.anio, estado.mes);
@@ -2468,13 +2509,15 @@
     var busqueda = document.getElementById("ecBuscar").value.trim().toLowerCase();
     var itemsFiltrados = items.filter(function(it){
       if(ecFiltroOrigen !== null && ecCategoriaOrigen(it.origen, it.empresa) !== ecFiltroOrigen) return false;
+      if(ecSoloUltimas && it.estadoCuota !== "ULTIMA" && it.estadoCuota !== "PENULTIMA") return false;
       if(!busqueda) return true;
       return (it.detalle||"").toLowerCase().indexOf(busqueda) >= 0 || (it.empresa||"").toLowerCase().indexOf(busqueda) >= 0;
     });
-    var hayFiltroEc = !!busqueda || ecFiltroOrigen !== null;
+    var hayFiltroEc = !!busqueda || ecFiltroOrigen !== null || ecSoloUltimas;
     var mensajeVacio = "Sin movimientos este mes.";
     if(items.length > 0 && itemsFiltrados.length === 0){
-      mensajeVacio = busqueda ? "Ninguna deuda coincide con \"" + busqueda + "\"." : "Ningún movimiento de ese origen este mes.";
+      mensajeVacio = busqueda ? "Ninguna deuda coincide con \"" + busqueda + "\"." :
+        (ecSoloUltimas ? "Ninguna compra termina este mes (ni queda con una sola cuota)." : "Ningún movimiento de ese origen este mes.");
     }
 
     var statsHtml = "<div class=\"stat\"><div class=\"k\">Movimientos" + (hayFiltroEc ? " (filtrado)" : "") + "</div><div class=\"v\">" + itemsFiltrados.length + "</div></div>";
@@ -3507,13 +3550,16 @@
   }
   // Puerto de mensaje_estado_cuenta (whatsapp_link.py) -- misma distincion
   // a favor/en contra/al dia, pedido explicito del usuario.
-  function mensajeEstadoCuentaWhatsapp(nombre, anio, mes, total){
+  function mensajeEstadoCuentaWhatsapp(nombre, anio, mes, total, ultimas, penultimas){
     var fraseTotal;
     if(total < -1) fraseTotal = "Tienes un saldo A TU FAVOR de " + money(Math.abs(total)) + " (te lo debemos devolver).";
     else if(total > 1) fraseTotal = "Total a pagar: " + money(total) + ".";
     else fraseTotal = "Estas al dia, sin diferencia este mes.";
+    var extra = "";
+    if(ultimas && ultimas.length) extra += " Este mes pagas la ÚLTIMA cuota de: " + ultimas.join(", ") + ".";
+    if(penultimas && penultimas.length) extra += " Te queda 1 sola cuota de: " + penultimas.join(", ") + ".";
     return "Hola " + nombre + ", te comparto tu estado de cuenta de " + MESES_ES[mes] + " " + anio + ". " +
-      fraseTotal + " Te adjunto el detalle por tarjeta en PDF.";
+      fraseTotal + extra + " Te adjunto el detalle por tarjeta en PDF.";
   }
   // Puerto de construir_link_whatsapp (whatsapp_link.py).
   function construirLinkWhatsapp(telefono, mensaje){
@@ -3616,9 +3662,12 @@
         cols.forEach(function(c, i){ doc.rect(xs[i], y, c.w, rowH, "FD"); });
         doc.setTextColor(0, 0, 0);
         doc.text(String(it.fecha || "").slice(0, 14), xs[0] + 1.5, y + 5);
-        doc.text(String(it.detalle || "").slice(0, 40), xs[1] + 1.5, y + 5);
+        doc.text(detalleConSufijo(it.detalle, 40, it.estadoCuota, it.proyectado), xs[1] + 1.5, y + 5);
         doc.text(String(it.empresa || "").slice(0, 28), xs[2] + 1.5, y + 5);
+        if(it.estadoCuota === "ULTIMA") doc.setTextColor(200, 30, 40);
+        else if(it.estadoCuota === "PENULTIMA") doc.setTextColor(205, 110, 0);
         doc.text(String(it.cuota || "-").slice(0, 8), xs[3] + 1.5, y + 5);
+        doc.setTextColor(0, 0, 0);
         var montoTxt = money(it.monto);
         var montoW = doc.getTextWidth(montoTxt);
         doc.text(montoTxt, xs[4] + cols[4].w - 2 - montoW, y + 5);
@@ -3703,9 +3752,9 @@
         var montoColor = it.monto >= 0 ? "#0a5abe" : "#be1e23";
         return "<tr style=\"background:" + bg + ";\">" +
           "<td style=\"padding:10px 14px;white-space:nowrap;\">" + escapeHtml(it.fecha) + "</td>" +
-          "<td style=\"padding:10px 14px;\">" + escapeHtml(it.detalle) + "</td>" +
+          "<td style=\"padding:10px 14px;\">" + escapeHtml(it.detalle + cuotaSufijo(it.estadoCuota, it.proyectado)) + "</td>" +
           "<td style=\"padding:10px 14px;color:#5a5a5a;\">" + escapeHtml(it.empresa || "") + "</td>" +
-          "<td style=\"padding:10px 14px;color:#5a5a5a;white-space:nowrap;\">" + escapeHtml(it.cuota || "-") + "</td>" +
+          "<td style=\"padding:10px 14px;white-space:nowrap;" + (it.estadoCuota === "ULTIMA" ? "color:#c81e28;font-weight:700;" : it.estadoCuota === "PENULTIMA" ? "color:#cd6e00;font-weight:700;" : "color:#5a5a5a;") + "\">" + escapeHtml(it.cuota || "-") + "</td>" +
           "<td style=\"padding:10px 14px;text-align:right;color:" + montoColor + ";font-weight:600;white-space:nowrap;\">" + escapeHtml(money(it.monto)) + "</td>" +
         "</tr>";
       }).join("");
@@ -3817,7 +3866,9 @@
     var telefono = document.getElementById("ecTelefono").value.trim();
     if(!telefono){ mostrarMensajeExportEc("Escribe un teléfono para enviar por WhatsApp.", "bad"); return; }
     var total = infoTotalEc(estado).totalMostrado;
-    var mensaje = mensajeEstadoCuentaWhatsapp(estado.nombre, estado.anio, estado.mes, total);
+    var mensaje = mensajeEstadoCuentaWhatsapp(estado.nombre, estado.anio, estado.mes, total,
+      ecItemsActuales.filter(function(it){ return it.estadoCuota === "ULTIMA"; }).map(function(it){ return it.detalle; }),
+      ecItemsActuales.filter(function(it){ return it.estadoCuota === "PENULTIMA"; }).map(function(it){ return it.detalle; }));
     var link = construirLinkWhatsapp(telefono, mensaje);
     actualizarTelefonoPersona(estado.nombre, telefono);
     window.open(link, "_blank", "noopener");
@@ -3876,6 +3927,67 @@
   document.getElementById("chkPersona").addEventListener("input", renderChecklist);
   document.getElementById("chkMes").addEventListener("change", renderChecklist);
   document.getElementById("chkAnio").addEventListener("change", renderChecklist);
+
+  // ---------------------------------------------------------------- Ultimas cuotas (puerto de app/domain/cuotas.py)
+  // Rojo = se paga la ULTIMA cuota este mes (ej. 6/6). Naranja = queda UNA sola por pagar (ej. 5/6). Lo que se envia a
+  // cada persona dice "última cuota". Pedido del usuario, 28-09-2026.
+  function cuotaEstado(cuotaTexto){
+    var c = concParseCuota(cuotaTexto);
+    if(!c.total || c.total <= 1 || c.actual === null) return null;
+    if(c.actual === c.total) return "ULTIMA";
+    if(c.actual === c.total - 1) return "PENULTIMA";
+    return null;
+  }
+  function cuotaSufijo(estado, proyectado){
+    var partes = [];
+    if(estado === "ULTIMA") partes.push("última cuota");
+    else if(estado === "PENULTIMA") partes.push("queda 1 cuota");
+    if(proyectado) partes.push("proyectada");
+    return partes.length ? " (" + partes.join(", ") + ")" : "";
+  }
+  function detalleConSufijo(detalle, largo, estado, proyectado){
+    var suf = cuotaSufijo(estado, proyectado);
+    return String(detalle || "").slice(0, Math.max(0, largo - suf.length)) + suf;
+  }
+  function cuotaCeldaHtml(cuotaTexto){
+    var e = cuotaEstado(cuotaTexto);
+    var t = escapeHtml(cuotaTexto || "-");
+    if(e === "ULTIMA") return "<span class=\"cuota-ultima\">" + t + "<span class=\"cuota-tag\">ÚLTIMA</span></span>";
+    if(e === "PENULTIMA") return "<span class=\"cuota-penultima\">" + t + "<span class=\"cuota-tag\">queda 1</span></span>";
+    return t;
+  }
+  function listarUltimasCuotasMes(anio, mes){
+    return dbAll(
+      "SELECT p.nombre AS persona, g.detalle AS detalle, g.cuota_texto AS cuota, gp.monto AS monto, COALESCE(g.proyectado,0) AS proyectado " +
+      "FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id WHERE g.anio=? AND g.mes=?",
+      [anio, mes]
+    ).map(function(r){ r.estado = cuotaEstado(r.cuota); return r; })
+     .filter(function(r){ return r.estado === "ULTIMA" || r.estado === "PENULTIMA"; })
+     .sort(function(a, b){
+       return a.persona.toLowerCase().localeCompare(b.persona.toLowerCase(), "es") ||
+         ((a.estado === "ULTIMA" ? 0 : 1) - (b.estado === "ULTIMA" ? 0 : 1)) || a.detalle.localeCompare(b.detalle, "es");
+     });
+  }
+  document.getElementById("ecBtnUltimasMes").addEventListener("click", function(){
+    var anio = Number(document.getElementById("ecAnio").value), mes = Number(document.getElementById("ecMes").value);
+    var filas = listarUltimasCuotasMes(anio, mes), persona = null, html = "";
+    filas.forEach(function(r){
+      if(r.persona !== persona){ persona = r.persona; html += "<div class=\"ult-persona\">" + escapeHtml(persona) + "</div>"; }
+      html += "<div class=\"ult-fila " + (r.estado === "ULTIMA" ? "cuota-ultima" : "cuota-penultima") + "\">" + (r.proyectado ? "⏳ " : "") +
+        escapeHtml(r.detalle) + " — cuota " + escapeHtml(r.cuota) + " (" + (r.estado === "ULTIMA" ? "ÚLTIMA" : "queda 1") + ") — " + money(r.monto) + "</div>";
+    });
+    abrirModal("<h2>Últimas cuotas — " + MESES_ES[mes] + " " + anio + "</h2>" +
+      "<p class=\"hint\">Rojo = este mes se paga la ÚLTIMA cuota. Naranja = queda 1 sola cuota. ⏳ = proyectada (todavía no llega el PDF de este mes).</p>" +
+      "<div class=\"dup-lista\">" + (html || "<p class=\"hint\">Ninguna compra termina este mes.</p>") + "</div>" +
+      "<div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"ultCerrar\">Cerrar</button></div>");
+    document.getElementById("ultCerrar").addEventListener("click", cerrarModal);
+  });
+  var ecSoloUltimas = false;
+  document.getElementById("ecSoloUltimas").addEventListener("click", function(){
+    ecSoloUltimas = !ecSoloUltimas;
+    document.getElementById("ecSoloUltimas").classList.toggle("active", ecSoloUltimas);
+    renderEstadoCuenta();
+  });
 
   // ---------------------------------------------------------------- Conciliacion: estado de cuenta (CMR / Lider) <-> Gastos Diarios
   //
@@ -4226,7 +4338,7 @@
       "(SELECT SUM(gp.monto) FROM gasto_persona gp WHERE gp.gasto_id=g.id) AS suma_reparto, " +
       "COALESCE((SELECT GROUP_CONCAT(p.nombre, ', ') FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id WHERE gp.gasto_id=g.id),'') AS personas " +
       "FROM gastos g LEFT JOIN categorias c ON c.id=g.categoria_id " +
-      "WHERE g.anio=? AND g.mes=? AND UPPER(g.origen) IN " + CONC_ORIGENES_SQL[tarjeta] + " ORDER BY g.fecha, g.id",
+      "WHERE g.anio=? AND g.mes=? AND COALESCE(g.proyectado,0)=0 AND UPPER(g.origen) IN " + CONC_ORIGENES_SQL[tarjeta] + " ORDER BY g.fecha, g.id",
       [anio, mes]);
     return filas.map(function(f){
       var cuota = concParseCuota(f.cuota_texto);
@@ -4517,7 +4629,7 @@
   }
   function concElegirPeriodoInicial(){
     var tarjeta = document.getElementById("concTarjeta").value || "CMR";
-    var fila = dbGet("SELECT anio, mes FROM gastos WHERE UPPER(origen) IN " + CONC_ORIGENES_SQL[tarjeta] + " ORDER BY anio DESC, mes DESC LIMIT 1");
+    var fila = dbGet("SELECT anio, mes FROM gastos WHERE COALESCE(proyectado,0)=0 AND UPPER(origen) IN " + CONC_ORIGENES_SQL[tarjeta] + " ORDER BY anio DESC, mes DESC LIMIT 1");
     if(fila){
       document.getElementById("concAnio").value = String(fila.anio);
       document.getElementById("concMes").value = String(fila.mes);
@@ -7135,6 +7247,26 @@
     });
   }
 
+  function marcarProyectadasCargarMes(filas, tarjeta){
+    var usados = {}, n = 0;
+    filas.forEach(function(f){
+      if(!f.descripcionOriginal || !f.cuota) return;
+      var cand = dbAll(
+        "SELECT g.id, g.valor_cuota FROM gastos g WHERE COALESCE(g.proyectado,0)=1 AND g.cuota_texto=? " +
+        "AND LOWER(TRIM(COALESCE(g.descripcion,'')))=LOWER(TRIM(?)) AND UPPER(g.origen) IN " + CONC_ORIGENES_SQL[tarjeta] + " ORDER BY g.id",
+        [f.cuota, f.descripcionOriginal]).filter(function(r){ return !usados[r.id]; })[0];
+      if(!cand) return;
+      usados[cand.id] = true;
+      var nombres = dbAll("SELECT p.nombre AS nombre FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id WHERE gp.gasto_id=?", [cand.id])
+        .map(function(r){ return r.nombre; });
+      if(nombres.length) f.personas = nombres.join(" ");
+      f.proyectadaId = cand.id;
+      f.heredado = "proyectada";
+      n++;
+    });
+    return n;
+  }
+
   // Traduce los items ya parseados de Deudas Adicionales al mismo formato
   // de fila que usa la tabla de revision de "Cargar mes" (cmFilasActuales).
   // Regla clave (domain: import_service.py linea ~250): si una celda
@@ -7258,7 +7390,8 @@
     }
     tbody.innerHTML = cmFilasActuales.map(function(f, i){
       var alerta = calcularAlertaPersonas(f.personas, f.nombresMesAnteriorList);
-      var etiquetaHeredado = f.heredado === "automatico" ? {texto: "✓ heredado automáticamente del mes anterior", cls: "cm-heredado-ok"} :
+      var etiquetaHeredado = f.heredado === "proyectada" ? {texto: "✔ ya estaba cargada (cuota proyectada) — se reemplaza por esta", cls: "cm-heredado-ok"} :
+        f.heredado === "automatico" ? {texto: "✓ heredado automáticamente del mes anterior", cls: "cm-heredado-ok"} :
         f.heredado === "aproximado" ? {texto: "✓ heredado por monto aproximado", cls: "cm-heredado-ok"} :
         f.heredado === "ambiguo" ? {texto: "⚠ match ambiguo, revisar", cls: "cm-heredado-ambiguo"} :
         f.heredado === "gasto_diario" ? {
@@ -7414,6 +7547,12 @@
         // aplicarMatchingAutomatico/encontrarMatchGastoDiario) aplica para
         // Falabella Y Lider por igual -- ambas pasan por aca.
         aplicarMatchingAutomatico(filasNuevas, true);
+        // ¿Alguna de estas cuotas ya estaba cargada como PROYECTADA (la crea el escritorio al confirmar el mes
+        // anterior)? Misma compra (texto del banco) y misma cuota: se marca "ya estaba cargada", hereda sus nombres,
+        // y al confirmar se reemplaza por la real (manda el PDF).
+        var nProyIguales = marcarProyectadasCargarMes(filasNuevas, tipo === "lider" ? "LIDER" : "CMR");
+        if(nProyIguales) mostrarMensajeCargarMes(document.getElementById("cmMensaje").textContent + " ✔ " + nProyIguales +
+          " cuota(s) ya estaban cargadas (proyectadas) — ya tienen sus nombres.", document.getElementById("cmMensaje").className.indexOf("warn") >= 0 ? "warn" : "ok");
         // El PDF no trae categoria propia (a diferencia de Deudas
         // Adicionales) -- se precarga con la sugerencia combinada (regla por
         // palabra clave primero, heuristica de "ultimo gasto igual" de
@@ -7576,6 +7715,7 @@
         // (Falabella/Lider, ver parseFalabellaLineas/parseLiderLineas) lo
         // traen -- Deudas Adicionales y filas agregadas a mano quedan con
         // descripcion null, a proposito (nunca hubo un PDF que citar).
+        if(f.proyectadaId) db.run("DELETE FROM gastos WHERE id=? AND proyectado=1", [f.proyectadaId]);   // la reemplaza la real
         insertarGastoConReparto(f.fecha, f.detalle.trim(), empresaFinal, categoriaFinal, f.monto, f.cuota || "1", reparto, origenFinal, null, f.descripcionOriginal, f.monto);
 
         if(origenFinal === "IMPORTADO_PDF"){
@@ -7620,7 +7760,7 @@
 
   document.getElementById("btnExportar").addEventListener("click", function(){
     try{
-      var bytes = db.export();
+      var bytes = exportarBytesDb();
       var blob = new Blob([bytes], {type:"application/x-sqlite3"});
       var url = URL.createObjectURL(blob);
       var a = document.createElement("a");
@@ -7651,7 +7791,7 @@
         var nuevaDb = new SQL.Database(bytes);
         nuevaDb.run("PRAGMA foreign_keys = ON");
         nuevaDb.run(SCHEMA_SQL);
-        aplicarMigracionesEsquema(nuevaDb);
+        aplicarMigracionesEsquema(nuevaDb); try{ limpiarHuerfanos(nuevaDb); }catch(e){}
         db = nuevaDb;
         scheduleSave();
         refrescarTodo();
@@ -7704,7 +7844,7 @@
               var nuevaDb = new SQL.Database(bytes);
               nuevaDb.run("PRAGMA foreign_keys = ON");
               nuevaDb.run(SCHEMA_SQL);
-              aplicarMigracionesEsquema(nuevaDb);
+              aplicarMigracionesEsquema(nuevaDb); try{ limpiarHuerfanos(nuevaDb); }catch(e){}
               db = nuevaDb;
               scheduleSave();
               refrescarTodo();
@@ -7868,6 +8008,7 @@
         categoria: g.categoria_nombre || "", monto_total: g.monto_total, cuota_texto: g.cuota_texto || "1",
         // lo facturado ESE mes (opcional y aditivo; null si no se conoce)
         valor_cuota: (g.valor_cuota === null || g.valor_cuota === undefined) ? null : g.valor_cuota,
+        proyectado: !!g.proyectado,
         origen: g.origen || "manual",
         // descripcion: texto original del banco (ver aplicarMigracionesEsquema)
         // -- viaja por sync para que el boton "Ver texto original del banco"
@@ -7997,6 +8138,12 @@
           var origen = String(g.origen || "sync").trim() || "sync";
           var descripcionOriginal = String(g.descripcion || "").trim();
           var valorCuotaIn = (typeof g.valor_cuota === "number" && isFinite(g.valor_cuota)) ? g.valor_cuota : null;
+          var proyectadoIn = g.proyectado ? 1 : 0;
+          // una cuota proyectada que llega del escritorio NO se muestra si aca ya se cargo el PDF de ese cargo (una
+          // carga de emergencia en la web): misma compra (texto del banco) y misma cuota, cobrada de verdad.
+          if(proyectadoIn && descripcionOriginal && dbGet(
+              "SELECT 1 AS x FROM gastos WHERE COALESCE(proyectado,0)=0 AND cuota_texto=? AND LOWER(TRIM(COALESCE(descripcion,'')))=LOWER(TRIM(?)) " +
+              "AND UPPER(origen) IN ('IMPORTADO_PDF','CMR_PDF','LIDER') LIMIT 1", [cuota, descripcionOriginal])) return;
           var repartoIn = {};
           (g.personas || []).forEach(function(p){
             var nombre = p && String(p.nombre || "").trim();
@@ -8030,12 +8177,13 @@
                         (existente.cuota_texto || "1") === cuota &&
                         (existente.descripcion || "") === descripcionFinal &&
                         (valorCuotaIn === null || (existente.valor_cuota !== null && Number(existente.valor_cuota) === valorCuotaIn)) &&
+                        Number(existente.proyectado || 0) === proyectadoIn &&
                         repartosIguales(repartoActual, repartoIn);
             if(igual) return;
             var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
-            db.run("UPDATE gastos SET empresa=?, categoria_id=?, cuota_texto=?, descripcion=?, valor_cuota=? WHERE id=?",
+            db.run("UPDATE gastos SET empresa=?, categoria_id=?, cuota_texto=?, descripcion=?, valor_cuota=?, proyectado=? WHERE id=?",
               [empresa || null, categoriaId, cuota, descripcionFinal || null,
-               valorCuotaIn !== null ? valorCuotaIn : (existente.valor_cuota === undefined ? null : existente.valor_cuota), existente.id]);
+               valorCuotaIn !== null ? valorCuotaIn : (existente.valor_cuota === undefined ? null : existente.valor_cuota), proyectadoIn, existente.id]);
             db.run("DELETE FROM gasto_persona WHERE gasto_id=?", [existente.id]);
             Object.keys(repartoIn).forEach(function(nombre){
               var personaId = obtenerOCrearPersona(nombre);
@@ -8047,7 +8195,8 @@
             // fecha de compra: una cuota de una compra vieja tiene fecha de hace meses y, guardada por su fecha, caia en un mes
             // equivocado y nunca se reconocia como ya existente (la busqueda de arriba usa el mes del paquete), asi que se
             // DUPLICABA en cada sincronizacion (24-09-2026: 856 duplicados llegaron hasta la base real del escritorio).
-            insertarGastoConReparto(g.fecha, g.detalle, empresa, categoriaNombre, monto, cuota, repartoIn, origen, [anio, mes], descripcionOriginal, valorCuotaIn);
+            var idNuevo = insertarGastoConReparto(g.fecha, g.detalle, empresa, categoriaNombre, monto, cuota, repartoIn, origen, [anio, mes], descripcionOriginal, valorCuotaIn);
+            if(proyectadoIn) db.run("UPDATE gastos SET proyectado=1 WHERE id=?", [idNuevo]);
             huboCambios = true;
           }
         });
@@ -8615,6 +8764,8 @@
     renderConciliacion: renderConciliacion,
     dupDetectarCopias: dupDetectarCopias, dupEliminarCopias: dupEliminarCopias, revisarDuplicadosWeb: revisarDuplicadosWeb,
     dupNotasIguales: dupNotasIguales, dupGastosIguales: dupGastosIguales, guardarGasto: guardarGasto,
+    cuotaEstado: cuotaEstado, listarUltimasCuotasMes: listarUltimasCuotasMes, mensajeEstadoCuentaWhatsapp: mensajeEstadoCuentaWhatsapp,
+    marcarProyectadasCargarMes: marcarProyectadasCargarMes, detalleConSufijo: detalleConSufijo,
     mesAnteriorDe: mesAnteriorDe,
     aplicarMatchingAutomatico: aplicarMatchingAutomatico,
     candidatosGastosParaMatching: candidatosGastosParaMatching,
@@ -8644,7 +8795,8 @@
     renderComprobadorCobertura: renderComprobadorCobertura,
     renderListaIngreso: renderListaIngreso,
     renderEstadoCuenta: renderEstadoCuenta,
-    exportarDb: function(){ return db.export(); },
+    exportarDb: function(){ return exportarBytesDb(); },
+    limpiarHuerfanos: function(){ return limpiarHuerfanos(db); },
     generarPlanCuotas: generarPlanCuotas,
     insertarGastoDiarioConCuotas: insertarGastoDiarioConCuotas,
     dividirGastoDiario: dividirGastoDiario,
@@ -8671,7 +8823,7 @@
     agregarGastosDiariosAEstadoCuenta: agregarGastosDiariosAEstadoCuenta,
     // Respaldo automatico rotativo (IndexedDB): expuesto para poder simular
     // varios "arranques" seguidos sin recargar la pagina de verdad.
-    guardarRespaldoRotativo: function(){ return guardarRespaldoRotativo(db.export()); },
+    guardarRespaldoRotativo: function(){ return guardarRespaldoRotativo(exportarBytesDb()); },
     listarRespaldos: listarRespaldos,
     obtenerRespaldoPorId: obtenerRespaldoPorId,
     // Combinaciones de personas usadas juntas (para el datalist de Personas)
@@ -8747,6 +8899,7 @@
       db.run("PRAGMA foreign_keys = ON");
       db.run(SCHEMA_SQL);
       aplicarMigracionesEsquema(db);
+      try{ if(limpiarHuerfanos(db) > 0) console.warn("Se limpiaron repartos/decisiones huerfanos de gastos ya borrados."); }catch(e){}
       scheduleSave();
       return respaldoPromesa;
     }).then(function(){
