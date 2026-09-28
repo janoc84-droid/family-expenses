@@ -423,6 +423,13 @@
     .conc-acciones{ flex-direction:row; flex-wrap:wrap; align-items:center; }
   }
 
+  /* ---------------- guardia de datos repetidos ---------------- */
+  .dup-aviso{ display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; margin-top:8px; padding:6px 10px;
+    border:1px solid var(--bad); border-radius:8px; color:var(--bad); font-size:.85rem; font-weight:600; }
+  .dup-aviso[hidden]{ display:none; }
+  .dup-lista{ max-height:50vh; overflow-y:auto; font-size:.82rem; margin:8px 0; }
+  .dup-lista div{ padding:3px 0; border-bottom:1px solid var(--border); overflow-wrap:anywhere; }
+
   /* ---------------- calculadora integrada ---------------- */
   .field-with-calc{ display:flex; gap:6px; align-items:flex-end; }
   .field-with-calc input{ flex:1; }
@@ -537,6 +544,10 @@
       <button id="btnSyncReconectar" class="btn-ghost" type="button" hidden>⚠ Reconectar carpeta</button>
       <span id="syncStatusText" class="sync-status-text"></span>
       <span id="syncNubeStatusText" class="sync-status-text"></span>
+    </div>
+    <div class="dup-aviso" id="dupAviso" hidden role="alert">
+      <span id="dupAvisoTexto"></span>
+      <button type="button" class="btn-danger" id="dupAvisoRevisar" style="padding:4px 10px;">Revisar</button>
     </div>
     <nav class="tabs" id="tabsNav">
       <button class="tab-btn" type="button" data-tab="cargarmes">Cargar mes</button>
@@ -1909,6 +1920,10 @@
     // como siempre.
     if(!idAntes && !categoriaNombre){
       categoriaNombre = sugerirCategoriaCombinada(detalle);
+    }
+    if(!idAntes){
+      var iguales = dupGastosIguales(fecha, detalle, monto);
+      if(iguales.length && !dupPreguntar("Este gasto ya estaba cargado", iguales.length, fecha, detalle, monto)) return;
     }
     var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
 
@@ -4734,6 +4749,94 @@
     });
   });
 
+  // ---------------------------------------------------------------- Guardia de datos repetidos
+  // Protocolo del 25-09-2026 (mismo que el escritorio, app/domain/duplicados.py): un dato repetido NUNCA entra ni queda
+  // en silencio. (1) Al guardar a mano un gasto o una nota con la misma fecha, nombre (sin importar mayusculas/acentos)
+  // y monto que uno existente, se pregunta si es otro gasto distinto; si se confirma, quedan los dos. (2) Al abrir y
+  // despues de cada sincronizacion se buscan copias repetidas con la firma del incidente del 24-09-2026 (el mismo cargo
+  // guardado en el mes de su fecha teniendo ya su original, mas antiguo, en otro mes) y se muestra un aviso rojo.
+
+  function dupNotasIguales(fecha, detalle, monto){
+    var clave = concNorm(detalle);
+    return dbAll("SELECT id, fecha, detalle, monto FROM gastos_diarios WHERE fecha=? AND ABS(monto - ?) < 0.5", [fecha, monto])
+      .filter(function(r){ return concNorm(r.detalle) === clave; });
+  }
+  function dupCompraCuotasIgual(detalle, montoTotal, cuotas){
+    var clave = concNorm(detalle);
+    return dbAll("SELECT MIN(id) AS id, MIN(fecha) AS fecha, detalle FROM gastos_diarios WHERE cuotas_totales=? AND ABS(COALESCE(monto_total,0) - ?) < 0.5 " +
+                 "GROUP BY COALESCE(grupo_cuota_id, id), detalle", [cuotas, montoTotal])
+      .filter(function(r){ return concNorm(r.detalle) === clave; });
+  }
+  function dupGastosIguales(fecha, detalle, monto){
+    var clave = concNorm(detalle);
+    return dbAll("SELECT id, anio, mes, detalle FROM gastos WHERE fecha=? AND ABS(monto_total - ?) < 0.5", [fecha, monto])
+      .filter(function(r){ return concNorm(r.detalle) === clave; });
+  }
+  function dupPreguntar(titulo, n, fecha, detalle, monto){
+    return window.confirm(
+      titulo + (n === 1 ? " (ya existe uno igual)" : " (ya existen " + n + " iguales)") + ":\n" + fecha + "  «" + detalle + "»  " + money(monto) + "\n\n" +
+      "• Si es OTRO gasto distinto (por ejemplo dos compras iguales el mismo día), elige Aceptar: quedan los dos y se entienden siempre como datos distintos.\n" +
+      "• Si lo estabas cargando de nuevo sin querer, elige Cancelar: no se agrega nada.");
+  }
+
+  function dupDetectarCopias(){
+    return dbAll(
+      "SELECT a.id, a.fecha, a.detalle, a.monto_total, COALESCE(a.cuota_texto,'1') AS cuota_texto, a.anio, a.mes, " +
+      "(SELECT GROUP_CONCAT(DISTINCT b.anio || '-' || printf('%02d', b.mes)) FROM gastos b " +
+      "  WHERE b.fecha=a.fecha AND b.detalle=a.detalle AND b.monto_total=a.monto_total AND COALESCE(b.cuota_texto,'1')=COALESCE(a.cuota_texto,'1') " +
+      "    AND (b.anio*100+b.mes)<>(a.anio*100+a.mes) AND b.id < a.id) AS originales " +
+      "FROM gastos a WHERE (a.anio*100+a.mes) = CAST(substr(a.fecha,1,4) AS INTEGER)*100 + CAST(substr(a.fecha,6,2) AS INTEGER) " +
+      "AND originales IS NOT NULL ORDER BY a.fecha, a.id");
+  }
+  function dupEliminarCopias(ids){
+    if(!ids.length) return 0;
+    db.run("BEGIN");
+    try{
+      ids.forEach(function(id){ db.run("DELETE FROM gastos WHERE id=?", [id]); });   // gasto_persona y conciliacion en cascada
+      db.run("COMMIT");
+    }catch(e){ db.run("ROLLBACK"); throw e; }
+    scheduleSave();
+    return ids.length;
+  }
+  var dupCopiasActuales = [];
+  function revisarDuplicadosWeb(){
+    var aviso = document.getElementById("dupAviso");
+    if(!aviso || !db) return;
+    try{
+      dupCopiasActuales = dupDetectarCopias();
+      document.getElementById("dupAvisoTexto").textContent = dupCopiasActuales.length
+        ? "⚠ Se encontraron " + dupCopiasActuales.length + " cargo(s) repetido(s): el mismo cargo aparece dos veces en meses distintos." : "";
+    }catch(e){
+      dupCopiasActuales = [];
+      document.getElementById("dupAvisoTexto").textContent = "⚠ No se pudo revisar si hay datos repetidos: " + (e && e.message ? e.message : e);
+    }
+    aviso.hidden = !document.getElementById("dupAvisoTexto").textContent;
+  }
+  document.getElementById("dupAvisoRevisar").addEventListener("click", function(){
+    var copias = dupCopiasActuales.slice();
+    if(!copias.length){ revisarDuplicadosWeb(); return; }
+    abrirModal(
+      "<h2>Cargos repetidos</h2><p class=\"hint\">Estos " + copias.length + " cargo(s) están repetidos: el mismo cargo (misma fecha, nombre, monto y cuota) " +
+      "ya existe en otro mes del estado de cuenta, y esta copia quedó en el mes de su fecha de compra. El original se conserva. " +
+      "Antes de borrar conviene «Descargar copia de la base».</p><div class=\"dup-lista\">" +
+      copias.slice(0, 500).map(function(c){
+        return "<div>" + escapeHtml(c.fecha + "  " + c.detalle + "  " + money(c.monto_total) + "  (cuota " + c.cuota_texto + ") — copia en " +
+          c.anio + "-" + String(c.mes).padStart(2, "0") + ", el original está en " + c.originales) + "</div>";
+      }).join("") + (copias.length > 500 ? "<div>... y " + (copias.length - 500) + " más</div>" : "") + "</div>" +
+      "<div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"dupCerrar\">Cerrar</button>" +
+      "<button type=\"button\" class=\"btn-danger\" id=\"dupBorrar\">Borrar las " + copias.length + " copias</button></div>");
+    document.getElementById("dupCerrar").addEventListener("click", cerrarModal);
+    document.getElementById("dupBorrar").addEventListener("click", function(){
+      if(!window.confirm("¿Borrar las " + copias.length + " copias repetidas? El original de cada una se conserva.")) return;
+      try{
+        var n = dupEliminarCopias(copias.map(function(c){ return c.id; }));
+        cerrarModal();
+        refrescarTodo();
+        mostrarToast("Se borraron " + n + " copias repetidas.", "ok");
+      }catch(e){ mostrarToast("No se pudo borrar (no se cambió nada): " + e.message, "bad"); }
+    });
+  });
+
   // ---------------------------------------------------------------- Categorizar
   // Motor de reglas por palabra clave -- puerto de domain/categorization.py +
   // repositories/reglas_repo.py del escritorio (ver tabla categoria_reglas en
@@ -5285,6 +5388,13 @@
     var cuotas = Math.max(1, Math.round(Number(document.getElementById("gdCuotas").value) || 1));
 
     var idAntes = editingGastoDiarioId;
+    if(!idAntes && cuotas > 1){
+      var igualesCuotas = dupCompraCuotasIgual(detalle, monto, cuotas);
+      if(igualesCuotas.length && !dupPreguntar("Esta compra en cuotas ya estaba cargada (desde " + igualesCuotas[0].fecha + ")", igualesCuotas.length, fecha, detalle, monto)) return;
+    }else if(!idAntes){
+      var igualesNota = dupNotasIguales(fecha, detalle, monto);
+      if(igualesNota.length && !dupPreguntar("Esta nota ya existe", igualesNota.length, fecha, detalle, monto)) return;
+    }
     if(idAntes){
       actualizarGastoDiario(idAntes, fecha, detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta);
     }else if(cuotas > 1){
@@ -8503,6 +8613,8 @@
     concCargosLibresPara: concCargosLibresPara, concNotasLibresPara: concNotasLibresPara,
     exportarConciliacion: exportarConciliacion, aplicarConciliacionRemota: aplicarConciliacionRemota,
     renderConciliacion: renderConciliacion,
+    dupDetectarCopias: dupDetectarCopias, dupEliminarCopias: dupEliminarCopias, revisarDuplicadosWeb: revisarDuplicadosWeb,
+    dupNotasIguales: dupNotasIguales, dupGastosIguales: dupGastosIguales, guardarGasto: guardarGasto,
     mesAnteriorDe: mesAnteriorDe,
     aplicarMatchingAutomatico: aplicarMatchingAutomatico,
     candidatosGastosParaMatching: candidatosGastosParaMatching,
@@ -8580,6 +8692,7 @@
     renderListaGastosDiarios();
     renderPanelDiario();
     renderConciliacion();
+    revisarDuplicadosWeb();
   }
 
   function boot(){
