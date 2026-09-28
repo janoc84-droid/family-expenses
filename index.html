@@ -1113,7 +1113,15 @@
     "  cuota_actual INTEGER,",
     "  cuotas_totales INTEGER,",
     "  grupo_cuota_id INTEGER,",
+    "  uid TEXT,",
+    "  actualizado_en TEXT,",
+    "  uid_heredado INTEGER NOT NULL DEFAULT 0,",
     "  created_at TEXT NOT NULL DEFAULT (datetime('now'))",
+    ");",
+    // notas borradas (por numero de serie): viajan en la sincronizacion para que el borrado llegue al otro lado
+    "CREATE TABLE IF NOT EXISTS gastos_diarios_borrados (",
+    "  uid TEXT PRIMARY KEY,",
+    "  borrado_en TEXT NOT NULL",
     ");",
     // Reparto por persona de un Gasto Diario (o de UNA cuota puntual de un
     // plan de cuotas -- el reparto se aplica cuota por cuota, no al total).
@@ -1264,6 +1272,15 @@
   // lanzamiento inicial se agregan aca a mano, revisando primero si ya
   // existen (PRAGMA table_info) para no fallar con "duplicate column" en
   // instalaciones que ya la tengan ni romper las que recien la reciben.
+  // Numero de serie de una nota (32 caracteres hex, igual que el escritorio) y hora UTC con milisegundos
+  // ('2026-09-28 14:04:23.368', mismo formato que el escritorio: se comparan como texto).
+  function gdNuevoUid(){
+    if(window.crypto && crypto.randomUUID) return crypto.randomUUID().replace(/-/g, "");
+    var h = ""; for(var i = 0; i < 32; i++) h += Math.floor(Math.random() * 16).toString(16);
+    return h;
+  }
+  function gdAhora(){ return new Date().toISOString().slice(0, 23).replace("T", " "); }
+
   function aplicarMigracionesEsquema(dbRef){
     function tieneColumna(tabla, columna){
       var info = dbRef.exec("PRAGMA table_info(" + tabla + ")");
@@ -1308,6 +1325,20 @@
     if(!tieneColumna("gastos", "proyectado")){
       dbRef.run("ALTER TABLE gastos ADD COLUMN proyectado INTEGER NOT NULL DEFAULT 0");
     }
+    // Numero de serie por nota (28-09-2026, mismo que el escritorio): dos notas identicas siguen siendo dos, editar
+    // corrige en el otro dispositivo en vez de duplicar, y borrar tambien se borra alla. Las notas que ya existian
+    // reciben uno nuevo marcado como heredado (se emparejan una sola vez por fecha+nombre+monto).
+    [["uid", "TEXT"], ["actualizado_en", "TEXT"], ["uid_heredado", "INTEGER NOT NULL DEFAULT 0"]].forEach(function(c){
+      if(!tieneColumna("gastos_diarios", c[0])) dbRef.run("ALTER TABLE gastos_diarios ADD COLUMN " + c[0] + " " + c[1]);
+    });
+    var sinUid = dbRef.exec("SELECT id, created_at FROM gastos_diarios WHERE uid IS NULL");
+    if(sinUid.length){
+      sinUid[0].values.forEach(function(v){
+        dbRef.run("UPDATE gastos_diarios SET uid=?, uid_heredado=1, actualizado_en=COALESCE(actualizado_en, ?) WHERE id=?",
+          [gdNuevoUid(), v[1] || "2000-01-01 00:00:00", v[0]]);
+      });
+    }
+    dbRef.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_gastos_diarios_uid ON gastos_diarios(uid)");
   }
 
   // ---------------------------------------------------------------- utiles
@@ -4495,12 +4526,12 @@
   function concRefNota(n){ return {fecha: n.fecha, detalle: n.detalle, monto: n.monto}; }
   var CONC_SQL_GASTO_NOTA =
     "SELECT g.anio AS anio, g.mes AS mes, g.fecha AS fecha, g.detalle AS detalle, g.monto_total AS monto_total, g.origen AS origen, " +
-    "gd.fecha AS n_fecha, gd.detalle AS n_detalle, gd.monto AS n_monto, c.actualizado_en AS actualizado_en";
+    "gd.fecha AS n_fecha, gd.detalle AS n_detalle, gd.monto AS n_monto, gd.uid AS n_uid, c.actualizado_en AS actualizado_en";
   function exportarConciliacion(){
     var vinculos = dbAll(CONC_SQL_GASTO_NOTA + ", c.tipo AS tipo FROM conciliacion_diario c JOIN gastos g ON g.id=c.gasto_id JOIN gastos_diarios gd ON gd.id=c.gasto_diario_id ORDER BY g.id, gd.id")
-      .map(function(f){ return {gasto: concRefGasto(f), nota: {fecha: f.n_fecha, detalle: f.n_detalle, monto: f.n_monto}, tipo: f.tipo, actualizado_en: f.actualizado_en}; });
+      .map(function(f){ return {gasto: concRefGasto(f), nota: {fecha: f.n_fecha, detalle: f.n_detalle, monto: f.n_monto, uid: f.n_uid || ""}, tipo: f.tipo, actualizado_en: f.actualizado_en}; });
     var rechazados = dbAll(CONC_SQL_GASTO_NOTA + " FROM conciliacion_rechazados c JOIN gastos g ON g.id=c.gasto_id JOIN gastos_diarios gd ON gd.id=c.gasto_diario_id ORDER BY g.id, gd.id")
-      .map(function(f){ return {gasto: concRefGasto(f), nota: {fecha: f.n_fecha, detalle: f.n_detalle, monto: f.n_monto}, actualizado_en: f.actualizado_en}; });
+      .map(function(f){ return {gasto: concRefGasto(f), nota: {fecha: f.n_fecha, detalle: f.n_detalle, monto: f.n_monto, uid: f.n_uid || ""}, actualizado_en: f.actualizado_en}; });
     var ignorados = dbAll(
       "SELECT gd.fecha, gd.detalle, gd.monto, i.motivo, i.activo, i.actualizado_en FROM conciliacion_ignorados i " +
       "JOIN gastos_diarios gd ON gd.id=i.gasto_diario_id ORDER BY gd.id")
@@ -4525,6 +4556,10 @@
   // decision de conciliacion; con `libre`, una que no este emparejada ni marcada.
   function concBuscarNotaPorClave(ref, libre, conDecision){
     ref = ref || {};
+    if(ref.uid){
+      var porUid = dbGet("SELECT id FROM gastos_diarios WHERE uid=?", [ref.uid]);
+      if(porUid) return porUid.id;
+    }
     var monto = Number(ref.monto);
     if(!ref.fecha || ref.detalle === undefined || ref.detalle === null || !isFinite(monto)) return null;
     var filas = dbAll("SELECT id FROM gastos_diarios WHERE fecha=? AND detalle=? AND monto=? ORDER BY id", [ref.fecha, ref.detalle, monto]);
@@ -5219,8 +5254,8 @@
       plan.forEach(function(c){
         var d = new Date(c.fecha + "T00:00:00");
         db.run(
-          "INSERT INTO gastos_diarios (anio, mes, fecha, detalle, categoria_id, monto, prescindible, medio_pago, tipo_tarjeta, banco_tarjeta, monto_total, cuota_texto, cuota_actual, cuotas_totales, grupo_cuota_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-          [d.getFullYear(), d.getMonth() + 1, c.fecha, detalle, categoriaId, c.monto, prescindible ? 1 : 0, medioPago || null, tipoTarjeta || null, bancoTarjeta || null, montoTotal, c.cuotaTexto, c.cuotaActual, c.cuotasTotales, grupoCuotaId]
+          "INSERT INTO gastos_diarios (anio, mes, fecha, detalle, categoria_id, monto, prescindible, medio_pago, tipo_tarjeta, banco_tarjeta, monto_total, cuota_texto, cuota_actual, cuotas_totales, grupo_cuota_id, uid, actualizado_en) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          [d.getFullYear(), d.getMonth() + 1, c.fecha, detalle, categoriaId, c.monto, prescindible ? 1 : 0, medioPago || null, tipoTarjeta || null, bancoTarjeta || null, montoTotal, c.cuotaTexto, c.cuotaActual, c.cuotasTotales, grupoCuotaId, gdNuevoUid(), gdAhora()]
         );
         var nuevoId = lastId();
         if(primerId === null){ primerId = nuevoId; grupoCuotaId = nuevoId; }
@@ -5421,14 +5456,15 @@
     return medioPago || "Sin especificar";
   }
 
-  function insertarGastoDiario(fecha, detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta){
+  // uid/actualizadoEn (opcionales): los trae una nota que llega de otro dispositivo; si no, se crean aca.
+  function insertarGastoDiario(fecha, detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta, uid, actualizadoEn){
     var d = new Date(fecha + "T00:00:00");
     var anio = d.getFullYear();
     var mes = d.getMonth() + 1;
     var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
     dbRun(
-      "INSERT INTO gastos_diarios (anio, mes, fecha, detalle, categoria_id, monto, prescindible, medio_pago, tipo_tarjeta, banco_tarjeta) VALUES (?,?,?,?,?,?,?,?,?,?)",
-      [anio, mes, fecha, detalle, categoriaId, monto, prescindible ? 1 : 0, medioPago || null, tipoTarjeta || null, bancoTarjeta || null]
+      "INSERT INTO gastos_diarios (anio, mes, fecha, detalle, categoria_id, monto, prescindible, medio_pago, tipo_tarjeta, banco_tarjeta, uid, actualizado_en) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+      [anio, mes, fecha, detalle, categoriaId, monto, prescindible ? 1 : 0, medioPago || null, tipoTarjeta || null, bancoTarjeta || null, uid || gdNuevoUid(), actualizadoEn || gdAhora()]
     );
     return lastId();
   }
@@ -5439,8 +5475,8 @@
     var mes = d.getMonth() + 1;
     var categoriaId = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
     dbRun(
-      "UPDATE gastos_diarios SET anio=?, mes=?, fecha=?, detalle=?, categoria_id=?, monto=?, prescindible=?, medio_pago=?, tipo_tarjeta=?, banco_tarjeta=? WHERE id=?",
-      [anio, mes, fecha, detalle, categoriaId, monto, prescindible ? 1 : 0, medioPago || null, tipoTarjeta || null, bancoTarjeta || null, id]
+      "UPDATE gastos_diarios SET anio=?, mes=?, fecha=?, detalle=?, categoria_id=?, monto=?, prescindible=?, medio_pago=?, tipo_tarjeta=?, banco_tarjeta=?, actualizado_en=? WHERE id=?",
+      [anio, mes, fecha, detalle, categoriaId, monto, prescindible ? 1 : 0, medioPago || null, tipoTarjeta || null, bancoTarjeta || null, gdAhora(), id]
     );
   }
 
@@ -5569,6 +5605,9 @@
 
   function borrarGastoDiario(id){
     if(!confirm("¿Borrar este gasto diario? Esta acción no se puede deshacer.")) return;
+    // el borrado queda anotado por numero de serie: asi tambien se borra en el otro dispositivo y no vuelve
+    var filaBorrada = dbGet("SELECT uid FROM gastos_diarios WHERE id=?", [id]);
+    if(filaBorrada && filaBorrada.uid) db.run("INSERT OR REPLACE INTO gastos_diarios_borrados (uid, borrado_en) VALUES (?,?)", [filaBorrada.uid, gdAhora()]);
     dbRun("DELETE FROM gastos_diarios WHERE id=?", [id]);
     refrescarDatalists();
     renderListaGastosDiarios();
@@ -8031,12 +8070,14 @@
       return {
         anio: g.anio, mes: g.mes, fecha: g.fecha, detalle: g.detalle, categoria: g.categoria_nombre || "",
         monto: g.monto, prescindible: !!g.prescindible, medio_pago: g.medio_pago || "",
-        tipo_tarjeta: g.tipo_tarjeta || "", banco_tarjeta: g.banco_tarjeta || ""
+        tipo_tarjeta: g.tipo_tarjeta || "", banco_tarjeta: g.banco_tarjeta || "",
+        uid: g.uid || "", actualizado_en: g.actualizado_en || ""
       };
     });
 
     return {personas: personas, categorias: categorias, gastos: gastos, checklist_pagos: checklist, gastos_diarios: gastosDiarios,
-            conciliacion: exportarConciliacion()};
+            conciliacion: exportarConciliacion(),
+            gastos_diarios_borrados: dbAll("SELECT uid, borrado_en FROM gastos_diarios_borrados ORDER BY uid")};
   }
 
   // ---- publicar el estado local en la carpeta ----
@@ -8221,6 +8262,24 @@
           }
         });
 
+        // Notas POR NUMERO DE SERIE (puerto de onedrive_sync._aplicar_gastos_diarios del escritorio): gana la version
+        // editada mas recientemente, los borrados del otro lado se borran aca y no vuelven, dos notas identicas son dos;
+        // transicion: una nota sin par por numero se empareja una vez por fecha+nombre+monto con una heredada de aca.
+        var borradosLocales = {};
+        dbAll("SELECT uid, borrado_en FROM gastos_diarios_borrados").forEach(function(r){ borradosLocales[r.uid] = r.borrado_en; });
+        (data.gastos_diarios_borrados || []).forEach(function(b){
+          var buid = String((b && b.uid) || ""), bts = String((b && b.borrado_en) || "");
+          if(!buid || !bts) return;
+          var loc = dbGet("SELECT id, actualizado_en FROM gastos_diarios WHERE uid=?", [buid]);
+          if(loc && String(loc.actualizado_en || "") <= bts){ db.run("DELETE FROM gastos_diarios WHERE id=?", [loc.id]); huboCambios = true; }
+          if(bts > (borradosLocales[buid] || "")){
+            db.run("INSERT OR REPLACE INTO gastos_diarios_borrados (uid, borrado_en) VALUES (?,?)", [buid, bts]);
+            borradosLocales[buid] = bts;
+          }
+        });
+        var uidsEntrantes = {};
+        (data.gastos_diarios || []).forEach(function(g){ if(g && g.uid) uidsEntrantes[g.uid] = true; });
+        var reclamadas = {};
         (data.gastos_diarios || []).forEach(function(g){
           if(!g || !g.detalle || !g.fecha) return;
           var anio = Number(g.anio), mes = Number(g.mes), monto = Number(g.monto);
@@ -8230,30 +8289,57 @@
           var medioPago = String(g.medio_pago || "").trim();
           var tipoTarjeta = String(g.tipo_tarjeta || "").trim();
           var bancoTarjeta = String(g.banco_tarjeta || "").trim();
+          if(medioPago !== "Tarjeta"){ tipoTarjeta = ""; bancoTarjeta = ""; }
+          var uid = String(g.uid || ""), ts = String(g.actualizado_en || "");
+
+          if(uid){
+            var local = dbGet("SELECT id, uid, actualizado_en FROM gastos_diarios WHERE uid=?", [uid]);
+            if(!local){
+              var cands = dbAll("SELECT id, uid, actualizado_en FROM gastos_diarios WHERE uid_heredado=1 AND fecha=? AND detalle=? AND monto=? ORDER BY id",
+                [g.fecha, g.detalle, monto]);
+              for(var i = 0; i < cands.length; i++){
+                if(!reclamadas[cands[i].id] && !uidsEntrantes[cands[i].uid]){
+                  reclamadas[cands[i].id] = true;
+                  if(uid < cands[i].uid) db.run("UPDATE gastos_diarios SET uid=? WHERE id=?", [uid, cands[i].id]);
+                  local = cands[i];
+                  break;
+                }
+              }
+            }
+            if(local){
+              reclamadas[local.id] = true;
+              if(ts && ts > String(local.actualizado_en || "")){
+                var d2 = new Date(g.fecha + "T00:00:00");
+                db.run("UPDATE gastos_diarios SET anio=?, mes=?, fecha=?, detalle=?, categoria_id=?, monto=?, prescindible=?, medio_pago=?, tipo_tarjeta=?, banco_tarjeta=?, actualizado_en=? WHERE id=?",
+                  [d2.getFullYear(), d2.getMonth() + 1, g.fecha, g.detalle, categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null, monto, prescindible,
+                   medioPago || null, tipoTarjeta || null, bancoTarjeta || null, ts, local.id]);
+                huboCambios = true;
+              }
+              return;
+            }
+            if((borradosLocales[uid] || "") >= (ts || "0")) return;   // se borro aca: no vuelve
+            insertarGastoDiario(g.fecha, g.detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta, uid, ts || gdAhora());
+            huboCambios = true;
+            return;
+          }
+
+          // paquete viejo (sin numero de serie): como siempre, por fecha+nombre+monto
           var existente = dbGet(
             "SELECT * FROM gastos_diarios WHERE anio=? AND mes=? AND fecha=? AND detalle=? AND monto=?",
             [anio, mes, g.fecha, g.detalle, monto]
           );
           if(existente){
-            var catActualNombre = "";
-            if(existente.categoria_id){
-              var cRow2 = dbGet("SELECT nombre FROM categorias WHERE id=?", [existente.categoria_id]);
-              catActualNombre = cRow2 ? cRow2.nombre : "";
-            }
-            var igual2 = catActualNombre === categoriaNombre &&
-                        !!existente.prescindible === !!prescindible &&
-                        (existente.medio_pago || "") === medioPago &&
-                        (existente.tipo_tarjeta || "") === tipoTarjeta &&
-                        (existente.banco_tarjeta || "") === bancoTarjeta;
-            if(igual2) return;
             var categoriaId2 = categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null;
+            if(existente.categoria_id === categoriaId2 && !!existente.prescindible === !!prescindible && (existente.medio_pago || "") === medioPago &&
+               (existente.tipo_tarjeta || "") === tipoTarjeta && (existente.banco_tarjeta || "") === bancoTarjeta) return;
             db.run(
               "UPDATE gastos_diarios SET categoria_id=?, prescindible=?, medio_pago=?, tipo_tarjeta=?, banco_tarjeta=? WHERE id=?",
               [categoriaId2, prescindible, medioPago || null, tipoTarjeta || null, bancoTarjeta || null, existente.id]
             );
             huboCambios = true;
           }else{
-            insertarGastoDiario(g.fecha, g.detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta);
+            var idNota = insertarGastoDiario(g.fecha, g.detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta);
+            db.run("UPDATE gastos_diarios SET uid_heredado=1 WHERE id=?", [idNota]);
             huboCambios = true;
           }
         });
@@ -8766,6 +8852,7 @@
     dupNotasIguales: dupNotasIguales, dupGastosIguales: dupGastosIguales, guardarGasto: guardarGasto,
     cuotaEstado: cuotaEstado, listarUltimasCuotasMes: listarUltimasCuotasMes, mensajeEstadoCuentaWhatsapp: mensajeEstadoCuentaWhatsapp,
     marcarProyectadasCargarMes: marcarProyectadasCargarMes, detalleConSufijo: detalleConSufijo,
+    actualizarGastoDiario: actualizarGastoDiario, insertarGastoDiario: insertarGastoDiario, borrarGastoDiario: borrarGastoDiario,
     mesAnteriorDe: mesAnteriorDe,
     aplicarMatchingAutomatico: aplicarMatchingAutomatico,
     candidatosGastosParaMatching: candidatosGastosParaMatching,
