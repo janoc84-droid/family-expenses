@@ -1349,6 +1349,40 @@
       });
     }
     dbRef.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_gastos_diarios_uid ON gastos_diarios(uid)");
+
+    // Numero de serie para los gastos de Ingreso Manual (origen MANUAL), igual que el escritorio (28-09-2026): dos
+    // identicos siguen siendo dos, editar corrige en el otro dispositivo sin duplicar, y borrar se propaga. La hora de
+    // cada cambio la marca la propia base con triggers, salvo mientras se aplica una sincronizacion (sync_control).
+    [["uid", "TEXT"], ["actualizado_en", "TEXT"], ["uid_heredado", "INTEGER NOT NULL DEFAULT 0"]].forEach(function(c){
+      if(!tieneColumna("gastos", c[0])) dbRef.run("ALTER TABLE gastos ADD COLUMN " + c[0] + " " + c[1]);
+    });
+    dbRef.run("CREATE TABLE IF NOT EXISTS gastos_borrados (uid TEXT PRIMARY KEY, borrado_en TEXT NOT NULL)");
+    dbRef.run("CREATE TABLE IF NOT EXISTS sync_control (id INTEGER PRIMARY KEY CHECK (id = 1), aplicando INTEGER NOT NULL DEFAULT 0)");
+    dbRef.run("INSERT OR IGNORE INTO sync_control (id, aplicando) VALUES (1, 0)");
+    dbRef.run("UPDATE sync_control SET aplicando = 0");
+    var manSinUid = dbRef.exec("SELECT id, created_at FROM gastos WHERE UPPER(origen)='MANUAL' AND uid IS NULL");
+    if(manSinUid.length){
+      manSinUid[0].values.forEach(function(v){
+        dbRef.run("UPDATE gastos SET uid=?, uid_heredado=1, actualizado_en=COALESCE(actualizado_en, ?) WHERE id=?",
+          [gdNuevoUid(), v[1] || "2000-01-01 00:00:00", v[0]]);
+      });
+    }
+    dbRef.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_gastos_uid ON gastos(uid)");
+    var AHORA = "strftime('%Y-%m-%d %H:%M:%f','now')", NO_SYNC = "(SELECT aplicando FROM sync_control WHERE id = 1) = 0";
+    [
+      "CREATE TRIGGER IF NOT EXISTS trg_gastos_manual_nuevo AFTER INSERT ON gastos WHEN UPPER(NEW.origen) = 'MANUAL' AND NEW.uid IS NULL " +
+        "BEGIN UPDATE gastos SET uid = lower(hex(randomblob(16))), actualizado_en = " + AHORA + " WHERE id = NEW.id; END;",
+      "CREATE TRIGGER IF NOT EXISTS trg_gastos_manual_editado AFTER UPDATE ON gastos WHEN UPPER(NEW.origen) = 'MANUAL' AND " +
+        "NEW.actualizado_en IS OLD.actualizado_en AND " + NO_SYNC + " BEGIN UPDATE gastos SET actualizado_en = " + AHORA + " WHERE id = NEW.id; END;",
+      "CREATE TRIGGER IF NOT EXISTS trg_gastos_manual_borrado AFTER DELETE ON gastos WHEN UPPER(OLD.origen) = 'MANUAL' AND OLD.uid IS NOT NULL AND " +
+        NO_SYNC + " BEGIN INSERT OR REPLACE INTO gastos_borrados (uid, borrado_en) VALUES (OLD.uid, " + AHORA + "); END;",
+      "CREATE TRIGGER IF NOT EXISTS trg_reparto_manual_nuevo AFTER INSERT ON gasto_persona WHEN " + NO_SYNC +
+        " BEGIN UPDATE gastos SET actualizado_en = " + AHORA + " WHERE id = NEW.gasto_id AND UPPER(origen) = 'MANUAL'; END;",
+      "CREATE TRIGGER IF NOT EXISTS trg_reparto_manual_editado AFTER UPDATE ON gasto_persona WHEN " + NO_SYNC +
+        " BEGIN UPDATE gastos SET actualizado_en = " + AHORA + " WHERE id = NEW.gasto_id AND UPPER(origen) = 'MANUAL'; END;",
+      "CREATE TRIGGER IF NOT EXISTS trg_reparto_manual_borrado AFTER DELETE ON gasto_persona WHEN " + NO_SYNC +
+        " BEGIN UPDATE gastos SET actualizado_en = " + AHORA + " WHERE id = OLD.gasto_id AND UPPER(origen) = 'MANUAL'; END;"
+    ].forEach(function(sql){ dbRef.run(sql); });
   }
 
   // ---------------------------------------------------------------- utiles
@@ -8123,6 +8157,9 @@
         // -- viaja por sync para que el boton "Ver texto original del banco"
         // tambien funcione en otro dispositivo, no solo en el que importo el PDF.
         descripcion: g.descripcion || "",
+        // Ingreso Manual: numero de serie + ultima modificacion (ver aplicarGastoManualPorUid)
+        uid: String(g.origen || "").toUpperCase() === "MANUAL" ? (g.uid || "") : "",
+        actualizado_en: String(g.origen || "").toUpperCase() === "MANUAL" ? (g.actualizado_en || "") : "",
         personas: reparto.map(function(r){ return {nombre: r.nombre, monto: r.monto}; })
       };
     });
@@ -8147,7 +8184,8 @@
 
     return {personas: personas, categorias: categorias, gastos: gastos, checklist_pagos: checklist, gastos_diarios: gastosDiarios,
             conciliacion: exportarConciliacion(),
-            gastos_diarios_borrados: dbAll("SELECT uid, borrado_en FROM gastos_diarios_borrados ORDER BY uid")};
+            gastos_diarios_borrados: dbAll("SELECT uid, borrado_en FROM gastos_diarios_borrados ORDER BY uid"),
+            gastos_borrados: dbAll("SELECT uid, borrado_en FROM gastos_borrados ORDER BY uid")};
   }
 
   // ---- publicar el estado local en la carpeta ----
@@ -8219,6 +8257,49 @@
   }
 
   // opciones.espejoEscritorio: el paquete viene DEL ESCRITORIO (ver limpiarCargosDelEscritorioQueSobran).
+  // Un gasto de Ingreso Manual que llega con numero de serie (mismo criterio que el escritorio y que las notas): gana la
+  // version editada mas recientemente, los borrados no vuelven, dos identicos son dos; los que ya existian (heredados)
+  // se emparejan una sola vez por su clave natural y convergen al numero menor. Devuelve true si cambio algo.
+  function aplicarGastoManualPorUid(g, uid, ctx){
+    var anio = Number(g.anio), mes = Number(g.mes), monto = Number(g.monto_total), ts = String(g.actualizado_en || "");
+    var local = dbGet("SELECT id, uid, actualizado_en FROM gastos WHERE uid=?", [uid]);
+    if(!local){
+      dbAll("SELECT id, uid, actualizado_en FROM gastos WHERE uid_heredado=1 AND UPPER(origen)='MANUAL' AND anio=? AND mes=? AND fecha=? " +
+            "AND detalle=? AND monto_total=? ORDER BY id", [anio, mes, g.fecha, g.detalle, monto]).some(function(c){
+        if(ctx.reclamados[c.id] || ctx.entrantes[c.uid]) return false;
+        if(uid < c.uid) db.run("UPDATE gastos SET uid=? WHERE id=?", [uid, c.id]);
+        local = c;
+        return true;
+      });
+    }
+    var categoriaNombre = String(g.categoria || "").trim(), empresa = String(g.empresa || "").trim();
+    var cuota = String(g.cuota_texto || "1").trim() || "1", descripcion = String(g.descripcion || "").trim();
+    var valorCuota = (typeof g.valor_cuota === "number" && isFinite(g.valor_cuota)) ? g.valor_cuota : monto;
+    var reparto = {};
+    (g.personas || []).forEach(function(p){ var n = p && String(p.nombre || "").trim(); if(n) reparto[n] = Number(p.monto) || 0; });
+    var gastoId;
+    if(local){
+      ctx.reclamados[local.id] = true;
+      if(!ts || ts <= String(local.actualizado_en || "")) return false;
+      gastoId = local.id;
+      db.run("UPDATE gastos SET anio=?, mes=?, fecha=?, detalle=?, empresa=?, categoria_id=?, monto_total=?, valor_cuota=?, cuota_texto=?, " +
+             "descripcion=COALESCE(NULLIF(?, ''), descripcion), actualizado_en=? WHERE id=?",
+        [anio, mes, g.fecha, g.detalle, empresa || null, categoriaNombre ? obtenerOCrearCategoria(categoriaNombre) : null, monto, valorCuota,
+         cuota, descripcion, ts, gastoId]);
+      if(Object.keys(reparto).length){
+        db.run("DELETE FROM gasto_persona WHERE gasto_id=?", [gastoId]);
+        Object.keys(reparto).forEach(function(n){
+          db.run("INSERT INTO gasto_persona (gasto_id, persona_id, monto) VALUES (?,?,?)", [gastoId, obtenerOCrearPersona(n), reparto[n]]);
+        });
+      }
+      return true;
+    }
+    if((ctx.borrados[uid] || "") >= (ts || "0")) return false;   // se borro aca: no vuelve
+    gastoId = insertarGastoConReparto(g.fecha, g.detalle, empresa, categoriaNombre, monto, cuota, reparto, "MANUAL", [anio, mes], descripcion, valorCuota);
+    db.run("UPDATE gastos SET uid=?, actualizado_en=? WHERE id=?", [uid, ts || gdAhora(), gastoId]);
+    return true;
+  }
+
   function fusionarDatosRemotos(data, opciones){
     var huboCambios = false;
     opciones = opciones || {};
@@ -8239,6 +8320,22 @@
           if(!existente){ obtenerOCrearCategoria(nombre); huboCambios = true; }
         });
 
+        // Ingreso Manual: primero los borrados que llegan (por numero de serie)
+        db.run("UPDATE sync_control SET aplicando = 1");   // los triggers no marcan como "editado aca" lo que llega
+        var manCtx = {borrados: {}, entrantes: {}, reclamados: {}};
+        dbAll("SELECT uid, borrado_en FROM gastos_borrados").forEach(function(r){ manCtx.borrados[r.uid] = r.borrado_en; });
+        (data.gastos_borrados || []).forEach(function(b){
+          var buid = String((b && b.uid) || ""), bts = String((b && b.borrado_en) || "");
+          if(!buid || !bts) return;
+          var loc = dbGet("SELECT id, actualizado_en FROM gastos WHERE uid=? AND UPPER(origen)='MANUAL'", [buid]);
+          if(loc && String(loc.actualizado_en || "") <= bts){ db.run("DELETE FROM gastos WHERE id=?", [loc.id]); huboCambios = true; }
+          if(bts > (manCtx.borrados[buid] || "")){
+            db.run("INSERT OR REPLACE INTO gastos_borrados (uid, borrado_en) VALUES (?,?)", [buid, bts]);
+            manCtx.borrados[buid] = bts;
+          }
+        });
+        (data.gastos || []).forEach(function(g){ if(g && g.uid) manCtx.entrantes[g.uid] = true; });
+
         (data.gastos || []).forEach(function(g){
           if(!g || !g.detalle || !g.fecha) return;
           var anio = Number(g.anio), mes = Number(g.mes), monto = Number(g.monto_total);
@@ -8250,6 +8347,10 @@
           var descripcionOriginal = String(g.descripcion || "").trim();
           var valorCuotaIn = (typeof g.valor_cuota === "number" && isFinite(g.valor_cuota)) ? g.valor_cuota : null;
           var proyectadoIn = g.proyectado ? 1 : 0;
+          if(g.uid && !proyectadoIn && String(g.origen || "manual").trim().toUpperCase() === "MANUAL"){
+            if(aplicarGastoManualPorUid(g, String(g.uid), manCtx)) huboCambios = true;
+            return;
+          }
           // una cuota proyectada que llega del escritorio NO se muestra si aca ya se cargo el PDF de ese cargo (una
           // carga de emergencia en la web): misma compra (texto del banco) y misma cuota, cobrada de verdad.
           if(proyectadoIn && descripcionOriginal && dbGet(
@@ -8419,6 +8520,7 @@
         // decisiones de conciliacion (van al final: necesitan que los gastos y las notas ya existan)
         if(aplicarConciliacionRemota(data.conciliacion) > 0) huboCambios = true;
 
+        db.run("UPDATE sync_control SET aplicando = 0");
         db.run("COMMIT");
       }catch(e){
         db.run("ROLLBACK");
