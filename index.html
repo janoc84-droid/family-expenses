@@ -333,6 +333,9 @@
      (ver domain/matching_gasto_diario.py del escritorio), no del mes
      anterior -- color propio para que se note que es un origen distinto. */
   .cm-heredado-txt{ font-size:.72rem; margin-top:4px; max-width:220px; }
+  .cm-tarjeta{ display:inline-block; font-size:.68rem; font-weight:700; color:#fff; border-radius:4px; padding:1px 6px; margin-top:4px; }
+  .cm-tarjeta.cmr{ background:#1f7a3a; } .cm-tarjeta.lider{ background:#1d5fbf; } .cm-tarjeta.deudas{ background:#5a5a5a; }
+  .cm-total-cuota{ font-size:.72rem; margin-top:4px; color:var(--muted, #9aa0a6); white-space:nowrap; }
   .cm-heredado-txt.cm-heredado-ok{ color:var(--ok); }
   .cm-heredado-txt.cm-heredado-ambiguo{ color:var(--warn); }
   .cm-heredado-txt.cm-heredado-gasto-diario{ color:var(--accent-strong); }
@@ -6532,7 +6535,7 @@
       return {
         lugar: m[1].trim(), fechaCompra: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(),
         cuotaTexto: m[6], primerCargoMes: m[7].split("-")[0], primerCargoAnio: m[7].split("-")[1],
-        valorCuota: aMonto(m[8]),
+        valorCuota: aMonto(m[8]), montoTotal: aMonto(m[5]),
       };
     }
     m = RX_CARGO_SIN_CUOTA.exec(linea);
@@ -6549,7 +6552,7 @@
     if(m){
       return {
         lugar: m[1].trim(), fechaCompra: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(),
-        cuotaTexto: m[6], primerCargoMes: null, primerCargoAnio: null, valorCuota: aMonto(m[7]),
+        cuotaTexto: m[6], primerCargoMes: null, primerCargoAnio: null, valorCuota: aMonto(m[7]), montoTotal: aMonto(m[5]),
       };
     }
     m = RX_ABONO.exec(linea);
@@ -6660,7 +6663,7 @@
       // Ver aplicarMigracionesEsquema (columna gastos.descripcion).
       var detalleFinal = cargo.detalle + (cargo.lugar ? " (" + cargo.lugar + ")" : "");
       var fechaFila = cargo.primerCargoMes ? fechaDesdeMesAnio(cargo.primerCargoMes, cargo.primerCargoAnio, 1) : cargo.fechaCompra;
-      filas.push({fecha: fechaFila || cargo.fechaCompra, detalle: detalleFinal, monto: cargo.valorCuota, cuota: cargo.cuotaTexto || "01/01", personas: "", descripcionOriginal: cargo.detalle});
+      filas.push({fecha: fechaFila || cargo.fechaCompra, detalle: detalleFinal, monto: cargo.valorCuota, cuota: cargo.cuotaTexto || "01/01", personas: "", descripcionOriginal: cargo.detalle, montoCompra: cargo.montoTotal || null});
     });
 
     return {
@@ -6804,7 +6807,7 @@
     // llama (parseLiderLineas) lo pega al detalle final, mismo criterio
     // que Falabella (ver detalleFinal en parseFalabellaLineas).
     var m = RX_LIDER_CUOTAS.exec(linea);
-    if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[7]), cuota: m[6], lugar: m[1] ? m[1].trim() : ""};
+    if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[7]), cuota: m[6], lugar: m[1] ? m[1].trim() : "", montoCompra: aMonto(m[5])};
     m = RX_LIDER_SIMPLE.exec(linea);
     if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[4]), cuota: "01/01", lugar: m[1] ? m[1].trim() : ""};
     return null;
@@ -7523,6 +7526,20 @@
     document.getElementById("cmTotales").innerHTML = "Filas: <b>" + trs.length + "</b> · Total: <b>" + money(total) + "</b>";
   }
 
+  // De que tarjeta viene la fila (etiqueta de color): Lider y Deudas traen su origen; lo demas que vino de un PDF es Falabella.
+  function cmTarjetaDeFila(f){
+    var o = String(f.origen || "").toUpperCase();
+    if(o === "LIDER") return {cls: "lider", texto: "LÍDER"};
+    if(o.indexOf("DEUDAS") >= 0) return {cls: "deudas", texto: "DEUDAS ADIC."};
+    if(f.descripcionOriginal) return {cls: "cmr", texto: "FALABELLA"};
+    return null;
+  }
+  function cmTotalCuotaHtml(f){
+    var mc = /(\d+)\s*\/\s*(\d+)/.exec(String(f.cuota || ""));
+    if(!mc || Number(mc[2]) <= 1 || !f.montoCompra) return "";
+    return "<div class=\"cm-total-cuota\">Total " + money(f.montoCompra) + " · cuota " + escapeHtml(f.cuota) + ": " + money(f.monto) + "</div>";
+  }
+
   function renderTablaCargarMes(){
     var tbody = document.getElementById("cmTablaBody");
     if(cmFilasActuales.length === 0){
@@ -7531,8 +7548,16 @@
       document.getElementById("cmTotales").innerHTML = "";
       return;
     }
+    // separadas por tarjeta: Falabella, Lider, Deudas, y lo agregado a mano al final (orden estable dentro de cada una)
+    var ordenTarjeta = {cmr: 0, lider: 1, deudas: 2};
+    cmFilasActuales = cmFilasActuales.map(function(f, i){ return {f: f, i: i}; }).sort(function(a, b){
+      var ta = cmTarjetaDeFila(a.f), tb = cmTarjetaDeFila(b.f);
+      var oa = ta ? ordenTarjeta[ta.cls] : 3, ob = tb ? ordenTarjeta[tb.cls] : 3;
+      return oa !== ob ? oa - ob : a.i - b.i;
+    }).map(function(x){ return x.f; });
     tbody.innerHTML = cmFilasActuales.map(function(f, i){
       var alerta = calcularAlertaPersonas(f.personas, f.nombresMesAnteriorList);
+      var tarjeta = cmTarjetaDeFila(f);
       var etiquetaHeredado = f.heredado === "proyectada" ? {texto: "✔ ya estaba cargada (cuota proyectada) — se reemplaza por esta", cls: "cm-heredado-ok"} :
         f.heredado === "automatico" ? {texto: "✓ heredado automáticamente del mes anterior", cls: "cm-heredado-ok"} :
         f.heredado === "aproximado" ? {texto: "✓ heredado por monto aproximado", cls: "cm-heredado-ok"} :
@@ -7546,11 +7571,12 @@
       var filaSugerenciaDiaria = !filaNecesitaRevision && f.heredado === "gasto_diario";
       return "<tr data-idx=\"" + i + "\"" + (filaNecesitaRevision ? " class=\"cm-row-alerta\"" : (filaSugerenciaDiaria ? " class=\"cm-row-sugerencia-diaria\"" : "")) + ">" +
         "<td><input type=\"date\" class=\"cm-fecha\" value=\"" + escapeHtml(f.fecha) + "\"></td>" +
-        "<td><input type=\"text\" class=\"cm-detalle\" value=\"" + escapeHtml(f.detalle) + "\"></td>" +
+        "<td><input type=\"text\" class=\"cm-detalle\" value=\"" + escapeHtml(f.detalle) + "\">" +
+          (tarjeta ? "<span class=\"cm-tarjeta " + tarjeta.cls + "\">" + tarjeta.texto + "</span>" : "") + "</td>" +
         "<td><input type=\"text\" class=\"cm-empresa\" list=\"empresasList\" value=\"" + escapeHtml(f.empresa || "") + "\" style=\"width:120px;\"></td>" +
         "<td><input type=\"text\" class=\"cm-categoria\" list=\"categoriasList\" value=\"" + escapeHtml(f.categoria || "") + "\" style=\"width:120px;\"></td>" +
         "<td><input type=\"number\" step=\"1\" class=\"cm-monto\" value=\"" + Math.round(f.monto) + "\" style=\"width:110px;\"></td>" +
-        "<td><input type=\"text\" class=\"cm-cuota\" value=\"" + escapeHtml(f.cuota) + "\" style=\"width:70px;\"></td>" +
+        "<td><input type=\"text\" class=\"cm-cuota\" value=\"" + escapeHtml(f.cuota) + "\" style=\"width:70px;\">" + cmTotalCuotaHtml(f) + "</td>" +
         "<td><input type=\"text\" class=\"cm-personas\" list=\"personasList\" value=\"" + escapeHtml(f.personas || "") + "\" placeholder=\"nombres\" style=\"width:150px;\">" +
           (alerta ? "<div class=\"cm-alerta-txt\">" + escapeHtml(alerta.texto) + "</div>" : "") +
           (etiquetaHeredado ? "<div class=\"cm-heredado-txt " + etiquetaHeredado.cls + "\">" + escapeHtml(etiquetaHeredado.texto) + "</div>" : "") +
