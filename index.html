@@ -436,6 +436,7 @@
   .dup-aviso{ display:flex; flex-wrap:wrap; gap:6px 10px; align-items:center; margin-top:8px; padding:6px 10px;
     border:1px solid var(--bad); border-radius:8px; color:var(--bad); font-size:.85rem; font-weight:600; }
   .dup-aviso[hidden]{ display:none; }
+  .dup-aviso.parecidas{ border-color:var(--warn); color:var(--warn); margin:0 0 8px; }
   .dup-lista{ max-height:50vh; overflow-y:auto; font-size:.82rem; margin:8px 0; }
   .dup-lista div{ padding:3px 0; border-bottom:1px solid var(--border); overflow-wrap:anywhere; }
 
@@ -870,6 +871,10 @@
           <div class="field small"><select id="gdAnio"></select></div>
         </div>
       </div>
+      <div class="dup-aviso parecidas" id="gdParecidas" hidden>
+        <span id="gdParecidasTexto"></span>
+        <button type="button" class="btn-ghost" id="gdParecidasRevisar" style="padding:4px 10px;">Revisar</button>
+      </div>
       <div class="sec-head-row" style="margin-bottom:8px;">
         <input type="text" id="gdBuscar" placeholder="Buscar... (ej. Café, Comida)" style="flex:1 1 220px; margin:0;">
         <button type="button" class="btn-ghost cov-filtro-btn" id="gdSinAsignarBtn">Sin asignar</button>
@@ -1119,6 +1124,11 @@
     "  created_at TEXT NOT NULL DEFAULT (datetime('now'))",
     ");",
     // notas borradas (por numero de serie): viajan en la sincronizacion para que el borrado llegue al otro lado
+    // grupos de notas parecidas (mismo dia y nombre, distinto monto) que el usuario marco "Ya revisado"
+    "CREATE TABLE IF NOT EXISTS notas_parecidas_revisadas (",
+    "  clave TEXT PRIMARY KEY,",
+    "  revisado_en TEXT NOT NULL DEFAULT (datetime('now'))",
+    ");",
     "CREATE TABLE IF NOT EXISTS gastos_diarios_borrados (",
     "  uid TEXT PRIMARY KEY,",
     "  borrado_en TEXT NOT NULL",
@@ -4919,6 +4929,57 @@
     return dbAll("SELECT id, anio, mes, detalle FROM gastos WHERE fecha=? AND ABS(monto_total - ?) < 0.5", [fecha, monto])
       .filter(function(r){ return concNorm(r.detalle) === clave; });
   }
+  // Notas PARECIDAS: mismo dia y nombre, distinto monto (ej. un interes que Falabella cobro despues). Nunca se corrige
+  // nada solo: se avisa y el usuario decide (pedido del usuario, 28-09-2026). Mismo criterio que el escritorio.
+  function gdBuscarParecidas(){
+    var grupos = {}, orden = [];
+    dbAll("SELECT id, uid, fecha, detalle, monto FROM gastos_diarios ORDER BY fecha, id").forEach(function(f){
+      var k = f.fecha + "|" + concNorm(f.detalle);
+      if(!grupos[k]){ grupos[k] = []; orden.push(k); }
+      grupos[k].push(f);
+    });
+    var revisadas = {};
+    dbAll("SELECT clave FROM notas_parecidas_revisadas").forEach(function(r){ revisadas[r.clave] = true; });
+    var salida = [];
+    orden.forEach(function(k){
+      var fs = grupos[k];
+      var montos = {}; fs.forEach(function(f){ montos[Math.round(f.monto * 100)] = true; });
+      if(fs.length < 2 || Object.keys(montos).length < 2) return;
+      var clave = fs.map(function(f){ return f.uid || ("id" + f.id); }).sort().join("|");
+      if(revisadas[clave]) return;
+      var ms = fs.map(function(f){ return f.monto; });
+      salida.push({clave: clave, fecha: fs[0].fecha, detalle: fs[0].detalle, montos: ms, diferencia: Math.max.apply(null, ms) - Math.min.apply(null, ms)});
+    });
+    return salida;
+  }
+  function gdRenderParecidas(){
+    var grupos = gdBuscarParecidas();
+    document.getElementById("gdParecidasTexto").textContent = grupos.length ?
+      "⚠ " + grupos.length + " grupo(s) de notas parecidas: mismo día y nombre, con distinto monto" : "";
+    document.getElementById("gdParecidas").hidden = !grupos.length;
+  }
+  function gdAbrirParecidas(){
+    var grupos = gdBuscarParecidas();
+    abrirModal("<h2>Notas parecidas</h2><p class=\"hint\">Mismo día y mismo nombre, con distinto monto. Puede ser la misma compra con un monto " +
+      "corregido (ej. un interés que Falabella cobró después) o dos gastos distintos. Si sobra una, corrígela o bórrala desde la lista. " +
+      "Si están bien, marca «Ya revisado».</p><div class=\"dup-lista\">" +
+      (grupos.map(function(g){
+        return "<div style=\"display:flex;gap:8px;align-items:center;justify-content:space-between;\"><span>" + escapeHtml(g.fecha + "  «" + g.detalle + "»:  " +
+          g.montos.map(money).join(" / ") + "   (diferencia " + money(g.diferencia) + ")") + "</span>" +
+          "<button type=\"button\" class=\"btn-ghost\" data-parecida-ok=\"" + escapeHtml(g.clave) + "\" style=\"padding:4px 8px;\">Ya revisado</button></div>";
+      }).join("") || "<p class=\"hint\">No quedan notas parecidas por revisar.</p>") +
+      "</div><div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"gdParecidasCerrar\">Cerrar</button></div>");
+    document.getElementById("gdParecidasCerrar").addEventListener("click", cerrarModal);
+    document.querySelectorAll("[data-parecida-ok]").forEach(function(b){
+      b.addEventListener("click", function(){
+        dbRun("INSERT OR REPLACE INTO notas_parecidas_revisadas (clave) VALUES (?)", [b.dataset.parecidaOk]);
+        gdRenderParecidas();
+        gdAbrirParecidas();
+      });
+    });
+  }
+  document.getElementById("gdParecidasRevisar").addEventListener("click", gdAbrirParecidas);
+
   function dupPreguntar(titulo, n, fecha, detalle, monto){
     return window.confirm(
       titulo + (n === 1 ? " (ya existe uno igual)" : " (ya existen " + n + " iguales)") + ":\n" + fecha + "  «" + detalle + "»  " + money(monto) + "\n\n" +
@@ -5542,6 +5603,14 @@
     }else if(!idAntes){
       var igualesNota = dupNotasIguales(fecha, detalle, monto);
       if(igualesNota.length && !dupPreguntar("Esta nota ya existe", igualesNota.length, fecha, detalle, monto)) return;
+      if(!igualesNota.length){
+        var clavePar = concNorm(detalle);
+        var parecida = dbAll("SELECT detalle, monto FROM gastos_diarios WHERE fecha=?", [fecha]).filter(function(r){
+          return concNorm(r.detalle) === clavePar && Math.abs(r.monto - monto) >= 0.5; })[0];
+        if(parecida && !window.confirm("Ese día ya hay «" + parecida.detalle + "» por " + money(parecida.monto) + " (diferencia " +
+            money(Math.abs(monto - parecida.monto)) + ").\n\n• Si es una CORRECCIÓN de esa nota (ej. un interés que se cobró después), " +
+            "mejor edítala: elige Cancelar.\n• Si es OTRO gasto distinto, elige Aceptar y quedan las dos.")) return;
+      }
     }
     if(idAntes){
       actualizarGastoDiario(idAntes, fecha, detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta);
@@ -5746,6 +5815,7 @@
     cont.querySelectorAll("[data-gdedit]").forEach(function(b){ b.addEventListener("click", function(){ editarGastoDiarioForm(Number(b.dataset.gdedit)); }); });
     cont.querySelectorAll("[data-gddel]").forEach(function(b){ b.addEventListener("click", function(){ borrarGastoDiario(Number(b.dataset.gddel)); }); });
     renderComprobadorCoberturaGD();
+    gdRenderParecidas();
   }
   document.getElementById("gdMes").addEventListener("change", renderListaGastosDiarios);
   document.getElementById("gdAnio").addEventListener("change", renderListaGastosDiarios);
@@ -8849,7 +8919,7 @@
     exportarConciliacion: exportarConciliacion, aplicarConciliacionRemota: aplicarConciliacionRemota,
     renderConciliacion: renderConciliacion,
     dupDetectarCopias: dupDetectarCopias, dupEliminarCopias: dupEliminarCopias, revisarDuplicadosWeb: revisarDuplicadosWeb,
-    dupNotasIguales: dupNotasIguales, dupGastosIguales: dupGastosIguales, guardarGasto: guardarGasto,
+    dupNotasIguales: dupNotasIguales, gdBuscarParecidas: gdBuscarParecidas, dupGastosIguales: dupGastosIguales, guardarGasto: guardarGasto,
     cuotaEstado: cuotaEstado, listarUltimasCuotasMes: listarUltimasCuotasMes, mensajeEstadoCuentaWhatsapp: mensajeEstadoCuentaWhatsapp,
     marcarProyectadasCargarMes: marcarProyectadasCargarMes, detalleConSufijo: detalleConSufijo,
     actualizarGastoDiario: actualizarGastoDiario, insertarGastoDiario: insertarGastoDiario, borrarGastoDiario: borrarGastoDiario,
