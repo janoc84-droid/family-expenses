@@ -4210,8 +4210,14 @@
     var cercano = concEsMontoCercano(c.monto, n.monto);
     if(!exacto && !cercano) return null;
     if(cargoEnCuotas && notaEnCuotas){
-      // las dos traen cuota real: tiene que ser LA MISMA cuota
-      if(c.cuotaActual !== n.cuotaActual || c.cuotasTotales !== n.cuotasTotales) return null;
+      // las dos traen cuota real: tiene que ser LA MISMA cuota... salvo la misma compra anotada con otro numero de
+      // cuota (nota 3/3, banco 1/3, mismo total, fechas parecidas) -- igual que el escritorio. Manda el PDF.
+      if(c.cuotasTotales !== n.cuotasTotales) return null;
+      if(c.cuotaActual !== n.cuotaActual){
+        var mismoTotal = n.montoTotal === null || n.montoTotal === undefined || !c.montoTotal || Math.abs(c.montoTotal - n.montoTotal) <= 2;
+        if(!mismoTotal || dias > CONC_DIAS_ALTA_CONFIANZA) return null;
+        return {cargo: c, nota: n, tipo: CONC_TIPO_MONTO, prioridad: exacto ? 0 : 2, dias: dias, esParDeCuota: false, exacto: exacto};
+      }
       return {cargo: c, nota: n, tipo: CONC_TIPO_MONTO, prioridad: exacto ? 0 : 2, dias: dias, esParDeCuota: true, exacto: exacto};
     }
     if(cercano && dias > CONC_DIAS_MAX_CERCANO) return null;   // "casi igual" sin fecha parecida es casualidad
