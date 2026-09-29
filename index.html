@@ -1335,6 +1335,11 @@
     }
     // gastos.proyectado: cuota PROYECTADA (la siguiente de una compra en cuotas), creada por el escritorio al
     // confirmar el mes anterior -- se ve marcada ⏳ y se reemplaza por la real cuando llega el PDF de ese mes.
+    // monto de la OPERACION (precio de la compra, sin intereses): el PDF trae este y el total a pagar (29-09-2026)
+    if(!tieneColumna("gastos", "monto_operacion")) dbRef.run("ALTER TABLE gastos ADD COLUMN monto_operacion REAL");
+    // periodo de facturacion de cada estado de cuenta (lo declara el PDF): a que mes se cruza cada nota
+    dbRef.run("CREATE TABLE IF NOT EXISTS periodos_tarjeta (anio INTEGER NOT NULL, mes INTEGER NOT NULL, tarjeta TEXT NOT NULL, " +
+              "desde TEXT NOT NULL, hasta TEXT NOT NULL, PRIMARY KEY (anio, mes, tarjeta))");
     if(!tieneColumna("gastos", "proyectado")){
       dbRef.run("ALTER TABLE gastos ADD COLUMN proyectado INTEGER NOT NULL DEFAULT 0");
     }
@@ -2168,7 +2173,7 @@
     );
     if(busqueda){
       filas = filas.filter(function(f){
-        return busquedaCoincide(busqueda, [f.detalle, f.empresa, f.nombres, f.descripcion], [f.monto_total, f.valor_cuota], [f.fecha]);
+        return busquedaCoincide(busqueda, [f.detalle, f.empresa, f.nombres, f.descripcion], [f.monto_total, f.valor_cuota, f.monto_operacion], [f.fecha]);
       });
     }
     var cont = document.getElementById("ingLista");
@@ -2596,7 +2601,8 @@
     refrescarTelefonoEc(estado.nombre);
     var items = dbAll(
       "SELECT g.id AS gastoId, g.fecha AS fecha, g.detalle AS detalle, g.empresa AS empresa, g.cuota_texto AS cuota, " +
-      "gp.monto AS monto, g.origen AS origen, g.descripcion AS descripcion, COALESCE(g.proyectado,0) AS proyectado " +
+      "gp.monto AS monto, g.origen AS origen, g.descripcion AS descripcion, COALESCE(g.proyectado,0) AS proyectado, " +
+      "g.monto_total AS montoTotal, g.monto_operacion AS montoOperacion " +
       "FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
       "WHERE p.nombre=? COLLATE NOCASE AND g.anio=? AND g.mes=? ORDER BY g.fecha",
       [estado.nombre, estado.anio, estado.mes]
@@ -2621,7 +2627,7 @@
       if(ecFiltroOrigen !== null && ecCategoriaOrigen(it.origen, it.empresa) !== ecFiltroOrigen) return false;
       if(ecSoloUltimas && it.estadoCuota !== "ULTIMA" && it.estadoCuota !== "PENULTIMA") return false;
       if(!busqueda) return true;
-      return busquedaCoincide(busqueda, [it.detalle, it.empresa, it.descripcion], [it.monto], [it.fecha]);
+      return busquedaCoincide(busqueda, [it.detalle, it.empresa, it.descripcion], [it.monto, it.montoTotal, it.montoOperacion], [it.fecha]);
     });
     var hayFiltroEc = !!busqueda || ecFiltroOrigen !== null || ecSoloUltimas;
     var mensajeVacio = "Sin movimientos este mes.";
@@ -4222,10 +4228,14 @@
     return dif <= Math.min(CONC_TOL_CERCANA_MAX, Math.max(1, CONC_TOL_CERCANA_PCT * Math.abs(a)));
   }
   // ¿La nota trae el valor COMPLETO de una compra que el banco cobra en cuotas? (par TOTAL)
+  // ¿`monto` es el valor completo de la compra? Vale el total a pagar (con intereses) o el precio de la operacion.
+  function concEsValorDeLaCompra(c, monto){
+    return !!((c.montoTotal && Math.abs(c.montoTotal - monto) <= CONC_TOL_EXACTA) ||
+              (c.montoOperacion && Math.abs(c.montoOperacion - monto) <= CONC_TOL_EXACTA));
+  }
   function concEsCompraCompleta(c, n){
-    return !!(concCuotaReal(c.cuotasTotales) && !concCuotaReal(n.cuotasTotales) && c.montoTotal &&
-              Math.abs(c.montoTotal - n.monto) <= CONC_TOL_EXACTA && c.monto !== null &&
-              Math.abs(c.monto - n.monto) > CONC_TOL_EXACTA);
+    return !!(concCuotaReal(c.cuotasTotales) && !concCuotaReal(n.cuotasTotales) && concEsValorDeLaCompra(c, n.monto) &&
+              c.monto !== null && Math.abs(c.monto - n.monto) > CONC_TOL_EXACTA);
   }
 
   // ¿Puede esta nota ser el mismo cargo? null si no hay ninguna pista.
@@ -4234,7 +4244,7 @@
     var dias = concDias(c.fecha, n.fecha);
     var cargoEnCuotas = concCuotaReal(c.cuotasTotales), notaEnCuotas = concCuotaReal(n.cuotasTotales);
     // la nota trae el valor COMPLETO de una compra que el banco cobra en cuotas
-    if(cargoEnCuotas && !notaEnCuotas && c.montoTotal && Math.abs(c.montoTotal - n.monto) <= CONC_TOL_EXACTA &&
+    if(cargoEnCuotas && !notaEnCuotas && concEsValorDeLaCompra(c, n.monto) &&
        Math.abs(c.monto - n.monto) > CONC_TOL_EXACTA){
       return {cargo: c, nota: n, tipo: CONC_TIPO_TOTAL, prioridad: 1, dias: dias, esParDeCuota: false, exacto: true};
     }
@@ -4428,6 +4438,45 @@
   function concISO(d){ return d.toISOString().slice(0, 10); }
   // Dos ventanas: para EMPAREJAR se mira un rango ancho (1 del mes anterior .. fin del mes siguiente, por el desfase
   // del banco); para decir que una nota "no aparece en el estado" solo el periodo propio (7 dias antes del 1 .. fin de mes).
+  // Periodo de facturacion (pedido del usuario 29-09-2026, igual que el escritorio app/domain/periodos.py): si el PDF de
+  // ese mes ya se cargo manda su periodo real; si no, el dia de corte del usuario (Falabella 26, Lider 28). Una compra
+  // despues del corte va en el estado de cuenta del mes siguiente.
+  var PER_CORTE = {CMR: 26, LIDER: 28};
+  function perMesAnt(a, m){ return m === 1 ? [a - 1, 12] : [a, m - 1]; }
+  function perMesSig(a, m){ return m === 12 ? [a + 1, 1] : [a, m + 1]; }
+  function perCorte(t, a, m){ var d = Math.min(PER_CORTE[t] || 31, new Date(Date.UTC(a, m, 0)).getUTCDate()); return concISO(new Date(Date.UTC(a, m - 1, d))); }
+  function perGuardado(t, a, m){
+    try{ var f = dbGet("SELECT desde, hasta FROM periodos_tarjeta WHERE anio=? AND mes=? AND tarjeta=?", [a, m, t]); return f ? [f.desde, f.hasta] : null; }
+    catch(e){ return null; }
+  }
+  function perSumarDias(iso, n){ var d = new Date(iso + "T00:00:00Z"); return concISO(new Date(d.getTime() + n * 86400000)); }
+  function perPeriodo(t, a, m){
+    var g = perGuardado(t, a, m); if(g) return g;
+    var pa = perMesAnt(a, m), ps = perMesSig(a, m);
+    var ant = perGuardado(t, pa[0], pa[1]), sig = perGuardado(t, ps[0], ps[1]);
+    var finAnt = ant ? ant[1] : perCorte(t, pa[0], pa[1]);
+    var fin = sig ? perSumarDias(sig[0], -1) : perCorte(t, a, m);
+    return [perSumarDias(finAnt, 1), fin];
+  }
+  function perMesDelEstado(t, fechaIso){
+    var f = String(fechaIso).slice(0, 10), a = Number(f.slice(0, 4)), m = Number(f.slice(5, 7)), p = perPeriodo(t, a, m);
+    if(f > p[1]) return perMesSig(a, m);
+    if(f < p[0]) return perMesAnt(a, m);
+    return [a, m];
+  }
+  function perDmyAIso(t){ var x = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(String(t || "").trim()); return x ? x[3] + "-" + x[2] + "-" + x[1] : null; }
+  function perGuardar(t, a, m, desdeDmy, hastaDmy){
+    var d = perDmyAIso(desdeDmy), h = perDmyAIso(hastaDmy);
+    if(!d || !h) return false;
+    dbRun("INSERT OR REPLACE INTO periodos_tarjeta (anio, mes, tarjeta, desde, hasta) VALUES (?,?,?,?,?)", [a, m, t, d, h]);
+    return true;
+  }
+
+  function concRangosDeTarjeta(anio, mes, tarjeta){
+    var p = perPeriodo(tarjeta, anio, mes);
+    return {poolDesde: perSumarDias(p[0], -31), poolHasta: perSumarDias(p[1], 31), ventDesde: p[0], ventHasta: p[1]};
+  }
+
   function concRangos(anio, mes){
     var primero = new Date(Date.UTC(anio, mes - 1, 1));
     return {
@@ -4449,7 +4498,7 @@
 
   function concListarCargos(anio, mes, tarjeta){
     var filas = dbAll(
-      "SELECT g.id, g.fecha, g.detalle, g.descripcion, g.monto_total, g.valor_cuota, g.cuota_texto, g.origen, " +
+      "SELECT g.id, g.fecha, g.detalle, g.descripcion, g.monto_total, g.valor_cuota, g.cuota_texto, g.origen, g.monto_operacion, " +
       "COALESCE(c.nombre,'') AS categoria, " +
       "(SELECT SUM(gp.monto) FROM gasto_persona gp WHERE gp.gasto_id=g.id) AS suma_reparto, " +
       "COALESCE((SELECT GROUP_CONCAT(p.nombre, ', ') FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id WHERE gp.gasto_id=g.id),'') AS personas " +
@@ -4463,7 +4512,8 @@
         id: f.id, fecha: f.fecha, detalle: f.detalle || "", descripcion: desc,
         monto: concMontoDelMes(f.valor_cuota, f.suma_reparto, f.monto_total, cuota.total),
         montoTotal: Number(f.monto_total || 0), cuotaActual: cuota.actual, cuotasTotales: cuota.total,
-        categoria: f.categoria, personas: f.personas, claveSerie: concClaveDeSerie(desc, f.monto_total)
+        categoria: f.categoria, personas: f.personas, claveSerie: concClaveDeSerie(desc, f.monto_total),
+        montoOperacion: (f.monto_operacion === null || f.monto_operacion === undefined) ? null : Number(f.monto_operacion)
       };
     });
   }
@@ -4530,7 +4580,7 @@
     var cargoIds = {}; cargos.forEach(function(c){ cargoIds[c.id] = true; });
     var enlaces = concListarEnlaces(cargoIds);
     var series = concSeriesTotalConfirmadas(tarjeta);
-    var rangos = concRangos(anio, mes);
+    var rangos = concRangosDeTarjeta(anio, mes, tarjeta);
     var extra = {}; enlaces.forEach(function(e){ extra[e.notaId] = true; });
     Object.keys(series).forEach(function(k){ extra[series[k]] = true; });
     var notas = concListarNotas(tarjeta, rangos, cargoIds, Object.keys(extra));
@@ -5895,6 +5945,13 @@
       cont.innerHTML = filas.map(function(f){
         var marca = f.prescindible ? "🔻 " : "";
         var medio = etiquetaMedioPago(f.medio_pago, f.tipo_tarjeta, f.banco_tarjeta);
+        // compra con CMR/Lider despues del corte: va en el estado de cuenta de OTRO mes (pedido 29-09-2026)
+        var tarjNota = concTarjetaDeNota(f.medio_pago, f.tipo_tarjeta, f.banco_tarjeta);
+        if(tarjNota === "CMR" || tarjNota === "LIDER"){
+          var mesEc = perMesDelEstado(tarjNota, f.fecha);
+          if(mesEc[0] !== Number(String(f.fecha).slice(0, 4)) || mesEc[1] !== Number(String(f.fecha).slice(5, 7)))
+            medio += " → estado de " + ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"][mesEc[1]];
+        }
         var cuotaTxt = (f.cuotas_totales && f.cuotas_totales > 1) ?
           " <span style=\"opacity:.65;font-size:.78rem;\">(cuota " + escapeHtml(f.cuota_texto || "") + ")</span>" : "";
         var reparto = dbAll("SELECT persona, pagado FROM gasto_diario_persona WHERE gasto_diario_id=? ORDER BY persona COLLATE NOCASE", [f.id]);
@@ -6606,7 +6663,7 @@
       return {
         lugar: m[1].trim(), fechaCompra: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(),
         cuotaTexto: m[6], primerCargoMes: m[7].split("-")[0], primerCargoAnio: m[7].split("-")[1],
-        valorCuota: aMonto(m[8]), montoTotal: aMonto(m[5]),
+        valorCuota: aMonto(m[8]), montoTotal: aMonto(m[5]), montoOperacion: aMonto(m[4]),
       };
     }
     m = RX_CARGO_SIN_CUOTA.exec(linea);
@@ -6624,6 +6681,7 @@
       return {
         lugar: m[1].trim(), fechaCompra: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(),
         cuotaTexto: m[6], primerCargoMes: null, primerCargoAnio: null, valorCuota: aMonto(m[7]), montoTotal: aMonto(m[5]),
+        montoOperacion: aMonto(m[4]),
       };
     }
     m = RX_ABONO.exec(linea);
@@ -6734,7 +6792,7 @@
       // Ver aplicarMigracionesEsquema (columna gastos.descripcion).
       var detalleFinal = cargo.detalle + (cargo.lugar ? " (" + cargo.lugar + ")" : "");
       var fechaFila = cargo.primerCargoMes ? fechaDesdeMesAnio(cargo.primerCargoMes, cargo.primerCargoAnio, 1) : cargo.fechaCompra;
-      filas.push({fecha: fechaFila || cargo.fechaCompra, detalle: detalleFinal, monto: cargo.valorCuota, cuota: cargo.cuotaTexto || "01/01", personas: "", descripcionOriginal: cargo.detalle, montoCompra: cargo.montoTotal || null});
+      filas.push({fecha: fechaFila || cargo.fechaCompra, detalle: detalleFinal, monto: cargo.valorCuota, cuota: cargo.cuotaTexto || "01/01", personas: "", descripcionOriginal: cargo.detalle, montoCompra: cargo.montoTotal || null, montoOperacion: cargo.montoOperacion || null});
     });
 
     return {
@@ -6878,7 +6936,7 @@
     // llama (parseLiderLineas) lo pega al detalle final, mismo criterio
     // que Falabella (ver detalleFinal en parseFalabellaLineas).
     var m = RX_LIDER_CUOTAS.exec(linea);
-    if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[7]), cuota: m[6], lugar: m[1] ? m[1].trim() : "", montoCompra: aMonto(m[5])};
+    if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[7]), cuota: m[6], lugar: m[1] ? m[1].trim() : "", montoCompra: aMonto(m[5]), montoOperacion: aMonto(m[4])};
     m = RX_LIDER_SIMPLE.exec(linea);
     if(m) return {fecha: fechaISOdesdeDDMMYYYY(m[2]), detalle: m[3].trim(), monto: aMonto(m[4]), cuota: "01/01", lugar: m[1] ? m[1].trim() : ""};
     return null;
@@ -7360,13 +7418,13 @@
   // gasto_diario_persona (no LEFT JOIN, como usa el filtro "Sin asignar" de
   // la pestana Gastos Diarios) porque una fila sin nadie asignado todavia
   // no tiene nada que proponer.
-  function candidatosGastoDiarioParaMatching(anio, mes){
+  function candidatosGastoDiarioParaMatching(anio, mes, periodo){
     var filas = dbAll(
       "SELECT gd.id AS gastoDiarioId, gd.detalle AS detalle, gd.fecha AS fecha, gd.cuota_texto AS cuotaTexto, " +
       "gdp.persona AS nombre, gdp.monto AS monto " +
       "FROM gastos_diarios gd JOIN gasto_diario_persona gdp ON gdp.gasto_diario_id = gd.id " +
-      "WHERE gd.anio=? AND gd.mes=? ORDER BY gd.id",
-      [anio, mes]
+      (periodo ? "WHERE gd.fecha BETWEEN ? AND ? ORDER BY gd.id" : "WHERE gd.anio=? AND gd.mes=? ORDER BY gd.id"),
+      periodo ? [periodo[0], periodo[1]] : [anio, mes]
     );
     var porGasto = {};
     filas.forEach(function(f){
@@ -7409,7 +7467,7 @@
   // SOLO para filas de Falabella/Lider (PDF), nunca para Deudas Adicionales
   // (que ya trae su propio reparto explicito del Excel, ver
   // construirFilasDesdeDeudasAdicionales) ni para filas agregadas a mano.
-  function aplicarMatchingAutomatico(filas, intentarGastoDiario){
+  function aplicarMatchingAutomatico(filas, intentarGastoDiario, periodoTarjeta){
     var cache = {};
     var cacheGastoDiario = {};
     filas.forEach(function(f){
@@ -7441,8 +7499,10 @@
       // comentario arriba) -- "ese mismo mes" es el de la FILA (f.fecha),
       // no el mes anterior.
       if(!intentarGastoDiario) return;
-      var claveGD = d.getFullYear() + "-" + (d.getMonth() + 1);
-      if(!(claveGD in cacheGastoDiario)) cacheGastoDiario[claveGD] = candidatosGastoDiarioParaMatching(d.getFullYear(), d.getMonth() + 1);
+      // con el periodo del estado de cuenta (desde/hasta), las notas de ESE periodo -- una compra despues del corte es
+      // del mes siguiente --; sin periodo, el mes calendario de la fila como antes
+      var claveGD = periodoTarjeta ? "periodo" : d.getFullYear() + "-" + (d.getMonth() + 1);
+      if(!(claveGD in cacheGastoDiario)) cacheGastoDiario[claveGD] = candidatosGastoDiarioParaMatching(d.getFullYear(), d.getMonth() + 1, periodoTarjeta);
       var candidatoDiario = encontrarMatchGastoDiario(cacheGastoDiario[claveGD], f.monto, f.cuota);
       if(!candidatoDiario) return;
       var vistosGD = {};
@@ -7607,8 +7667,13 @@
   }
   function cmTotalCuotaHtml(f){
     var mc = /(\d+)\s*\/\s*(\d+)/.exec(String(f.cuota || ""));
-    if(!mc || Number(mc[2]) <= 1 || !f.montoCompra) return "";
-    return "<div class=\"cm-total-cuota\">Total " + money(f.montoCompra) + " · cuota " + escapeHtml(f.cuota) + ": " + money(f.monto) + "</div>";
+    var enCuotas = mc && Number(mc[2]) > 1;
+    var total = enCuotas ? f.montoCompra : f.monto;
+    // los dos montos del PDF: OPERACION (precio) y TOTAL A PAGAR (con intereses), si difieren (pedido 29-09-2026)
+    var op = (f.montoOperacion && total && Math.abs(f.montoOperacion - total) > 0.5) ? "Operación " + money(f.montoOperacion) + " · " : "";
+    if(!enCuotas) return op ? "<div class=\"cm-total-cuota\">" + op + "Total a pagar " + money(total) + "</div>" : "";
+    if(!f.montoCompra) return "";
+    return "<div class=\"cm-total-cuota\">" + op + (op ? "Total a pagar " : "Total ") + money(f.montoCompra) + " · cuota " + escapeHtml(f.cuota) + ": " + money(f.monto) + "</div>";
   }
 
   function renderTablaCargarMes(){
@@ -7746,6 +7811,8 @@
         // poder calcular los avisos de cuadre de cada una con su propia
         // funcion (mismos campos de cuadre, formulas propias de cada banco).
         var filasNuevas = resultado.filas;
+        var cmAnioSel = Number(document.getElementById("cmAnio").value), cmMesSel = Number(document.getElementById("cmMes").value);
+        if(cmAnioSel && cmMesSel) perGuardar(tipo === "lider" ? "LIDER" : "CMR", cmAnioSel, cmMesSel, resultado.cuadre.periodoDesde, resultado.cuadre.periodoHasta);
         var avisosCuadre = tipo === "lider"
           ? calcularAvisosCuadreLider(resultado.cuadre, filasNuevas)
           : calcularAvisosCuadreFalabella(resultado.cuadre, filasNuevas);
@@ -7818,7 +7885,7 @@
         // 2do argumento "true": la red de contencion de Gastos Diarios (ver
         // aplicarMatchingAutomatico/encontrarMatchGastoDiario) aplica para
         // Falabella Y Lider por igual -- ambas pasan por aca.
-        aplicarMatchingAutomatico(filasNuevas, true);
+        aplicarMatchingAutomatico(filasNuevas, true, (cmAnioSel && cmMesSel) ? perPeriodo(tipo === "lider" ? "LIDER" : "CMR", cmAnioSel, cmMesSel) : null);
         // ¿Alguna de estas cuotas ya estaba cargada como PROYECTADA (la crea el escritorio al confirmar el mes
         // anterior)? Misma compra (texto del banco) y misma cuota: se marca "ya estaba cargada", hereda sus nombres,
         // y al confirmar se reemplaza por la real (manda el PDF).
@@ -7990,6 +8057,7 @@
         // descripcion null, a proposito (nunca hubo un PDF que citar).
         if(f.proyectadaId) db.run("DELETE FROM gastos WHERE id=? AND proyectado=1", [f.proyectadaId]);   // la reemplaza la real
         var idGastoNuevo = insertarGastoConReparto(f.fecha, f.detalle.trim(), empresaFinal, categoriaFinal, f.monto, f.cuota || "1", reparto, origenFinal, null, f.descripcionOriginal, f.monto);
+        if(idGastoNuevo && f.montoOperacion) db.run("UPDATE gastos SET monto_operacion=? WHERE id=?", [f.montoOperacion, idGastoNuevo]);
         var tarjetaConc = origenFinal === "IMPORTADO_PDF" ? "CMR" : (String(origenFinal).toUpperCase() === "LIDER" ? "LIDER" : null);
         if(tarjetaConc && idGastoNuevo){
           var gNuevo = dbGet("SELECT anio, mes FROM gastos WHERE id=?", [idGastoNuevo]);
@@ -8289,6 +8357,7 @@
         // lo facturado ESE mes (opcional y aditivo; null si no se conoce)
         valor_cuota: (g.valor_cuota === null || g.valor_cuota === undefined) ? null : g.valor_cuota,
         proyectado: !!g.proyectado,
+        monto_operacion: (g.monto_operacion === null || g.monto_operacion === undefined) ? null : g.monto_operacion,
         origen: g.origen || "manual",
         // descripcion: texto original del banco (ver aplicarMigracionesEsquema)
         // -- viaja por sync para que el boton "Ver texto original del banco"
@@ -8322,7 +8391,8 @@
     return {personas: personas, categorias: categorias, gastos: gastos, checklist_pagos: checklist, gastos_diarios: gastosDiarios,
             conciliacion: exportarConciliacion(),
             gastos_diarios_borrados: dbAll("SELECT uid, borrado_en FROM gastos_diarios_borrados ORDER BY uid"),
-            gastos_borrados: dbAll("SELECT uid, borrado_en FROM gastos_borrados ORDER BY uid")};
+            gastos_borrados: dbAll("SELECT uid, borrado_en FROM gastos_borrados ORDER BY uid"),
+            periodos_tarjeta: dbAll("SELECT anio, mes, tarjeta, desde, hasta FROM periodos_tarjeta ORDER BY anio, mes, tarjeta")};
   }
 
   // ---- publicar el estado local en la carpeta ----
@@ -8653,6 +8723,21 @@
         });
 
         if(opciones.espejoEscritorio && limpiarCargosDelEscritorioQueSobran(data.gastos) > 0) huboCambios = true;
+        // periodos de facturacion: los del escritorio mandan; de otro dispositivo, solo si aca no hay uno
+        (data.periodos_tarjeta || []).forEach(function(pt){
+          if(!pt || !pt.anio || !pt.mes || !pt.tarjeta || !pt.desde || !pt.hasta) return;
+          var act = dbGet("SELECT desde, hasta FROM periodos_tarjeta WHERE anio=? AND mes=? AND tarjeta=?", [pt.anio, pt.mes, pt.tarjeta]);
+          if(act && (!opciones.espejoEscritorio || (act.desde === pt.desde && act.hasta === pt.hasta))) return;
+          db.run("INSERT OR REPLACE INTO periodos_tarjeta (anio, mes, tarjeta, desde, hasta) VALUES (?,?,?,?,?)", [pt.anio, pt.mes, pt.tarjeta, pt.desde, pt.hasta]);
+          huboCambios = true;
+        });
+        // monto de la operacion de los cargos del PDF (dato del banco): se copia tal cual llega
+        (data.gastos || []).forEach(function(g){
+          if(!g || g.monto_operacion === null || g.monto_operacion === undefined || !g.fecha || !g.detalle) return;
+          var r = db.exec("UPDATE gastos SET monto_operacion=? WHERE anio=? AND mes=? AND fecha=? AND detalle=? AND monto_total=? AND monto_operacion IS NOT ?",
+            [g.monto_operacion, Number(g.anio), Number(g.mes), g.fecha, g.detalle, Number(g.monto_total), g.monto_operacion]);
+          if(db.getRowsModified() > 0) huboCambios = true;
+        });
 
         // decisiones de conciliacion (van al final: necesitan que los gastos y las notas ya existan)
         if(aplicarConciliacionRemota(data.conciliacion) > 0) huboCambios = true;
@@ -9158,7 +9243,7 @@
     exportarConciliacion: exportarConciliacion, aplicarConciliacionRemota: aplicarConciliacionRemota,
     renderConciliacion: renderConciliacion,
     dupDetectarCopias: dupDetectarCopias, dupEliminarCopias: dupEliminarCopias, revisarDuplicadosWeb: revisarDuplicadosWeb,
-    dupNotasIguales: dupNotasIguales, busquedaCoincide: busquedaCoincide, gdBuscarParecidas: gdBuscarParecidas, dupGastosIguales: dupGastosIguales, guardarGasto: guardarGasto,
+    dupNotasIguales: dupNotasIguales, busquedaCoincide: busquedaCoincide, perMesDelEstado: perMesDelEstado, perPeriodo: perPeriodo, gdBuscarParecidas: gdBuscarParecidas, dupGastosIguales: dupGastosIguales, guardarGasto: guardarGasto,
     cuotaEstado: cuotaEstado, listarUltimasCuotasMes: listarUltimasCuotasMes, mensajeEstadoCuentaWhatsapp: mensajeEstadoCuentaWhatsapp,
     marcarProyectadasCargarMes: marcarProyectadasCargarMes, detalleConSufijo: detalleConSufijo,
     actualizarGastoDiario: actualizarGastoDiario, insertarGastoDiario: insertarGastoDiario, borrarGastoDiario: borrarGastoDiario,
