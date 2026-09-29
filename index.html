@@ -4529,6 +4529,33 @@
     dbRun("UPDATE conciliacion_ignorados SET activo=0, actualizado_en=datetime('now') WHERE gasto_diario_id=?", [notaId]);
   }
   function concConfirmarPar(p){ concGuardarEnlace(p.cargo.id, p.nota.id, p.tipo); }
+  // Al confirmar Cargar mes (pedido del usuario 29-09-2026, "manda el PDF", igual que el escritorio): lo aprobado con
+  // el nombre de una nota de Gastos Diarios queda vinculado a esa nota, y se confirman solos los pares claros del mes.
+  // Nunca pisa un vinculo/rechazo existente. Sin transaccion propia (va dentro de la de quien llama).
+  function concVincularAlConfirmarCarga(paresCarga, mesesTarjetas){
+    var nuevos = 0;
+    paresCarga.forEach(function(pc){
+      if(dbGet("SELECT 1 AS x FROM conciliacion_diario WHERE gasto_id=? OR gasto_diario_id=?", [pc.cargoId, pc.notaId])) return;
+      if(dbGet("SELECT 1 AS x FROM conciliacion_rechazados WHERE gasto_id=? AND gasto_diario_id=?", [pc.cargoId, pc.notaId])) return;
+      var g = dbGet("SELECT valor_cuota, monto_total, cuota_texto FROM gastos WHERE id=?", [pc.cargoId]);
+      var n = dbGet("SELECT monto FROM gastos_diarios WHERE id=?", [pc.notaId]);
+      if(!g || !n) return;
+      var mc = /(\d+)\s*\/\s*(\d+)/.exec(String(g.cuota_texto || "")), enCuotas = mc && Number(mc[2]) > 1;
+      var cobrado = g.valor_cuota !== null && g.valor_cuota !== undefined ? Number(g.valor_cuota) : Number(g.monto_total);
+      var tipo = Math.abs(cobrado - n.monto) <= 0.5 ? CONC_TIPO_MONTO :
+                 (enCuotas && Math.abs(Number(g.monto_total) - n.monto) <= 0.5 ? CONC_TIPO_TOTAL : CONC_TIPO_MANUAL);
+      concGuardarEnlace(pc.cargoId, pc.notaId, tipo);
+      nuevos++;
+    });
+    Object.keys(mesesTarjetas).forEach(function(k){
+      var mt = mesesTarjetas[k], vista = concCalcular(mt.anio, mt.mes, mt.tarjeta);
+      if(!vista.hayEstado) return;
+      vista.totales.paresClaros.forEach(function(p){
+        try{ concGuardarEnlace(p.cargo.id, p.nota.id, p.tipo); nuevos++; }catch(e){ /* nota ya emparejada en este paso */ }
+      });
+    });
+    return nuevos;
+  }
   function concConfirmarPares(pares){
     db.run("BEGIN");
     try{
@@ -7389,7 +7416,7 @@
       // hecho consumado -- sigue necesitando el mismo clic final de
       // "Confirmar e importar" que cualquier otra fila.
       f.heredado = "gasto_diario";
-      f.gastoDiarioOrigen = {detalle: candidatoDiario.detalle, fecha: candidatoDiario.fecha};
+      f.gastoDiarioOrigen = {id: candidatoDiario.gastoDiarioId, detalle: candidatoDiario.detalle, fecha: candidatoDiario.fecha};
     });
   }
 
@@ -7841,6 +7868,7 @@
     // que hace verificarCuadreMes.
     var sumasPdfPorMes = {};
 
+    var paresCarga = [], mesesTarjetas = {};
     db.run("BEGIN");
     try{
       cmFilasActuales.forEach(function(f){
@@ -7885,7 +7913,13 @@
         // traen -- Deudas Adicionales y filas agregadas a mano quedan con
         // descripcion null, a proposito (nunca hubo un PDF que citar).
         if(f.proyectadaId) db.run("DELETE FROM gastos WHERE id=? AND proyectado=1", [f.proyectadaId]);   // la reemplaza la real
-        insertarGastoConReparto(f.fecha, f.detalle.trim(), empresaFinal, categoriaFinal, f.monto, f.cuota || "1", reparto, origenFinal, null, f.descripcionOriginal, f.monto);
+        var idGastoNuevo = insertarGastoConReparto(f.fecha, f.detalle.trim(), empresaFinal, categoriaFinal, f.monto, f.cuota || "1", reparto, origenFinal, null, f.descripcionOriginal, f.monto);
+        var tarjetaConc = origenFinal === "IMPORTADO_PDF" ? "CMR" : (String(origenFinal).toUpperCase() === "LIDER" ? "LIDER" : null);
+        if(tarjetaConc && idGastoNuevo){
+          var gNuevo = dbGet("SELECT anio, mes FROM gastos WHERE id=?", [idGastoNuevo]);
+          if(gNuevo) mesesTarjetas[gNuevo.anio + "-" + gNuevo.mes + "-" + tarjetaConc] = {anio: gNuevo.anio, mes: gNuevo.mes, tarjeta: tarjetaConc};
+          if(f.heredado === "gasto_diario" && f.gastoDiarioOrigen && f.gastoDiarioOrigen.id) paresCarga.push({cargoId: idGastoNuevo, notaId: f.gastoDiarioOrigen.id});
+        }
 
         if(origenFinal === "IMPORTADO_PDF"){
           var dFila = new Date(f.fecha + "T00:00:00");
@@ -7901,6 +7935,7 @@
           [Number(partes[0]), Number(partes[1]), sumasPdfPorMes[clave]]
         );
       });
+      concVincularAlConfirmarCarga(paresCarga, mesesTarjetas);   // manda el PDF: queda conciliado solo
       db.run("COMMIT");
     }catch(e){
       db.run("ROLLBACK");
