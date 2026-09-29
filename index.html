@@ -7537,7 +7537,11 @@
       f.gastoDiarioOrigen = {id: candidatoDiario.gastoDiarioId, detalle: candidatoDiario.detalle, fecha: candidatoDiario.fecha};
       // el texto anotado a diario suele decir lo que de verdad se pago: se propone como nota (se puede cambiar)
       var textoGD = String(candidatoDiario.detalle || "").replace(/\s+/g, " ").trim().slice(0, 60);
-      if(!f.nota && textoGD && textoGD.toLowerCase() !== String(f.descripcionOriginal || f.detalle || "").trim().toLowerCase()) f.nota = textoGD;
+      // (si la nota diaria solo copia el texto del banco, a veces con la ciudad, no le dice nada nuevo a quien paga)
+      var soloAlnum = function(t){ return String(t || "").toLowerCase().replace(/[^a-z0-9à-ÿ]/g, ""); };
+      var aGD = soloAlnum(textoGD), bGD = soloAlnum(f.descripcionOriginal || f.detalle);
+      var esTextoBanco = !!(aGD && bGD && (aGD.indexOf(bGD) === 0 || bGD.indexOf(aGD) === 0));
+      if(!f.nota && textoGD && !esTextoBanco) f.nota = textoGD;
     });
   }
 
