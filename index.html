@@ -7669,6 +7669,32 @@
     actualizarTotalesCargarMes();
   }
 
+  // Diferencia de pocos pesos (<= $1.000) entre el total que declara el PDF y la suma de sus cargos: se carga al
+  // "cargo de la tarjeta" (impuesto/comision/interes, el que se reparte entre varias personas), SIEMPRE avisando --
+  // pedido del usuario 29-09-2026, igual que el escritorio (_cuadrar_con_cargo_de_tarjeta). Devuelve el aviso o null.
+  function cmCuadrarConCargoDeTarjeta(filas, totalDeclarado, nombreTarjeta){
+    if(totalDeclarado === null || totalDeclarado === undefined) return null;
+    var suma = filas.reduce(function(a, f){ return a + (Number(f.monto) || 0); }, 0);
+    var diferencia = Math.round((totalDeclarado - suma) * 100) / 100;
+    if(Math.abs(diferencia) < 0.5 || Math.abs(diferencia) > 1000) return null;
+    var pesos = function(v){ return money(Math.abs(v)); };
+    var base = "⚖ " + nombreTarjeta + ": el PDF declara " + pesos(totalDeclarado) + " y los cargos suman " + pesos(suma) +
+      " (diferencia " + (diferencia < 0 ? "-" : "+") + pesos(diferencia) + ").";
+    var candidatos = filas.filter(function(f){
+      var texto = (String(f.descripcionOriginal || "") + " " + String(f.detalle || "")).toLowerCase().split("sin interes").join("");
+      var mc = /(\d+)\s*\/\s*(\d+)/.exec(String(f.cuota || "")), enCuotas = mc && Number(mc[2]) > 1;
+      return !enCuotas && ["impuesto", "interes", "comision", "mantencion", "servicio admin"].some(function(p){ return texto.indexOf(p) >= 0; }) &&
+        (Number(f.monto) || 0) + diferencia > 0;
+    });
+    if(!candidatos.length) return {aviso: base + " No encontré el cargo de la tarjeta (impuesto/comisión) para cargarle la diferencia: revísalo a mano.", ajustado: false};
+    var nPers = function(f){ return String(f.personas || "").split(/\s+/).filter(Boolean).length; };
+    var cargo = candidatos.reduce(function(m, f){ return (nPers(f) > nPers(m) || (nPers(f) === nPers(m) && f.monto > m.monto)) ? f : m; });
+    var antes = Number(cargo.monto) || 0;
+    cargo.monto = Math.round((antes + diferencia) * 100) / 100;
+    return {aviso: base + " Se " + (diferencia > 0 ? "sumaron " : "restaron ") + pesos(diferencia) + " al cargo de la tarjeta «" +
+      (cargo.detalle || cargo.descripcionOriginal) + "» (" + pesos(antes) + " → " + pesos(cargo.monto) + ") para que cuadre.", ajustado: true};
+  }
+
   function procesarPdfCargarMes(file){
     mostrarMensajeCargarMes("Leyendo PDF...", "warn");
     var tipo = document.getElementById("cmTipo").value;
@@ -7685,6 +7711,12 @@
         var avisosCuadre = tipo === "lider"
           ? calcularAvisosCuadreLider(resultado.cuadre, filasNuevas)
           : calcularAvisosCuadreFalabella(resultado.cuadre, filasNuevas);
+        var ajusteCuadre = cmCuadrarConCargoDeTarjeta(filasNuevas, resultado.cuadre.montoTotalFacturado, tipo === "lider" ? "Líder" : "CMR Falabella");
+        if(ajusteCuadre){
+          // ya cuadra con el total del PDF: el aviso de "no calzó" queda de mas
+          if(ajusteCuadre.ajustado) avisosCuadre = avisosCuadre.filter(function(a){ return a.indexOf("⚠ El cuadre de") !== 0; });
+          avisosCuadre.push(ajusteCuadre.aviso);
+        }
         // Avisos nuevos (24/09/2026): "Productos o servicios voluntariamente
         // contratados" (Falabella y Lider) y, solo Lider, "Estado de Cuenta
         // Internacional" -- ver parseFalabellaLineas/parseLiderLineas para
