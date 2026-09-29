@@ -4764,7 +4764,8 @@
   // ---- pantalla -----------------------------------------------------------
 
   var concUltimo = null;               // ultima vista calculada (para resolver los ids de los botones)
-  var concAbiertas = {pares: true, falto: true, solo: true, nodiario: false, ignoradas: false};
+  // lo YA conciliado queda oculto (seccion cerrada al final) -- pedido del usuario 29-09-2026, igual que el escritorio
+  var concAbiertas = {pares: true, falto: true, solo: true, conciliados: false, nodiario: false, ignoradas: false};
   var concPeriodoInicialListo = false;
 
   function concFechaCorta(iso){
@@ -4856,8 +4857,8 @@
       (avisos.length ? "<p class=\"hint\">ℹ " + escapeHtml(avisos.join(" · ")) + "</p>" : "");
 
     var html = "";
-    // -- ya anotado
-    var filas = r.contemplados.map(function(p){
+    // -- pares: por confirmar (arriba) / ya conciliados (ocultos, al final)
+    var filaPar = function(p){
       var tc = concTextoCargo(p.cargo), tn = concTextoNota(p.nota);
       if(p.tipo === CONC_TIPO_TOTAL) tn.secundario = (tn.secundario ? tn.secundario + " · " : "") + "la nota trae el valor total de la compra";
       var chip, clase, botones;
@@ -4870,10 +4871,14 @@
       if(p.tipo === CONC_TIPO_MANUAL) chip += " (a mano)";
       var dif = concDiferenciaDePar(p); if(dif) chip += "\nnota − cargo: " + money(dif);
       return concFilaHtml(concLadoHtml("conc-estado", tc.principal, p.cargo.monto, tc.secundario), concLadoHtml("conc-nota", tn.principal, p.nota.monto, tn.secundario), chip, clase, botones);
-    }).join("");
+    };
+    var porConfirmar = r.contemplados.filter(function(p){ return !p.confirmado; });
+    var conciliados = r.contemplados.filter(function(p){ return p.confirmado; });
+    var sumaCargos = function(ps){ return ps.reduce(function(a, p){ return a + (p.cargo.monto || 0); }, 0); };
+    var filas = porConfirmar.map(filaPar).join("");
     var accionesPares = t.paresClaros.length ? "<button type=\"button\" class=\"btn-primary conc-btn conc-btn-sum\" data-conc=\"confirmar-claros\">Confirmar los " + t.paresClaros.length + " claros</button>" : "";
-    html += concSeccionHtml("pares", "✔ Ya anotado — calza con una nota diaria", r.contemplados.length + " · cargo " + money(t.contemplado), "ok",
-      "Izquierda: lo que cobró el banco. Derecha: tu nota. «Claro» = mismo monto, único y fechas parecidas.", r.contemplados.length, filas, accionesPares);
+    html += concSeccionHtml("pares", "⧗ Por confirmar — el programa encontró la nota que parece ser", porConfirmar.length + " · cargo " + money(sumaCargos(porConfirmar)), "acc",
+      "Izquierda: lo que cobró el banco. Derecha: tu nota. «Claro» = mismo monto, único y fechas parecidas.", porConfirmar.length, filas, accionesPares);
     // -- falto anotar
     filas = r.faltoAnotar.map(function(c){
       var tc = concTextoCargo(c);
@@ -4901,6 +4906,8 @@
       return concFilaHtml(concLadoHtml("conc-estado", tc.principal, c.cargo.monto, tc.secundario), concVacioHtml("— sin nota en Gastos Diarios —"), "", "",
         [concBotonHtml("Vincular con una nota…", "elegir-nota", {cargo: c.cargo.id})]);
     }).join("");
+    html += concSeccionHtml("conciliados", "✔ Ya conciliado — listo, no hay que hacer nada", conciliados.length + " · cargo " + money(sumaCargos(conciliados)), "ok",
+      "Cada cargo ya quedó unido a su nota. Ábrelo solo si quieres revisar o desvincular alguno.", conciliados.length, conciliados.map(filaPar).join(""), "");
     html += concSeccionHtml("nodiario", "▪ No se anota a diario — cuotas de meses anteriores, impuestos, intereses, avances", r.noDiario.length + " · " + money(t.noDiario), "mut",
       "Es lo esperado: estas cosas el banco las cobra solo. Están aquí para que el total del estado de cuenta cuadre.", r.noDiario.length, filas, "");
     // -- ignoradas
