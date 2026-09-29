@@ -335,6 +335,7 @@
   .cm-heredado-txt{ font-size:.72rem; margin-top:4px; max-width:220px; }
   .cm-tarjeta{ display:inline-block; font-size:.68rem; font-weight:700; color:#fff; border-radius:4px; padding:1px 6px; margin-top:4px; }
   .cm-tarjeta.cmr{ background:#1f7a3a; } .cm-tarjeta.lider{ background:#1d5fbf; } .cm-tarjeta.deudas{ background:#5a5a5a; }
+  .cm-nota{ display:block; margin-top:4px; width:100%; min-width:180px; font-size:.8rem; }
   .cm-total-cuota{ font-size:.72rem; margin-top:4px; color:var(--muted, #9aa0a6); white-space:nowrap; }
   .cm-heredado-txt.cm-heredado-ok{ color:var(--ok); }
   .cm-heredado-txt.cm-heredado-ambiguo{ color:var(--warn); }
@@ -1337,6 +1338,8 @@
     // confirmar el mes anterior -- se ve marcada ⏳ y se reemplaza por la real cuando llega el PDF de ese mes.
     // monto de la OPERACION (precio de la compra, sin intereses): el PDF trae este y el total a pagar (29-09-2026)
     if(!tieneColumna("gastos", "monto_operacion")) dbRef.run("ALTER TABLE gastos ADD COLUMN monto_operacion REAL");
+    // nota corta para quien paga ("Zapatillas Pame"): el banco pone un nombre que la persona no reconoce (29-09-2026)
+    if(!tieneColumna("gastos", "nota")) dbRef.run("ALTER TABLE gastos ADD COLUMN nota TEXT");
     // periodo de facturacion de cada estado de cuenta (lo declara el PDF): a que mes se cruza cada nota
     dbRef.run("CREATE TABLE IF NOT EXISTS periodos_tarjeta (anio INTEGER NOT NULL, mes INTEGER NOT NULL, tarjeta TEXT NOT NULL, " +
               "desde TEXT NOT NULL, hasta TEXT NOT NULL, PRIMARY KEY (anio, mes, tarjeta))");
@@ -2538,7 +2541,7 @@
     if(items.length === 0) return "<p class=\"hint\">" + escapeHtml(mensajeVacio || "Sin movimientos.") + "</p>";
     var filas = items.map(function(it){
       return "<tr" + (it.proyectado ? " class=\"ec-proyectada\" title=\"Cuota proyectada: todavía no llega el PDF de este mes\"" : "") + "><td>" + it.fecha + "</td><td>" +
-        (it.proyectado ? "⏳ " : "") + escapeHtml(it.detalle) + "</td><td>" + escapeHtml(it.empresa||"") +
+        (it.proyectado ? "⏳ " : "") + escapeHtml(it.detalleMostrado || it.detalle) + "</td><td>" + escapeHtml(it.empresa||"") +
         "</td><td class=\"center\">" + cuotaCeldaHtml(it.cuota) + "</td><td class=\"money\">" + money(it.monto) + "</td>" +
         "<td><div class=\"ec-row-acciones\">" +
           (it.descripcion ? "<button type=\"button\" class=\"icon-btn\" data-ec-vertexto=\"" + it.gastoId + "\" title=\"Ver texto original del banco\">👁</button>" : "") +
@@ -2602,12 +2605,15 @@
     var items = dbAll(
       "SELECT g.id AS gastoId, g.fecha AS fecha, g.detalle AS detalle, g.empresa AS empresa, g.cuota_texto AS cuota, " +
       "gp.monto AS monto, g.origen AS origen, g.descripcion AS descripcion, COALESCE(g.proyectado,0) AS proyectado, " +
-      "g.monto_total AS montoTotal, g.monto_operacion AS montoOperacion " +
+      "g.monto_total AS montoTotal, g.monto_operacion AS montoOperacion, COALESCE(g.nota,'') AS nota " +
       "FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
       "WHERE p.nombre=? COLLATE NOCASE AND g.anio=? AND g.mes=? ORDER BY g.fecha",
       [estado.nombre, estado.anio, estado.mes]
     );
-    items.forEach(function(it){ it.estadoCuota = cuotaEstado(it.cuota); it.proyectado = !!it.proyectado; });
+    items.forEach(function(it){
+      it.estadoCuota = cuotaEstado(it.cuota); it.proyectado = !!it.proyectado;
+      it.detalleMostrado = it.nota ? it.nota + " · " + it.detalle : it.detalle;   // lo que ve quien paga
+    });
     ecItemsActuales = items;
     var total = items.reduce(function(a, it){ return a + it.monto; }, 0);
     var avisoCuadre = verificarCuadreMes(estado.anio, estado.mes);
@@ -2627,7 +2633,7 @@
       if(ecFiltroOrigen !== null && ecCategoriaOrigen(it.origen, it.empresa) !== ecFiltroOrigen) return false;
       if(ecSoloUltimas && it.estadoCuota !== "ULTIMA" && it.estadoCuota !== "PENULTIMA") return false;
       if(!busqueda) return true;
-      return busquedaCoincide(busqueda, [it.detalle, it.empresa, it.descripcion], [it.monto, it.montoTotal, it.montoOperacion], [it.fecha]);
+      return busquedaCoincide(busqueda, [it.detalle, it.empresa, it.descripcion, it.nota], [it.monto, it.montoTotal, it.montoOperacion], [it.fecha]);
     });
     var hayFiltroEc = !!busqueda || ecFiltroOrigen !== null || ecSoloUltimas;
     var mensajeVacio = "Sin movimientos este mes.";
@@ -3778,7 +3784,7 @@
         cols.forEach(function(c, i){ doc.rect(xs[i], y, c.w, rowH, "FD"); });
         doc.setTextColor(0, 0, 0);
         doc.text(String(it.fecha || "").slice(0, 14), xs[0] + 1.5, y + 5);
-        doc.text(detalleConSufijo(it.detalle, 40, it.estadoCuota, it.proyectado), xs[1] + 1.5, y + 5);
+        doc.text(detalleConSufijo(it.detalleMostrado || it.detalle, 40, it.estadoCuota, it.proyectado), xs[1] + 1.5, y + 5);
         doc.text(String(it.empresa || "").slice(0, 28), xs[2] + 1.5, y + 5);
         if(it.estadoCuota === "ULTIMA") doc.setTextColor(200, 30, 40);
         else if(it.estadoCuota === "PENULTIMA") doc.setTextColor(205, 110, 0);
@@ -3868,7 +3874,7 @@
         var montoColor = it.monto >= 0 ? "#0a5abe" : "#be1e23";
         return "<tr style=\"background:" + bg + ";\">" +
           "<td style=\"padding:10px 14px;white-space:nowrap;\">" + escapeHtml(it.fecha) + "</td>" +
-          "<td style=\"padding:10px 14px;\">" + escapeHtml(it.detalle + cuotaSufijo(it.estadoCuota, it.proyectado)) + "</td>" +
+          "<td style=\"padding:10px 14px;\">" + escapeHtml((it.detalleMostrado || it.detalle) + cuotaSufijo(it.estadoCuota, it.proyectado)) + "</td>" +
           "<td style=\"padding:10px 14px;color:#5a5a5a;\">" + escapeHtml(it.empresa || "") + "</td>" +
           "<td style=\"padding:10px 14px;white-space:nowrap;" + (it.estadoCuota === "ULTIMA" ? "color:#c81e28;font-weight:700;" : it.estadoCuota === "PENULTIMA" ? "color:#cd6e00;font-weight:700;" : "color:#5a5a5a;") + "\">" + escapeHtml(it.cuota || "-") + "</td>" +
           "<td style=\"padding:10px 14px;text-align:right;color:" + montoColor + ";font-weight:600;white-space:nowrap;\">" + escapeHtml(money(it.monto)) + "</td>" +
@@ -3983,8 +3989,8 @@
     if(!telefono){ mostrarMensajeExportEc("Escribe un teléfono para enviar por WhatsApp.", "bad"); return; }
     var total = infoTotalEc(estado).totalMostrado;
     var mensaje = mensajeEstadoCuentaWhatsapp(estado.nombre, estado.anio, estado.mes, total,
-      ecItemsActuales.filter(function(it){ return it.estadoCuota === "ULTIMA"; }).map(function(it){ return it.detalle; }),
-      ecItemsActuales.filter(function(it){ return it.estadoCuota === "PENULTIMA"; }).map(function(it){ return it.detalle; }));
+      ecItemsActuales.filter(function(it){ return it.estadoCuota === "ULTIMA"; }).map(function(it){ return it.detalleMostrado || it.detalle; }),
+      ecItemsActuales.filter(function(it){ return it.estadoCuota === "PENULTIMA"; }).map(function(it){ return it.detalleMostrado || it.detalle; }));
     var link = construirLinkWhatsapp(telefono, mensaje);
     actualizarTelefonoPersona(estado.nombre, telefono);
     window.open(link, "_blank", "noopener");
@@ -4074,7 +4080,8 @@
   }
   function listarUltimasCuotasMes(anio, mes){
     return dbAll(
-      "SELECT p.nombre AS persona, g.detalle AS detalle, g.cuota_texto AS cuota, gp.monto AS monto, COALESCE(g.proyectado,0) AS proyectado " +
+      "SELECT p.nombre AS persona, CASE WHEN COALESCE(TRIM(g.nota),'')<>'' THEN g.nota || ' · ' || g.detalle ELSE g.detalle END AS detalle, " +
+      "g.cuota_texto AS cuota, gp.monto AS monto, COALESCE(g.proyectado,0) AS proyectado " +
       "FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id WHERE g.anio=? AND g.mes=?",
       [anio, mes]
     ).map(function(r){ r.estado = cuotaEstado(r.cuota); return r; })
@@ -7349,7 +7356,7 @@
   // matching (equivalente web de GastoHistorico del escritorio).
   function candidatosGastosParaMatching(anio, mes){
     var filas = dbAll(
-      "SELECT g.id AS gastoId, g.fecha AS fecha, g.detalle AS detalle, g.monto_total AS montoTotal, " +
+      "SELECT g.id AS gastoId, g.fecha AS fecha, g.detalle AS detalle, g.monto_total AS montoTotal, g.nota AS nota, " +
       "p.nombre AS nombre, gp.monto AS monto " +
       "FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
       "WHERE g.anio=? AND g.mes=?",
@@ -7360,7 +7367,7 @@
       if(!porGasto[f.gastoId]){
         porGasto[f.gastoId] = {
           gastoId: f.gastoId, fecha: f.fecha, detalleNorm: normalizarDetalleMatch(f.detalle),
-          montoTotal: f.montoTotal, reparto: []
+          montoTotal: f.montoTotal, nota: f.nota || "", reparto: []
         };
       }
       porGasto[f.gastoId].reparto.push({nombre: f.nombre, monto: f.monto});
@@ -7497,6 +7504,7 @@
         if(!nombres.length) return;
         f.personas = nombres.join(" ");
         f.heredado = resultado.ambiguo ? "ambiguo" : (resultado.razon === "fecha_y_descripcion" ? "automatico" : "aproximado");
+        if(!f.nota && resultado.candidato.nota) f.nota = resultado.candidato.nota;   // la nota sigue en la cuota siguiente
         return;
       }
 
@@ -7527,6 +7535,9 @@
       // "Confirmar e importar" que cualquier otra fila.
       f.heredado = "gasto_diario";
       f.gastoDiarioOrigen = {id: candidatoDiario.gastoDiarioId, detalle: candidatoDiario.detalle, fecha: candidatoDiario.fecha};
+      // el texto anotado a diario suele decir lo que de verdad se pago: se propone como nota (se puede cambiar)
+      var textoGD = String(candidatoDiario.detalle || "").replace(/\s+/g, " ").trim().slice(0, 60);
+      if(!f.nota && textoGD && textoGD.toLowerCase() !== String(f.descripcionOriginal || f.detalle || "").trim().toLowerCase()) f.nota = textoGD;
     });
   }
 
@@ -7535,7 +7546,7 @@
     filas.forEach(function(f){
       if(!f.descripcionOriginal || !f.cuota) return;
       var cand = dbAll(
-        "SELECT g.id, g.valor_cuota FROM gastos g WHERE COALESCE(g.proyectado,0)=1 AND g.cuota_texto=? " +
+        "SELECT g.id, g.valor_cuota, g.nota FROM gastos g WHERE COALESCE(g.proyectado,0)=1 AND g.cuota_texto=? " +
         "AND LOWER(TRIM(COALESCE(g.descripcion,'')))=LOWER(TRIM(?)) AND UPPER(g.origen) IN " + CONC_ORIGENES_SQL[tarjeta] + " ORDER BY g.id",
         [f.cuota, f.descripcionOriginal]).filter(function(r){ return !usados[r.id]; })[0];
       if(!cand) return;
@@ -7545,6 +7556,7 @@
       if(nombres.length) f.personas = nombres.join(" ");
       f.proyectadaId = cand.id;
       f.heredado = "proyectada";
+      if(!f.nota && cand.nota) f.nota = cand.nota;
       n++;
     });
     return n;
@@ -7618,6 +7630,7 @@
         monto: Number(tr.querySelector(".cm-monto").value) || 0,
         cuota: tr.querySelector(".cm-cuota").value,
         personas: tr.querySelector(".cm-personas").value,
+        nota: tr.querySelector(".cm-nota") ? tr.querySelector(".cm-nota").value.replace(/\s+/g, " ").trim() : (base.nota || ""),
       }));
     });
     cmFilasActuales = nuevas;
@@ -7714,7 +7727,9 @@
       return "<tr data-idx=\"" + i + "\"" + (filaNecesitaRevision ? " class=\"cm-row-alerta\"" : (filaSugerenciaDiaria ? " class=\"cm-row-sugerencia-diaria\"" : "")) + ">" +
         "<td><input type=\"date\" class=\"cm-fecha\" value=\"" + escapeHtml(f.fecha) + "\"></td>" +
         "<td><input type=\"text\" class=\"cm-detalle\" value=\"" + escapeHtml(f.detalle) + "\">" +
-          (tarjeta ? "<span class=\"cm-tarjeta " + tarjeta.cls + "\">" + tarjeta.texto + "</span>" : "") + "</td>" +
+          (tarjeta ? "<span class=\"cm-tarjeta " + tarjeta.cls + "\">" + tarjeta.texto + "</span>" : "") +
+          "<input type=\"text\" class=\"cm-nota\" maxlength=\"60\" placeholder=\"✎ Nota para quien paga (ej. Zapatillas Pame)\" value=\"" + escapeHtml(f.nota || "") + "\">" +
+          "</td>" +
         "<td><input type=\"text\" class=\"cm-empresa\" list=\"empresasList\" value=\"" + escapeHtml(f.empresa || "") + "\" style=\"width:120px;\"></td>" +
         "<td><input type=\"text\" class=\"cm-categoria\" list=\"categoriasList\" value=\"" + escapeHtml(f.categoria || "") + "\" style=\"width:120px;\"></td>" +
         "<td><input type=\"number\" step=\"1\" class=\"cm-monto\" value=\"" + Math.round(f.monto) + "\" style=\"width:110px;\"></td>" +
@@ -8018,6 +8033,10 @@
     var sumasPdfPorMes = {};
 
     var paresCarga = [], mesesTarjetas = {};
+    // todo lo de esta carga va al MES DEL ESTADO DE CUENTA elegido arriba (igual que el escritorio) -- no al mes de la
+    // fecha de compra de cada cargo: una cuota 6/6 de una compra de marzo se cobra en el estado de septiembre
+    var cmAnioConf = Number(document.getElementById("cmAnio").value), cmMesConf = Number(document.getElementById("cmMes").value);
+    var mesDelEstado = (cmAnioConf && cmMesConf) ? [cmAnioConf, cmMesConf] : null;
     db.run("BEGIN");
     try{
       cmFilasActuales.forEach(function(f){
@@ -8062,8 +8081,9 @@
         // traen -- Deudas Adicionales y filas agregadas a mano quedan con
         // descripcion null, a proposito (nunca hubo un PDF que citar).
         if(f.proyectadaId) db.run("DELETE FROM gastos WHERE id=? AND proyectado=1", [f.proyectadaId]);   // la reemplaza la real
-        var idGastoNuevo = insertarGastoConReparto(f.fecha, f.detalle.trim(), empresaFinal, categoriaFinal, f.monto, f.cuota || "1", reparto, origenFinal, null, f.descripcionOriginal, f.monto);
+        var idGastoNuevo = insertarGastoConReparto(f.fecha, f.detalle.trim(), empresaFinal, categoriaFinal, f.monto, f.cuota || "1", reparto, origenFinal, mesDelEstado, f.descripcionOriginal, f.monto);
         if(idGastoNuevo && f.montoOperacion) db.run("UPDATE gastos SET monto_operacion=? WHERE id=?", [f.montoOperacion, idGastoNuevo]);
+        if(idGastoNuevo && f.nota) db.run("UPDATE gastos SET nota=? WHERE id=?", [String(f.nota).slice(0, 60), idGastoNuevo]);
         var tarjetaConc = origenFinal === "IMPORTADO_PDF" ? "CMR" : (String(origenFinal).toUpperCase() === "LIDER" ? "LIDER" : null);
         if(tarjetaConc && idGastoNuevo){
           var gNuevo = dbGet("SELECT anio, mes FROM gastos WHERE id=?", [idGastoNuevo]);
@@ -8073,7 +8093,7 @@
 
         if(origenFinal === "IMPORTADO_PDF"){
           var dFila = new Date(f.fecha + "T00:00:00");
-          var claveMes = dFila.getFullYear() + "-" + (dFila.getMonth() + 1);
+          var claveMes = mesDelEstado ? mesDelEstado[0] + "-" + mesDelEstado[1] : dFila.getFullYear() + "-" + (dFila.getMonth() + 1);
           sumasPdfPorMes[claveMes] = (sumasPdfPorMes[claveMes] || 0) + f.monto;
         }
       });
@@ -8364,6 +8384,7 @@
         valor_cuota: (g.valor_cuota === null || g.valor_cuota === undefined) ? null : g.valor_cuota,
         proyectado: !!g.proyectado,
         monto_operacion: (g.monto_operacion === null || g.monto_operacion === undefined) ? null : g.monto_operacion,
+        nota: g.nota || "",
         origen: g.origen || "manual",
         // descripcion: texto original del banco (ver aplicarMigracionesEsquema)
         // -- viaja por sync para que el boton "Ver texto original del banco"
@@ -8736,6 +8757,13 @@
           if(act && (!opciones.espejoEscritorio || (act.desde === pt.desde && act.hasta === pt.hasta))) return;
           db.run("INSERT OR REPLACE INTO periodos_tarjeta (anio, mes, tarjeta, desde, hasta) VALUES (?,?,?,?,?)", [pt.anio, pt.mes, pt.tarjeta, pt.desde, pt.hasta]);
           huboCambios = true;
+        });
+        // nota para quien paga: la del escritorio manda (la escribe al cargar el PDF)
+        if(opciones.espejoEscritorio) (data.gastos || []).forEach(function(g){
+          if(!g || typeof g.nota !== "string" || !g.fecha || !g.detalle) return;
+          db.run("UPDATE gastos SET nota=? WHERE anio=? AND mes=? AND fecha=? AND detalle=? AND monto_total=? AND COALESCE(nota,'') <> ?",
+            [g.nota || null, Number(g.anio), Number(g.mes), g.fecha, g.detalle, Number(g.monto_total), g.nota || ""]);
+          if(db.getRowsModified() > 0) huboCambios = true;
         });
         // monto de la operacion de los cargos del PDF (dato del banco): se copia tal cual llega
         (data.gastos || []).forEach(function(g){
