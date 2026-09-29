@@ -714,7 +714,7 @@
           <div class="field small"><select id="ingAnio"></select></div>
         </div>
       </div>
-      <input type="text" id="ingBuscar" placeholder="Buscar... (ej. Agua, Nino)">
+      <input type="text" id="ingBuscar" placeholder="Buscar por nombre, persona, monto o fecha (ej. Nino, 9395, 05/09)">
       <div id="ingLista"></div>
       <div class="totals-line" id="ingTotales"></div>
     </div>
@@ -761,7 +761,7 @@
         <div class="field small"><label>Año</label><select id="ecAnio"></select></div>
         <div class="field grow"><label>Teléfono (WhatsApp)</label><input type="text" id="ecTelefono" placeholder="+56 9 1234 5678"></div>
       </div>
-      <input type="text" id="ecBuscar" placeholder="Buscar deuda... (ej. Furgón, Netflix, Agua)" style="margin-bottom:8px;">
+      <input type="text" id="ecBuscar" placeholder="Buscar por nombre, monto o fecha (ej. Netflix, 9395, 05/09)" style="margin-bottom:8px;">
       <div class="cov-filtros" id="ecFiltroOrigen" style="flex-wrap:wrap; margin-bottom:10px;">
         <button type="button" class="btn-ghost cov-filtro-btn active" data-ecforigen="">Todas</button>
         <button type="button" class="btn-ghost cov-filtro-btn" data-ecforigen="IMPORTADO_PDF">Falabella</button>
@@ -879,7 +879,7 @@
         <button type="button" class="btn-ghost" id="gdParecidasRevisar" style="padding:4px 10px;">Revisar</button>
       </div>
       <div class="sec-head-row" style="margin-bottom:8px;">
-        <input type="text" id="gdBuscar" placeholder="Buscar... (ej. Café, Comida)" style="flex:1 1 220px; margin:0;">
+        <input type="text" id="gdBuscar" placeholder="Buscar por nombre, monto o fecha (ej. Café, 2500, 05/09)" style="flex:1 1 220px; margin:0;">
         <button type="button" class="btn-ghost cov-filtro-btn" id="gdSinAsignarBtn">Sin asignar</button>
       </div>
       <div class="cov-filtros" id="gdFiltroTarjeta" style="flex-wrap:wrap; margin-bottom:10px;" hidden></div>
@@ -1389,6 +1389,40 @@
   }
 
   // ---------------------------------------------------------------- utiles
+
+  // Buscador comun (pedido del usuario 29-09-2026, igual que el escritorio app/domain/busqueda.py): cada palabra tiene
+  // que calzar por TEXTO (sin mayusculas ni tildes), por MONTO ("9395", "9.395", "$9.395", "28666,66"; tambien un pedazo
+  // de las cifras) o por FECHA ("05/09", "5/9/2026", "2026-09-05"). Se pueden combinar: "pame 9395".
+  function busqNorm(t){ return String(t == null ? "" : t).normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase(); }
+  function busquedaCoincide(consulta, textos, montos, fechas){
+    var terminos = busqNorm(consulta).split(/\s+/).filter(Boolean);
+    if(!terminos.length) return true;
+    var texto = (textos || []).filter(Boolean).map(busqNorm).join(" ");
+    var cifras = [];
+    (montos || []).forEach(function(m){
+      if(m === null || m === undefined || !isFinite(Number(m))) return;
+      var v = Math.abs(Number(m)), r = Math.round(v);
+      if(Math.abs(v - r) < 0.005){ cifras.push(String(r)); }
+      else{ cifras.push(String(Math.floor(v))); cifras.push(v.toFixed(2).replace(".", "")); }
+    });
+    return terminos.every(function(t){
+      if(texto.indexOf(t) >= 0) return true;
+      var f = /^(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?$/.exec(t), iso = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(t), buscada = null;
+      if(f){
+        var an = f[3] ? Number(f[3]) : null; if(an !== null && an < 100) an += 2000;
+        if(Number(f[2]) >= 1 && Number(f[2]) <= 12 && Number(f[1]) >= 1 && Number(f[1]) <= 31) buscada = [an, Number(f[2]), Number(f[1])];
+      }else if(iso){ buscada = [Number(iso[1]), Number(iso[2]), Number(iso[3])]; }
+      if(buscada && (fechas || []).some(function(fe){
+        var p = String(fe || "").slice(0, 10).split("-").map(Number);
+        return p.length === 3 && p[1] === buscada[1] && p[2] === buscada[2] && (buscada[0] === null || p[0] === buscada[0]);
+      })) return true;
+      if(/^\$?\d[\d.]*(,\d{1,2})?$/.test(t)){
+        var dig = t.replace(/[^\d]/g, "");
+        if(cifras.some(function(c){ return c.indexOf(dig) >= 0; })) return true;
+      }
+      return false;
+    });
+  }
 
   function escapeHtml(s){
     return String(s==null ? "" : s).replace(/[&<>"']/g, function(c){
@@ -2126,7 +2160,7 @@
   function renderListaIngreso(){
     var anio = Number(document.getElementById("ingAnio").value);
     var mes = Number(document.getElementById("ingMes").value);
-    var busqueda = document.getElementById("ingBuscar").value.trim().toLowerCase();
+    var busqueda = document.getElementById("ingBuscar").value.trim();
     var filas = dbAll(
       "SELECT g.*, (SELECT GROUP_CONCAT(p.nombre, ', ') FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id WHERE gp.gasto_id=g.id) AS nombres " +
       "FROM gastos g WHERE g.anio=? AND g.mes=? ORDER BY g.fecha DESC, g.id DESC",
@@ -2134,9 +2168,7 @@
     );
     if(busqueda){
       filas = filas.filter(function(f){
-        return (f.detalle||"").toLowerCase().indexOf(busqueda) >= 0 ||
-               (f.empresa||"").toLowerCase().indexOf(busqueda) >= 0 ||
-               (f.nombres||"").toLowerCase().indexOf(busqueda) >= 0;
+        return busquedaCoincide(busqueda, [f.detalle, f.empresa, f.nombres, f.descripcion], [f.monto_total, f.valor_cuota], [f.fecha]);
       });
     }
     var cont = document.getElementById("ingLista");
@@ -2584,12 +2616,12 @@
     // del mes y el veredicto de cuadre siempre usan el mes COMPLETO sin
     // filtrar, igual que en el escritorio (_filtro_origen/busqueda en
     // _renderizar_items nunca tocan estado.items ni estado.total_mostrado).
-    var busqueda = document.getElementById("ecBuscar").value.trim().toLowerCase();
+    var busqueda = document.getElementById("ecBuscar").value.trim();
     var itemsFiltrados = items.filter(function(it){
       if(ecFiltroOrigen !== null && ecCategoriaOrigen(it.origen, it.empresa) !== ecFiltroOrigen) return false;
       if(ecSoloUltimas && it.estadoCuota !== "ULTIMA" && it.estadoCuota !== "PENULTIMA") return false;
       if(!busqueda) return true;
-      return (it.detalle||"").toLowerCase().indexOf(busqueda) >= 0 || (it.empresa||"").toLowerCase().indexOf(busqueda) >= 0;
+      return busquedaCoincide(busqueda, [it.detalle, it.empresa, it.descripcion], [it.monto], [it.fecha]);
     });
     var hayFiltroEc = !!busqueda || ecFiltroOrigen !== null || ecSoloUltimas;
     var mensajeVacio = "Sin movimientos este mes.";
@@ -5801,7 +5833,7 @@
   function renderListaGastosDiarios(){
     var anio = Number(document.getElementById("gdAnio").value);
     var mes = Number(document.getElementById("gdMes").value);
-    var busqueda = document.getElementById("gdBuscar").value.trim().toLowerCase();
+    var busqueda = document.getElementById("gdBuscar").value.trim();
     var todasDelMes = dbAll(
       "SELECT gd.*, COALESCE(c.nombre,'Sin categoría') AS categoria FROM gastos_diarios gd " +
       "LEFT JOIN categorias c ON c.id=gd.categoria_id WHERE gd.anio=? AND gd.mes=? ORDER BY gd.fecha DESC, gd.id DESC",
@@ -5834,8 +5866,7 @@
     var filas = todasDelMes;
     if(busqueda){
       filas = filas.filter(function(f){
-        return (f.detalle||"").toLowerCase().indexOf(busqueda) >= 0 ||
-               (f.categoria||"").toLowerCase().indexOf(busqueda) >= 0;
+        return busquedaCoincide(busqueda, [f.detalle, f.categoria], [f.monto, f.monto_total], [f.fecha]);
       });
     }
     if(gdSoloSinAsignar){
@@ -9120,7 +9151,7 @@
     exportarConciliacion: exportarConciliacion, aplicarConciliacionRemota: aplicarConciliacionRemota,
     renderConciliacion: renderConciliacion,
     dupDetectarCopias: dupDetectarCopias, dupEliminarCopias: dupEliminarCopias, revisarDuplicadosWeb: revisarDuplicadosWeb,
-    dupNotasIguales: dupNotasIguales, gdBuscarParecidas: gdBuscarParecidas, dupGastosIguales: dupGastosIguales, guardarGasto: guardarGasto,
+    dupNotasIguales: dupNotasIguales, busquedaCoincide: busquedaCoincide, gdBuscarParecidas: gdBuscarParecidas, dupGastosIguales: dupGastosIguales, guardarGasto: guardarGasto,
     cuotaEstado: cuotaEstado, listarUltimasCuotasMes: listarUltimasCuotasMes, mensajeEstadoCuentaWhatsapp: mensajeEstadoCuentaWhatsapp,
     marcarProyectadasCargarMes: marcarProyectadasCargarMes, detalleConSufijo: detalleConSufijo,
     actualizarGastoDiario: actualizarGastoDiario, insertarGastoDiario: insertarGastoDiario, borrarGastoDiario: borrarGastoDiario,
