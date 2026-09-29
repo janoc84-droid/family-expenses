@@ -4444,7 +4444,13 @@
   var PER_CORTE = {CMR: 26, LIDER: 28};
   function perMesAnt(a, m){ return m === 1 ? [a - 1, 12] : [a, m - 1]; }
   function perMesSig(a, m){ return m === 12 ? [a + 1, 1] : [a, m + 1]; }
-  function perCorte(t, a, m){ var d = Math.min(PER_CORTE[t] || 31, new Date(Date.UTC(a, m, 0)).getUTCDate()); return concISO(new Date(Date.UTC(a, m - 1, d))); }
+  // manda el PDF: el dia de corte del ULTIMO estado de cuenta cargado de esa tarjeta; solo sin ninguno, el del usuario
+  function perDiaDeCorte(t){
+    try{ var f = dbGet("SELECT hasta FROM periodos_tarjeta WHERE tarjeta=? ORDER BY anio DESC, mes DESC LIMIT 1", [t]); if(f) return Number(String(f.hasta).slice(8, 10)); }
+    catch(e){}
+    return PER_CORTE[t] || 31;
+  }
+  function perCorte(t, a, m){ var d = Math.min(perDiaDeCorte(t), new Date(Date.UTC(a, m, 0)).getUTCDate()); return concISO(new Date(Date.UTC(a, m - 1, d))); }
   function perGuardado(t, a, m){
     try{ var f = dbGet("SELECT desde, hasta FROM periodos_tarjeta WHERE anio=? AND mes=? AND tarjeta=?", [a, m, t]); return f ? [f.desde, f.hasta] : null; }
     catch(e){ return null; }
