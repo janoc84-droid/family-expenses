@@ -6113,11 +6113,18 @@
     var anio = Number(document.getElementById("gdAnio").value);
     var mes = Number(document.getElementById("gdMes").value);
     var busqueda = document.getElementById("gdBuscar").value.trim();
+    // norma de la fecha de corte (igual que el escritorio): una compra con CMR o Lider de credito se ve en el mes de su
+    // ESTADO DE CUENTA (la del 29/09 con la Lider, despues del corte, en octubre); lo demas, en su mes del calendario
+    var mAnt = mes === 1 ? [anio - 1, 12] : [anio, mes - 1], mSig = mes === 12 ? [anio + 1, 1] : [anio, mes + 1];
     var todasDelMes = dbAll(
       "SELECT gd.*, COALESCE(c.nombre,'Sin categoría') AS categoria FROM gastos_diarios gd " +
-      "LEFT JOIN categorias c ON c.id=gd.categoria_id WHERE gd.anio=? AND gd.mes=? ORDER BY gd.fecha DESC, gd.id DESC",
-      [anio, mes]
-    );
+      "LEFT JOIN categorias c ON c.id=gd.categoria_id WHERE (gd.anio*100+gd.mes) BETWEEN ? AND ? ORDER BY gd.fecha DESC, gd.id DESC",
+      [mAnt[0] * 100 + mAnt[1], mSig[0] * 100 + mSig[1]]
+    ).filter(function(f){
+      var t = concTarjetaDeNota(f.medio_pago, f.tipo_tarjeta, f.banco_tarjeta);
+      if(t === "CMR" || t === "LIDER"){ var e = perMesDelEstado(t, f.fecha); return e[0] === anio && e[1] === mes; }
+      return Number(f.anio) === anio && Number(f.mes) === mes;
+    });
 
     // los chips se arman con TODO el mes (no con lo ya filtrado por texto o
     // "Sin asignar"), igual que el escritorio -- y si la tarjeta elegida ya
