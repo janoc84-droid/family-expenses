@@ -6217,15 +6217,19 @@
           if(mesEc[0] !== Number(String(f.fecha).slice(0, 4)) || mesEc[1] !== Number(String(f.fecha).slice(5, 7)))
             medio += " → estado de " + ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"][mesEc[1]];
         }
+        // ultima cuota (rojo) / queda una (naranja) -- mismo sistema que el Estado de Cuenta (30-09-2026)
+        var estC = (f.cuotas_totales && f.cuotas_totales > 1) ? cuotaEstado(f.cuota_texto) : null;
+        var colorCuota = estC === "ULTIMA" ? "var(--bad)" : (estC === "PENULTIMA" ? "var(--warn)" : "");
         var cuotaTxt = (f.cuotas_totales && f.cuotas_totales > 1) ?
-          " <span style=\"opacity:.65;font-size:.78rem;\">(cuota " + escapeHtml(f.cuota_texto || "") + ")</span>" : "";
+          " <span style=\"" + (colorCuota ? "color:" + colorCuota + ";font-weight:600;" : "opacity:.65;") + "font-size:.78rem;\">(cuota " + escapeHtml(f.cuota_texto || "") +
+          (estC === "ULTIMA" ? " ÚLTIMA" : (estC === "PENULTIMA" ? " · queda 1" : "")) + ")</span>" : "";
         var reparto = dbAll("SELECT persona, pagado FROM gasto_diario_persona WHERE gasto_diario_id=? ORDER BY persona COLLATE NOCASE", [f.id]);
         var repartoTxt = reparto.length ?
           " · " + reparto.map(function(r){ return (r.pagado ? "✓ " : "⏳ ") + escapeHtml(r.persona); }).join(", ") : "";
         return "<div class=\"list-row\">" +
           "<div class=\"list-row-main\">" +
             "<span class=\"list-fecha\">" + f.fecha + "</span>" +
-            "<span class=\"list-detalle\">" + marca + escapeHtml(f.detalle) + cuotaTxt + "</span>" +
+            "<span class=\"list-detalle\"" + (colorCuota ? " style=\"color:" + colorCuota + "\"" : "") + ">" + marca + escapeHtml(f.detalle) + cuotaTxt + "</span>" +
             "<span class=\"list-nombres\">" + escapeHtml(f.categoria) + " · " + escapeHtml(medio) + repartoTxt + "</span>" +
           "</div>" +
           "<div class=\"list-row-side\">" +
@@ -6240,7 +6244,12 @@
     var total = filas.reduce(function(a, f){ return a + f.monto; }, 0);
     var totalPrescindible = filas.reduce(function(a, f){ return a + (f.prescindible ? f.monto : 0); }, 0);
     document.getElementById("gdTotales").innerHTML =
-      "Gastos: <b>" + filas.length + "</b> · " + (hayFiltro ? "Total filtrado" : "Total") + ": <b>" + money(total) + "</b> · Prescindible: <b>" + money(totalPrescindible) + "</b>";
+      "Gastos: <b>" + filas.length + "</b> · " + (hayFiltro ? "Total filtrado" : "Total") + ": <b>" + money(total) + "</b> · Prescindible: <b>" + money(totalPrescindible) + "</b>" +
+      (function(){
+        var u = filas.filter(function(f){ return f.cuotas_totales > 1 && cuotaEstado(f.cuota_texto) === "ULTIMA"; }).length;
+        var q = filas.filter(function(f){ return f.cuotas_totales > 1 && cuotaEstado(f.cuota_texto) === "PENULTIMA"; }).length;
+        return (u || q) ? " · <span style=\"color:var(--bad)\">⏰ " + u + " terminan este mes</span> · <span style=\"color:var(--warn)\">" + q + " quedan con 1 cuota</span>" : "";
+      })();
     cont.querySelectorAll("[data-gdreparto]").forEach(function(b){ b.addEventListener("click", function(){ abrirRepartoGastoDiario(Number(b.dataset.gdreparto)); }); });
     cont.querySelectorAll("[data-gdedit]").forEach(function(b){ b.addEventListener("click", function(){ editarGastoDiarioForm(Number(b.dataset.gdedit)); }); });
     cont.querySelectorAll("[data-gddel]").forEach(function(b){ b.addEventListener("click", function(){ borrarGastoDiario(Number(b.dataset.gddel)); }); });
