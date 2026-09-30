@@ -2685,9 +2685,20 @@
     var btn = ev.target.closest("[data-ecforigen]");
     if(!btn) return;
     ecFiltroOrigen = btn.dataset.ecforigen || null;
+    if(ecFiltroOrigen === null){
+      // "Todas" = ver TODO de nuevo: tambien apaga "Últimas cuotas" (igual que el escritorio, 30-09-2026)
+      ecSoloUltimas = false;
+      var bu = document.getElementById("ecSoloUltimas"); if(bu) bu.classList.remove("active");
+    }
     document.querySelectorAll("#ecFiltroOrigen .cov-filtro-btn").forEach(function(b){ b.classList.toggle("active", b === btn); });
     renderEstadoCuenta();
+    ecVolverArriba();
   });
+  // al cambiar un filtro, si se habia bajado mas alla de los filtros, se vuelve a ellos (no queda viendo un vacio)
+  function ecVolverArriba(){
+    var ancla = document.getElementById("ecFiltroOrigen");
+    if(ancla && ancla.getBoundingClientRect().top < 0) ancla.scrollIntoView({block: "start"});
+  }
 
   // -------------------------------------------- modal generico (sin dependencias)
 
@@ -4110,6 +4121,7 @@
     ecSoloUltimas = !ecSoloUltimas;
     document.getElementById("ecSoloUltimas").classList.toggle("active", ecSoloUltimas);
     renderEstadoCuenta();
+    ecVolverArriba();
   });
 
   // ---------------------------------------------------------------- Conciliacion: estado de cuenta (CMR / Lider) <-> Gastos Diarios
