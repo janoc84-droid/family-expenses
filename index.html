@@ -868,6 +868,8 @@
           <input type="text" id="gdBancoTarjeta" list="bancosTarjetaList" placeholder="Ej. CMR Falabella">
         </div>
       </div>
+      <!-- norma del usuario (30-09-2026): compra con CMR/Lider despues del corte = estado de cuenta del mes siguiente -->
+      <p class="hint" id="gdAvisoCorte" hidden style="margin:-4px 0 8px;"></p>
 
       <label class="checkbox-line">
         <input type="checkbox" id="gdPrescindible">
@@ -5752,7 +5754,29 @@
     var esTarjeta = document.getElementById("gdMedioPago").value === "Tarjeta";
     document.getElementById("gdTipoTarjetaField").hidden = !esTarjeta;
     document.getElementById("gdBancoTarjetaField").hidden = !esTarjeta;
+    gdActualizarAvisoCorte();
   }
+  // A que estado de cuenta va una compra con CMR / Lider segun su fecha (igual que el escritorio): despues del corte,
+  // al del mes siguiente; se paga el mes que sigue a ese.
+  function gdActualizarAvisoCorte(){
+    var el = document.getElementById("gdAvisoCorte");
+    var tarjeta = concTarjetaDeNota(document.getElementById("gdMedioPago").value, document.getElementById("gdTipoTarjeta").value,
+                                    document.getElementById("gdBancoTarjeta").value);
+    var fecha = document.getElementById("gdFecha").value;
+    if((tarjeta !== "CMR" && tarjeta !== "LIDER") || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)){ el.hidden = true; return; }
+    var mesEc = perMesDelEstado(tarjeta, fecha), per = perPeriodo(tarjeta, mesEc[0], mesEc[1]);
+    var nombres = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+    var texto = "💳 Va en el estado de cuenta de " + (tarjeta === "CMR" ? "Falabella" : "Líder") + " de " + nombres[mesEc[1]] +
+      " (cierra el " + per[1].slice(8, 10) + "/" + per[1].slice(5, 7) + ") y se paga en " + nombres[mesEc[1] === 12 ? 1 : mesEc[1] + 1] + ".";
+    var despues = mesEc[0] !== Number(fecha.slice(0, 4)) || mesEc[1] !== Number(fecha.slice(5, 7));
+    el.textContent = (despues ? "⏭ Después de la fecha de corte: " : "") + texto;
+    el.style.color = despues ? "var(--warn)" : "";
+    el.hidden = false;
+  }
+  ["gdFecha", "gdTipoTarjeta", "gdBancoTarjeta"].forEach(function(id){
+    document.getElementById(id).addEventListener("input", gdActualizarAvisoCorte);
+    document.getElementById(id).addEventListener("change", gdActualizarAvisoCorte);
+  });
   document.getElementById("gdMedioPago").addEventListener("change", actualizarCamposTarjetaGD);
   document.getElementById("gdMontoCalcBtn").addEventListener("click", function(){ abrirCalculadora("gdMonto"); });
   (function(){
