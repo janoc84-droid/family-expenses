@@ -198,6 +198,17 @@
     padding:8px 14px; border-radius:999px; font-size:.85rem; font-weight:600; cursor:pointer; white-space:nowrap;
   }
   .tab-btn.active{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
+  /* colores por grupo (igual que el escritorio): la pestana abierta en un tono mas claro y con borde */
+  .tab-btn.grupo-diario{ background:#1d5e3c; border-color:#1d5e3c; color:#fff; }
+  .tab-btn.grupo-carga{ background:#5b3b7a; border-color:#5b3b7a; color:#fff; }
+  .tab-btn.grupo-analisis{ background:#1b4c78; border-color:#1b4c78; color:#fff; }
+  .tab-btn.grupo-diario.active{ background:#2fa866; border-color:#fff; }
+  .tab-btn.grupo-carga.active{ background:#9a6bd1; border-color:#fff; }
+  .tab-btn.grupo-analisis.active{ background:#3a8fd6; border-color:#fff; }
+  .tabs-leyenda{ display:flex; gap:6px; padding-top:8px; font-size:.7rem; font-weight:600; }
+  .tabs-leyenda span{ color:#fff; padding:2px 8px; border-radius:999px; }
+  .tabs-leyenda .grupo-diario{ background:#1d5e3c; } .tabs-leyenda .grupo-carga{ background:#5b3b7a; }
+  .tabs-leyenda .grupo-analisis{ background:#1b4c78; }
   .tab-btn .dot-construccion{ opacity:.7; margin-left:2px; }
 
   main{ padding-top:6px; }
@@ -563,16 +574,21 @@
       <span id="dupAvisoTexto"></span>
       <button type="button" class="btn-danger" id="dupAvisoRevisar" style="padding:4px 10px;">Revisar</button>
     </div>
+    <!-- mismo orden y colores que el escritorio (elegidos por el usuario 30-09-2026): verde = diario,
+         morado = carga del mes (trabajan en conjunto), azul = analisis y seguimiento -->
+    <div class="tabs-leyenda" aria-hidden="true">
+      <span class="grupo-diario">Diario</span><span class="grupo-carga">Carga del mes</span><span class="grupo-analisis">Análisis y seguimiento</span>
+    </div>
     <nav class="tabs" id="tabsNav">
-      <button class="tab-btn" type="button" data-tab="cargarmes">Cargar mes</button>
-      <button class="tab-btn" type="button" data-tab="ingreso">Ingreso Manual</button>
-      <button class="tab-btn" type="button" data-tab="resumen">Resumen Mensual</button>
-      <button class="tab-btn" type="button" data-tab="estadocuenta">Estado de Cuenta</button>
-      <button class="tab-btn" type="button" data-tab="categorizar">Categorizar</button>
-      <button class="tab-btn" type="button" data-tab="gastosdiarios">Gastos Diarios</button>
-      <button class="tab-btn" type="button" data-tab="paneldiario">Panel Diario</button>
-      <button class="tab-btn" type="button" data-tab="checklist">Checklist Pagos</button>
-      <button class="tab-btn" type="button" data-tab="conciliacion">Conciliación</button>
+      <button class="tab-btn grupo-diario" type="button" data-tab="gastosdiarios">Gastos Diarios</button>
+      <button class="tab-btn grupo-diario" type="button" data-tab="paneldiario">Panel Diario</button>
+      <button class="tab-btn grupo-carga" type="button" data-tab="cargarmes">Cargar mes</button>
+      <button class="tab-btn grupo-carga" type="button" data-tab="ingreso">Ingreso Manual</button>
+      <button class="tab-btn grupo-carga" type="button" data-tab="estadocuenta">Estado de Cuenta</button>
+      <button class="tab-btn grupo-analisis" type="button" data-tab="resumen">Resumen Mensual</button>
+      <button class="tab-btn grupo-analisis" type="button" data-tab="checklist">Checklist Pagos</button>
+      <button class="tab-btn grupo-analisis" type="button" data-tab="conciliacion">Conciliación</button>
+      <button class="tab-btn grupo-analisis" type="button" data-tab="categorizar">Categorizar</button>
     </nav>
   </div>
 </header>
