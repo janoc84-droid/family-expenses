@@ -5307,7 +5307,8 @@
       var clave = fs.map(function(f){ return f.uid || ("id" + f.id); }).sort().join("|");
       if(revisadas[clave]) return;
       var ms = fs.map(function(f){ return f.monto; });
-      salida.push({clave: clave, fecha: fs[0].fecha, detalle: fs[0].detalle, montos: ms, diferencia: Math.max.apply(null, ms) - Math.min.apply(null, ms)});
+      salida.push({clave: clave, fecha: fs[0].fecha, detalle: fs[0].detalle, montos: ms, diferencia: Math.max.apply(null, ms) - Math.min.apply(null, ms),
+                   ids: fs.map(function(f){ return f.id; })});
     });
     return salida;
   }
@@ -5325,10 +5326,14 @@
       (grupos.map(function(g){
         return "<div style=\"display:flex;gap:8px;align-items:center;justify-content:space-between;\"><span>" + escapeHtml(g.fecha + "  «" + g.detalle + "»:  " +
           g.montos.map(money).join(" / ") + "   (diferencia " + money(g.diferencia) + ")") + "</span>" +
-          "<button type=\"button\" class=\"btn-ghost\" data-parecida-ok=\"" + escapeHtml(g.clave) + "\" style=\"padding:4px 8px;\">Ya revisado</button></div>";
+          "<span><button type=\"button\" class=\"btn-primary\" data-parecida-ver=\"" + g.ids.join(",") + "\" style=\"padding:4px 8px;\">Ver notas</button> " +
+          "<button type=\"button\" class=\"btn-ghost\" data-parecida-ok=\"" + escapeHtml(g.clave) + "\" style=\"padding:4px 8px;\">Ya revisado</button></span></div>";
       }).join("") || "<p class=\"hint\">No quedan notas parecidas por revisar.</p>") +
       "</div><div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"gdParecidasCerrar\">Cerrar</button></div>");
     document.getElementById("gdParecidasCerrar").addEventListener("click", cerrarModal);
+    document.querySelectorAll("[data-parecida-ver]").forEach(function(b){
+      b.addEventListener("click", function(){ gdCompararNotas(b.dataset.parecidaVer.split(",").map(Number)); });
+    });
     document.querySelectorAll("[data-parecida-ok]").forEach(function(b){
       b.addEventListener("click", function(){
         dbRun("INSERT OR REPLACE INTO notas_parecidas_revisadas (clave) VALUES (?)", [b.dataset.parecidaOk]);
@@ -5338,6 +5343,37 @@
     });
   }
   document.getElementById("gdParecidasRevisar").addEventListener("click", gdAbrirParecidas);
+  // Las notas de un grupo parecido lado a lado (igual que el escritorio, 30-09-2026): lo distinto en naranja, el cargo
+  // del estado de cuenta con el que quedo unida cada una, y un boton para editarla.
+  function gdCompararNotas(ids){
+    var campos = ["Fecha", "Nombre", "Monto", "Medio de pago", "Categoría", "Cuota", "Personas", "Cargo del estado de cuenta"];
+    var notas = ids.map(function(id){
+      var f = dbGet("SELECT gd.*, COALESCE(c.nombre,'Sin categoría') AS categoria FROM gastos_diarios gd LEFT JOIN categorias c ON c.id=gd.categoria_id WHERE gd.id=?", [id]);
+      if(!f) return null;
+      var pers = dbAll("SELECT persona, monto FROM gasto_diario_persona WHERE gasto_diario_id=? ORDER BY id", [id]).map(function(r){ return r.persona + " " + money(r.monto); }).join(", ");
+      var cargo = dbGet("SELECT g.detalle, g.nota, g.valor_cuota, g.origen, g.anio, g.mes FROM conciliacion_diario cd JOIN gastos g ON g.id=cd.gasto_id WHERE cd.gasto_diario_id=?", [id]);
+      var o = cargo ? String(cargo.origen).toUpperCase() : "";
+      return {id: id, "Fecha": f.fecha, "Nombre": f.detalle, "Monto": money(f.monto),
+              "Medio de pago": f.medio_pago === "Tarjeta" ? ("Tarjeta " + (f.tipo_tarjeta || "") + " " + (f.banco_tarjeta || "")).trim() : (f.medio_pago || "—"),
+              "Categoría": f.categoria, "Cuota": f.cuota_texto || "—", "Personas": pers || "solo tuya",
+              "Cargo del estado de cuenta": cargo ? ((cargo.nota ? cargo.nota + " · " : "") + cargo.detalle + " " + money(cargo.valor_cuota || 0) + " (" +
+                (o === "LIDER" ? "Líder" : (o === "CMR_PDF" || o === "IMPORTADO_PDF") ? "Falabella" : cargo.origen) + " " + String(cargo.mes).padStart(2, "0") + "/" + cargo.anio + ")") : "sin vincular"};
+    }).filter(Boolean);
+    var h = "<h2>Comparar notas</h2><p class=\"hint\">En naranja, lo que es distinto entre las notas.</p><div class=\"proy-scroll\"><table class=\"proy-tabla\"><tr><th></th>" +
+      notas.map(function(n, i){ return "<th>Nota " + (i + 1) + "</th>"; }).join("") + "</tr>";
+    campos.forEach(function(c){
+      var distintos = {}; notas.forEach(function(n){ distintos[n[c]] = true; });
+      var dif = Object.keys(distintos).length > 1;
+      h += "<tr><td class=\"proy-dim\">" + c + "</td>" + notas.map(function(n){ return "<td" + (dif ? " style=\"color:var(--warn)\"" : "") + ">" + escapeHtml(n[c]) + "</td>"; }).join("") + "</tr>";
+    });
+    h += "<tr><td></td>" + notas.map(function(n){ return "<td><button type=\"button\" class=\"btn-ghost\" data-comparar-editar=\"" + n.id + "\">Editar esta nota</button></td>"; }).join("") +
+      "</tr></table></div><div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"gdCompararCerrar\">Cerrar</button></div>";
+    abrirModal(h);
+    document.getElementById("gdCompararCerrar").addEventListener("click", cerrarModal);
+    document.querySelectorAll("[data-comparar-editar]").forEach(function(b){
+      b.addEventListener("click", function(){ cerrarModal(); editarGastoDiarioForm(Number(b.dataset.compararEditar)); });
+    });
+  }
 
   function dupPreguntar(titulo, n, fecha, detalle, monto){
     return window.confirm(
