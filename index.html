@@ -7741,6 +7741,20 @@
   // SOLO para filas de Falabella/Lider (PDF), nunca para Deudas Adicionales
   // (que ya trae su propio reparto explicito del Excel, ver
   // construirFilasDesdeDeudasAdicionales) ni para filas agregadas a mano.
+  // El reparto heredado se respeta TAL CUAL en proporcion (ej. un prestamo 40/60 entre Nilsa y Vivi), escalado al monto
+  // de este mes -- antes al confirmar se partia siempre en partes iguales (bug real 30-09-2026). Si el usuario cambia
+  // los nombres, vuelve a repartirse en partes iguales (ver repartoExplicito en el confirmar).
+  function cmRepartoHeredado(reparto, monto){
+    var total = reparto.reduce(function(a, r){ return a + (Number(r.monto) || 0); }, 0);
+    if(!(total > 0) || reparto.length < 2) return null;
+    var salida = {}, acumulado = 0;
+    reparto.forEach(function(r, i){
+      var v = i === reparto.length - 1 ? Math.round((monto - acumulado) * 100) / 100 : Math.round(monto * (Number(r.monto) || 0) / total);
+      salida[r.nombre] = (salida[r.nombre] || 0) + v; acumulado += v;
+    });
+    return salida;
+  }
+
   function aplicarMatchingAutomatico(filas, intentarGastoDiario, periodoTarjeta){
     var cache = {};
     var cacheGastoDiario = {};
@@ -7764,6 +7778,7 @@
         });
         if(!nombres.length) return;
         f.personas = nombres.join(" ");
+        f.repartoExplicito = cmRepartoHeredado(resultado.candidato.reparto, f.monto) || f.repartoExplicito;
         f.heredado = resultado.ambiguo ? "ambiguo" : (resultado.razon === "fecha_y_descripcion" ? "automatico" : "aproximado");
         if(!f.nota && resultado.candidato.nota) f.nota = resultado.candidato.nota;   // la nota sigue en la cuota siguiente
         return;
@@ -7789,6 +7804,7 @@
       });
       if(!nombresGD.length) return;
       f.personas = nombresGD.join(" ");
+      f.repartoExplicito = cmRepartoHeredado(candidatoDiario.reparto, f.monto) || f.repartoExplicito;
       // Nunca autoasignar en silencio (pedido explicito y repetido del
       // usuario): f.heredado="gasto_diario" deja la fila claramente
       // marcada como PROPUESTA a aprobar (ver renderTablaCargarMes), no un
@@ -7819,6 +7835,7 @@
       var nombres = dbAll("SELECT p.nombre AS nombre FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id WHERE gp.gasto_id=?", [cand.id])
         .map(function(r){ return r.nombre; });
       if(nombres.length) f.personas = nombres.join(" ");
+      f.repartoExplicito = cmRepartoHeredado(dbAll("SELECT p.nombre AS nombre, gp.monto AS monto FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id WHERE gp.gasto_id=?", [cand.id]), f.monto) || f.repartoExplicito;
       f.proyectadaId = cand.id;
       f.heredado = "proyectada";
       if(!f.nota && cand.nota) f.nota = cand.nota;
