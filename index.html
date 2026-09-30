@@ -205,6 +205,16 @@
   .tab-btn.grupo-diario.active{ background:#2fa866; border-color:#fff; }
   .tab-btn.grupo-carga.active{ background:#9a6bd1; border-color:#fff; }
   .tab-btn.grupo-analisis.active{ background:#3a8fd6; border-color:#fff; }
+  .proy-tabla{ width:100%; border-collapse:collapse; font-size:.85rem; margin-bottom:6px; }
+  .proy-tabla th{ text-align:left; color:var(--text-dim); font-weight:600; font-size:.72rem; text-transform:uppercase; padding:6px; border-bottom:1px solid var(--border); }
+  .proy-tabla td{ padding:6px; border-bottom:1px solid var(--border); font-variant-numeric:tabular-nums; }
+  .proy-tabla td.num, .proy-tabla th.num{ text-align:right; }
+  .proy-tabla td.num{ color:var(--text); }
+  .proy-tabla tr.proy-click{ cursor:pointer; } .proy-tabla tr.proy-click:hover td, .proy-tabla td.proy-click:hover{ background:var(--surface-2); }
+  .proy-tabla td.proy-click{ cursor:pointer; }
+  .proy-ok{ color:var(--ok); } .proy-dim{ color:var(--text-dim); } .proy-total{ font-weight:700; }
+  .proy-scroll{ overflow-x:auto; }
+  .proy-resumen{ font-weight:700; color:var(--warn); margin:6px 0; }
   .tabs-leyenda{ display:flex; gap:6px; padding-top:8px; font-size:.7rem; font-weight:600; }
   .tabs-leyenda span{ color:#fff; padding:2px 8px; border-radius:999px; }
   .tabs-leyenda .grupo-diario{ background:#1d5e3c; } .tabs-leyenda .grupo-carga{ background:#5b3b7a; }
@@ -588,6 +598,7 @@
       <button class="tab-btn grupo-analisis" type="button" data-tab="resumen">Resumen Mensual</button>
       <button class="tab-btn grupo-analisis" type="button" data-tab="checklist">Checklist Pagos</button>
       <button class="tab-btn grupo-analisis" type="button" data-tab="conciliacion">Conciliación</button>
+      <button class="tab-btn grupo-analisis" type="button" data-tab="proyectado">Proyectado</button>
       <button class="tab-btn grupo-analisis" type="button" data-tab="categorizar">Categorizar</button>
     </nav>
   </div>
@@ -1017,6 +1028,19 @@
       </div>
       <div id="concResumen"></div>
       <div id="concCuerpo"></div>
+    </div>
+  </section>
+
+  <!-- Proyectado (mismo que el escritorio, 30-09-2026): cuotas ya comprometidas de Falabella y Lider -->
+  <section id="tab-proyectado" class="tabpanel" hidden>
+    <div class="card">
+      <h2>Proyectado — cuotas ya comprometidas</h2>
+      <div class="form-grid">
+        <div class="field small"><label>Meses</label><select id="proyMeses"><option value="3">3 meses</option><option value="6" selected>6 meses</option><option value="12">12 meses</option></select></div>
+        <div class="field"><label>Persona</label><select id="proyPersona"><option value="">Todas</option></select></div>
+      </div>
+      <p class="hint" id="proyBase"></p>
+      <div id="proyCuerpo"></div>
     </div>
   </section>
 
@@ -1788,7 +1812,7 @@
 
   // ---------------------------------------------------------------- pestanas
 
-  var TAB_IDS = ["cargarmes","ingreso","resumen","estadocuenta","categorizar","gastosdiarios","paneldiario","checklist","conciliacion"];
+  var TAB_IDS = ["cargarmes","ingreso","resumen","estadocuenta","categorizar","gastosdiarios","paneldiario","checklist","conciliacion","proyectado"];
   function activarTab(id){
     if(TAB_IDS.indexOf(id) === -1) id = "ingreso";
     document.querySelectorAll(".tabpanel").forEach(function(p){ p.hidden = (p.id !== "tab-" + id); });
@@ -1802,6 +1826,7 @@
     if(id==="gastosdiarios") renderListaGastosDiarios();
     if(id==="paneldiario") renderPanelDiario();
     if(id==="conciliacion") renderConciliacion();
+    if(id==="proyectado") renderProyectado();
   }
   document.querySelectorAll(".tab-btn").forEach(function(btn){
     btn.addEventListener("click", function(){ activarTab(btn.dataset.tab); });
@@ -2717,6 +2742,136 @@
     var ancla = document.getElementById("ecFiltroOrigen");
     if(ancla && ancla.getBoundingClientRect().top < 0) ancla.scrollIntoView({block: "start"});
   }
+
+
+  // ---------------------------------------------------------------- Proyectado (igual que el escritorio, app/services/proyectado_service.py)
+  // Desde el ULTIMO estado de cuenta real de cada tarjeta: cada compra que no llega a su ultima cuota se cobra el mismo
+  // valor de cuota los meses que le faltan, con el mismo reparto. Hacia atras solo se MUESTRA el plan (desde la cuota 1).
+  var PROY_TARJETAS = [["CMR", "Falabella", "('IMPORTADO_PDF','CMR_PDF')"], ["LIDER", "Líder", "('LIDER')"]];
+  function proySumarMeses(a, m, n){ var t = a * 12 + (m - 1) + n; return [Math.floor(t / 12), t % 12 + 1]; }
+  function proyClave(am){ return am[0] * 100 + am[1]; }
+  function proyNombreMes(am){ return MESES_ES[am[1]] + " " + am[0]; }
+  function proyCorto(am){ return MESES_ES[am[1]].slice(0, 3) + " " + String(am[0]).slice(2); }
+  function proyCalcular(nMeses){
+    var compras = [], bases = {};
+    PROY_TARJETAS.forEach(function(t){
+      var ult = dbGet("SELECT anio, mes FROM gastos WHERE UPPER(origen) IN " + t[2] + " AND COALESCE(proyectado,0)=0 ORDER BY anio DESC, mes DESC LIMIT 1");
+      if(!ult) return;
+      bases[t[1]] = [ult.anio, ult.mes];
+      dbAll("SELECT id, detalle, nota, valor_cuota, monto_total, cuota_texto FROM gastos WHERE UPPER(origen) IN " + t[2] +
+            " AND COALESCE(proyectado,0)=0 AND anio=? AND mes=? ORDER BY fecha, id", [ult.anio, ult.mes]).forEach(function(g){
+        var c = concParseCuota(g.cuota_texto);
+        if(!c.total || c.total <= 1 || !c.actual || c.actual >= c.total) return;
+        var meses = [];
+        for(var k = 1; k <= c.total - c.actual; k++) meses.push(proySumarMeses(ult.anio, ult.mes, k));
+        var reparto = {};
+        dbAll("SELECT p.nombre AS nombre, gp.monto AS monto FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id WHERE gp.gasto_id=?", [g.id])
+          .forEach(function(r){ reparto[r.nombre] = Number(r.monto) || 0; });
+        var valor = (g.valor_cuota !== null && g.valor_cuota !== undefined) ? Number(g.valor_cuota) :
+          Object.keys(reparto).reduce(function(a, k){ return a + reparto[k]; }, 0);
+        compras.push({tarjeta: t[1], detalle: (g.nota ? g.nota + " · " : "") + (g.detalle || ""), valor: valor,
+                      actual: c.actual, total: c.total, meses: meses, reparto: reparto,
+                      inicio: proySumarMeses(meses[0][0], meses[0][1], -c.actual), termina: meses[meses.length - 1]});
+      });
+    });
+    var claves = Object.keys(bases).map(function(k){ return bases[k]; });
+    var lista = [];
+    if(claves.length){
+      var primero = claves.reduce(function(a, b){ return proyClave(a) <= proyClave(b) ? a : b; });
+      for(var i = 1; i <= nMeses; i++) lista.push(proySumarMeses(primero[0], primero[1], i));
+    }
+    compras.sort(function(a, b){ return proyClave(a.termina) - proyClave(b.termina) || a.tarjeta.localeCompare(b.tarjeta) || a.detalle.localeCompare(b.detalle); });
+    var personas = {};
+    compras.forEach(function(c){ Object.keys(c.reparto).forEach(function(p){ personas[p] = true; }); });
+    return {meses: lista, compras: compras, bases: bases, personas: Object.keys(personas).sort(function(a, b){ return a.localeCompare(b); })};
+  }
+  function proyEn(c, am){ return c.meses.some(function(x){ return proyClave(x) === proyClave(am); }); }
+  function proyMonto(c, persona){ return persona ? (c.reparto[persona] || 0) : c.valor; }
+  function proyTotal(p, am, tarjeta, persona){
+    return p.compras.reduce(function(a, c){
+      if(!proyEn(c, am) || (tarjeta && c.tarjeta !== tarjeta) || (persona && !(persona in c.reparto))) return a;
+      return a + proyMonto(c, persona);
+    }, 0);
+  }
+  var proyActual = null;
+  function renderProyectado(){
+    var cuerpo = document.getElementById("proyCuerpo");
+    if(!cuerpo) return;
+    var p = proyCalcular(Number(document.getElementById("proyMeses").value) || 6);
+    proyActual = p;
+    var sel = document.getElementById("proyPersona"), elegida = sel.value;
+    sel.innerHTML = "<option value=\"\">Todas</option>" + p.personas.map(function(x){ return "<option>" + escapeHtml(x) + "</option>"; }).join("");
+    sel.value = p.personas.indexOf(elegida) >= 0 ? elegida : "";
+    var persona = sel.value || null;
+    if(!p.meses.length){ document.getElementById("proyBase").textContent = ""; cuerpo.innerHTML = "<p class=\"hint\">Todavía no hay estados de cuenta de Falabella o Líder cargados.</p>"; return; }
+    document.getElementById("proyBase").textContent = "Desde el último estado de cuenta cargado: " +
+      Object.keys(p.bases).map(function(k){ return k + " " + proyNombreMes(p.bases[k]); }).join(", ") +
+      ". Solo compras en cuotas ya asumidas (no incluye compras nuevas, suscripciones ni impuestos). Toca un mes, una persona o un monto para ver el detalle.";
+    var h = "<h3 style=\"margin:10px 0 4px;\">Por mes" + (persona ? " — lo que le toca a " + escapeHtml(persona) : "") + "</h3>" +
+      "<p class=\"hint\">«Terminan de pagarse» = compras que ese mes pagan su ÚLTIMA cuota: desde el mes siguiente ya no se cobran.</p>" +
+      "<div class=\"proy-scroll\"><table class=\"proy-tabla\"><tr><th>Mes</th><th class=\"num\">Falabella</th><th class=\"num\">Líder</th><th class=\"num\">Total</th><th>Terminan de pagarse</th></tr>";
+    p.meses.forEach(function(am, i){
+      var f = proyTotal(p, am, "Falabella", persona), l = proyTotal(p, am, "Líder", persona);
+      var term = p.compras.filter(function(c){ return proyClave(c.termina) === proyClave(am) && (!persona || persona in c.reparto); }).length;
+      h += "<tr class=\"proy-click\" data-proy-mes=\"" + proyClave(am) + "\"><td>" + proyNombreMes(am) + "</td><td class=\"num\">" + money(f) + "</td><td class=\"num\">" + money(l) +
+        "</td><td class=\"num proy-total\"" + (i === 0 ? " style=\"color:var(--warn)\"" : "") + ">" + money(f + l) + "</td><td class=\"" + (term ? "proy-ok" : "proy-dim") + "\">" +
+        (term ? term + (term === 1 ? " compra termina" : " compras terminan") + " de pagarse" : "—") + "</td></tr>";
+    });
+    h += "</table></div>";
+    if(!persona){
+      h += "<h3 style=\"margin:14px 0 4px;\">Por persona</h3><div class=\"proy-scroll\"><table class=\"proy-tabla\"><tr><th>Persona</th>" +
+        p.meses.map(function(am){ return "<th class=\"num\">" + proyCorto(am) + "</th>"; }).join("") + "</tr>";
+      p.personas.forEach(function(pe){
+        h += "<tr><td class=\"proy-click\" style=\"color:var(--accent-strong)\" data-proy-persona=\"" + escapeHtml(pe) + "\">" + escapeHtml(pe) + "</td>" +
+          p.meses.map(function(am){ var v = proyTotal(p, am, null, pe);
+            return v ? "<td class=\"num proy-click\" data-proy-persona=\"" + escapeHtml(pe) + "\" data-proy-mes=\"" + proyClave(am) + "\">" + money(v) + "</td>" : "<td class=\"num proy-dim\">—</td>"; }).join("") + "</tr>";
+      });
+      h += "</table></div>";
+    }
+    var compras = p.compras.filter(function(c){ return !persona || persona in c.reparto; });
+    var total = compras.reduce(function(a, c){ return a + proyMonto(c, persona) * c.meses.length; }, 0);
+    h += "<h3 style=\"margin:14px 0 4px;\">Compras en cuotas (" + compras.length + ") — ordenadas por cuándo terminan</h3>" +
+      "<div class=\"proy-resumen\">Le queda por pagar " + (persona ? "a " + escapeHtml(persona) : "en total") + ": " + money(total) + " · " +
+      money(compras.reduce(function(a, c){ return a + (proyClave(c.meses[0]) === proyClave(p.meses[0]) ? proyMonto(c, persona) : 0); }, 0)) + " el próximo mes</div>" +
+      "<div class=\"proy-scroll\"><table class=\"proy-tabla\"><tr><th>Compra</th><th>Tarjeta</th><th>Cuota</th><th class=\"num\">" + (persona ? "Parte de " + escapeHtml(persona) : "Valor cuota") +
+      "</th><th>Quedan</th><th class=\"num\">Total que queda</th><th>Plan completo</th><th>Personas</th></tr>";
+    compras.forEach(function(c){
+      h += "<tr><td>" + escapeHtml(c.detalle) + "</td><td>" + c.tarjeta + "</td><td>" + c.actual + "/" + c.total + "</td><td class=\"num\">" + money(proyMonto(c, persona)) +
+        "</td><td>" + c.meses.length + (c.meses.length === 1 ? " cuota" : " cuotas") + "</td><td class=\"num proy-total\">" + money(proyMonto(c, persona) * c.meses.length) +
+        "</td><td class=\"" + (proyClave(c.termina) === proyClave(p.meses[0]) ? "proy-ok" : "") + "\">" + proyCorto(c.inicio) + " → " + proyCorto(c.termina) + " (" + c.total + ")</td><td class=\"proy-dim\">" +
+        escapeHtml(Object.keys(c.reparto).sort().join(", ") || "—") + "</td></tr>";
+    });
+    h += "</table></div>";
+    cuerpo.innerHTML = h;
+  }
+  function proyVentana(titulo, filas, textoTotal){
+    var total = filas.reduce(function(a, f){ return a + f[3]; }, 0);
+    abrirModal("<h2>" + escapeHtml(titulo) + "</h2><div class=\"proy-scroll\"><table class=\"proy-tabla\"><tr><th>Compra</th><th>Tarjeta</th><th>Cuota</th><th class=\"num\">Monto</th><th></th></tr>" +
+      filas.map(function(f){ return "<tr><td>" + escapeHtml(f[0]) + "</td><td>" + f[1] + "</td><td>" + f[2] + "</td><td class=\"num\">" + money(f[3]) + "</td><td class=\"proy-dim\">" + escapeHtml(f[4]) + "</td></tr>"; }).join("") +
+      "</table></div><p class=\"proy-resumen\">" + textoTotal + ": " + money(total) + " · " + filas.length + (filas.length === 1 ? " compra" : " compras") +
+      "</p><div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"proyCerrar\">Cerrar</button></div>");
+    document.getElementById("proyCerrar").addEventListener("click", cerrarModal);
+  }
+  document.getElementById("proyCuerpo").addEventListener("click", function(ev){
+    var el = ev.target.closest("[data-proy-mes],[data-proy-persona]");
+    if(!el || !proyActual) return;
+    var p = proyActual, persona = el.dataset.proyPersona || document.getElementById("proyPersona").value || null;
+    if(el.dataset.proyMes){
+      var clave = Number(el.dataset.proyMes), am = [Math.floor(clave / 100), clave % 100];
+      var filas = p.compras.filter(function(c){ return proyEn(c, am) && (!persona || persona in c.reparto); }).map(function(c){
+        var n = c.actual + c.meses.findIndex(function(x){ return proyClave(x) === clave; }) + 1;
+        return [c.detalle, c.tarjeta, n + "/" + c.total, proyMonto(c, persona), proyClave(c.termina) === clave ? "última cuota" : "termina " + proyCorto(c.termina)];
+      });
+      proyVentana((persona ? persona + " — " : "Todas las cuotas de ") + proyNombreMes(am), filas, "Total del mes");
+    }else{
+      var filas2 = p.compras.filter(function(c){ return persona in c.reparto; }).map(function(c){
+        return [c.detalle, c.tarjeta, c.actual + "/" + c.total + " · quedan " + c.meses.length, proyMonto(c, persona) * c.meses.length,
+                money(proyMonto(c, persona)) + " al mes, termina " + proyCorto(c.termina)];
+      });
+      proyVentana(persona + " — todo lo que le queda por pagar en cuotas", filas2, "Total que le queda");
+    }
+  });
+  ["proyMeses", "proyPersona"].forEach(function(id){ document.getElementById(id).addEventListener("change", renderProyectado); });
 
   // -------------------------------------------- modal generico (sin dependencias)
 
@@ -9333,7 +9488,7 @@
     exportarConciliacion: exportarConciliacion, aplicarConciliacionRemota: aplicarConciliacionRemota,
     renderConciliacion: renderConciliacion,
     dupDetectarCopias: dupDetectarCopias, dupEliminarCopias: dupEliminarCopias, revisarDuplicadosWeb: revisarDuplicadosWeb,
-    dupNotasIguales: dupNotasIguales, busquedaCoincide: busquedaCoincide, perMesDelEstado: perMesDelEstado, perPeriodo: perPeriodo, gdBuscarParecidas: gdBuscarParecidas, dupGastosIguales: dupGastosIguales, guardarGasto: guardarGasto,
+    dupNotasIguales: dupNotasIguales, busquedaCoincide: busquedaCoincide, proyCalcular: proyCalcular, renderProyectado: renderProyectado, perMesDelEstado: perMesDelEstado, perPeriodo: perPeriodo, gdBuscarParecidas: gdBuscarParecidas, dupGastosIguales: dupGastosIguales, guardarGasto: guardarGasto,
     cuotaEstado: cuotaEstado, listarUltimasCuotasMes: listarUltimasCuotasMes, mensajeEstadoCuentaWhatsapp: mensajeEstadoCuentaWhatsapp,
     marcarProyectadasCargarMes: marcarProyectadasCargarMes, detalleConSufijo: detalleConSufijo,
     actualizarGastoDiario: actualizarGastoDiario, insertarGastoDiario: insertarGastoDiario, borrarGastoDiario: borrarGastoDiario,
@@ -9415,6 +9570,7 @@
     renderListaGastosDiarios();
     renderPanelDiario();
     renderConciliacion();
+    renderProyectado();
     revisarDuplicadosWeb();
   }
 
