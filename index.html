@@ -1038,6 +1038,7 @@
       <div class="form-grid">
         <div class="field small"><label>Meses</label><select id="proyMeses"><option value="3">3 meses</option><option value="6" selected>6 meses</option><option value="12">12 meses</option></select></div>
         <div class="field"><label>Persona</label><select id="proyPersona"><option value="">Todas</option></select></div>
+        <div class="field small"><label>Tarjeta (compras)</label><select id="proyTarjeta"><option value="">Todas</option><option>Falabella</option><option>Líder</option></select></div>
       </div>
       <p class="hint" id="proyBase"></p>
       <div id="proyCuerpo"></div>
@@ -2828,7 +2829,8 @@
       });
       h += "</table></div>";
     }
-    var compras = p.compras.filter(function(c){ return !persona || persona in c.reparto; });
+    var tarjetaSel = document.getElementById("proyTarjeta").value || null;
+    var compras = p.compras.filter(function(c){ return (!persona || persona in c.reparto) && (!tarjetaSel || c.tarjeta === tarjetaSel); });
     var total = compras.reduce(function(a, c){ return a + proyMonto(c, persona) * c.meses.length; }, 0);
     h += "<h3 style=\"margin:14px 0 4px;\">Compras en cuotas (" + compras.length + ") — ordenadas por cuándo terminan</h3>" +
       "<div class=\"proy-resumen\">Le queda por pagar " + (persona ? "a " + escapeHtml(persona) : "en total") + ": " + money(total) + " · " +
@@ -2871,7 +2873,7 @@
       proyVentana(persona + " — todo lo que le queda por pagar en cuotas", filas2, "Total que le queda");
     }
   });
-  ["proyMeses", "proyPersona"].forEach(function(id){ document.getElementById(id).addEventListener("change", renderProyectado); });
+  ["proyMeses", "proyPersona", "proyTarjeta"].forEach(function(id){ document.getElementById(id).addEventListener("change", renderProyectado); });
 
   // -------------------------------------------- modal generico (sin dependencias)
 
