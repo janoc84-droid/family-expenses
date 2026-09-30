@@ -2024,16 +2024,24 @@
     });
     actualizarResumenReparto(nombres, monto);
   }
+  // "Dividir..." con devoluciones (30-09-2026): una devolucion llega en NEGATIVO y tambien se reparte entre personas
+  // con montos distintos. Cada parte tiene el MISMO signo que el total y nunca es 0.
+  var MENSAJE_SIGNO_PARTE = "El monto debe ser distinto de 0 y con el mismo signo que el total (en una devolución, negativo: ej. -5000).";
+  function parteConSignoValido(monto, total){
+    if(Math.abs(monto) < 0.005) return false;
+    return total === 0 || (monto > 0) === (total > 0);
+  }
+  function faltaAsignar(resto, total){ return resto * (total >= 0 ? 1 : -1) > 0; }
   function actualizarResumenReparto(nombres, monto){
     var suma = nombres.reduce(function(acc, n){ return acc + (repartoManualValores[n.toLowerCase()] || 0); }, 0);
     var resto = Math.round(monto - suma);
     var el = document.getElementById("gRepartoResumen");
     if(Math.abs(resto) < 1){
       el.className = "note ok"; el.textContent = "Cuadra con el monto total.";
-    }else if(resto > 0){
+    }else if(faltaAsignar(resto, monto)){
       el.className = "note warn"; el.textContent = "Falta asignar " + money(resto) + ".";
     }else{
-      el.className = "note bad"; el.textContent = "Asignaste " + money(-resto) + " de más.";
+      el.className = "note bad"; el.textContent = "Asignaste " + money(Math.abs(resto)) + " de más.";
     }
   }
   document.getElementById("gPersonas").addEventListener("input", function(){
@@ -3254,8 +3262,10 @@
     var totalRepartido = 0;
     Object.keys(repartoNuevo).forEach(function(n){ totalRepartido += repartoNuevo[n]; });
     totalRepartido = Math.round(totalRepartido * 100) / 100;
-    if(totalRepartido <= 0 || totalRepartido > montoOriginal + 0.01){
-      throw new Error("El total a repartir debe ser mayor que 0 y no puede superar el monto original.");
+    var signo = montoOriginal < 0 ? -1 : 1;   // una devolucion tambien se divide (en negativo)
+    if(totalRepartido * signo <= 0 || Math.abs(totalRepartido) > Math.abs(montoOriginal) + 0.01 ||
+       Object.keys(repartoNuevo).some(function(n){ return repartoNuevo[n] * signo <= 0; })){
+      throw new Error("El total a repartir no puede ser 0, debe tener el mismo signo que el monto original y no puede superarlo.");
     }
 
     var idsNuevos = {};
@@ -3270,7 +3280,7 @@
     });
 
     var restante = Math.round((montoOriginal - totalRepartido) * 100) / 100;
-    if(restante <= 0 || descartarResto){
+    if(restante * signo <= 0 || descartarResto){
       db.run("DELETE FROM gasto_persona WHERE gasto_id=? AND persona_id=?", [gastoId, idOriginal]);
     }else{
       db.run("UPDATE gasto_persona SET monto=? WHERE gasto_id=? AND persona_id=?", [restante, gastoId, idOriginal]);
@@ -3463,11 +3473,11 @@
       }
       var montoTxt = document.getElementById("dcMonto").value;
       var monto = Number(montoTxt);
-      if(montoTxt.trim() === "" || isNaN(monto) || monto <= 0){
-        msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="El monto debe ser mayor que 0.";
+      if(montoTxt.trim() === "" || isNaN(monto) || !parteConSignoValido(monto, item.monto)){
+        msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent=MENSAJE_SIGNO_PARTE;
         return;
       }
-      if(monto > restoActual()){
+      if(Math.abs(monto) > Math.abs(restoActual()) + 0.005 || !faltaAsignar(restoActual(), item.monto)){
         msgEl.hidden=false; msgEl.className="note bad"; msgEl.textContent="No queda suficiente resto (" + money(restoActual()) + ") para ese monto.";
         return;
       }
@@ -5843,10 +5853,10 @@
       var el = document.getElementById("gdrResumen");
       if(Math.abs(resto) < 1){
         el.className = "note ok"; el.textContent = "Cuadra con el monto de " + (esCuota ? "esta cuota" : "este gasto") + " (" + money(g.monto) + ").";
-      }else if(resto > 0){
+      }else if(faltaAsignar(resto, g.monto)){
         el.className = "note warn"; el.textContent = "Falta asignar " + money(resto) + ".";
       }else{
-        el.className = "note bad"; el.textContent = "Asignaste " + money(-resto) + " de más.";
+        el.className = "note bad"; el.textContent = "Asignaste " + money(Math.abs(resto)) + " de más.";
       }
     }
     function igualarEntradas(){
@@ -6493,7 +6503,7 @@
       "WHERE gd.anio=? AND gd.mes=? GROUP BY gp.persona", [anio, mes]
     );
     var out = porPersona.map(function(r){ return {persona: r.persona, total: r.total}; });
-    if(sinAsignar > 0.01) out.push({persona: "Sin asignar", total: sinAsignar});
+    if(Math.abs(sinAsignar) > 0.01) out.push({persona: "Sin asignar", total: sinAsignar});
     out.sort(function(a,b){ return b.total - a.total; });
     return out;
   }
@@ -6545,7 +6555,7 @@
           "(gd.monto - COALESCE((SELECT SUM(monto) FROM gasto_diario_persona WHERE gasto_diario_id=gd.id),0)) AS monto_persona " +
           "FROM gastos_diarios gd LEFT JOIN categorias c ON c.id=gd.categoria_id " +
           "WHERE gd.anio=? AND gd.mes=?" +
-        ") WHERE monto_persona > 0.01 GROUP BY categoria ORDER BY total DESC", [anio, mes]
+        ") WHERE ABS(monto_persona) > 0.01 GROUP BY categoria ORDER BY total DESC", [anio, mes]
       );
     }
     return dbAll(
