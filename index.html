@@ -8622,7 +8622,10 @@
         anio: g.anio, mes: g.mes, fecha: g.fecha, detalle: g.detalle, categoria: g.categoria_nombre || "",
         monto: g.monto, prescindible: !!g.prescindible, medio_pago: g.medio_pago || "",
         tipo_tarjeta: g.tipo_tarjeta || "", banco_tarjeta: g.banco_tarjeta || "",
-        uid: g.uid || "", actualizado_en: g.actualizado_en || ""
+        uid: g.uid || "", actualizado_en: g.actualizado_en || "",
+        // compra en cuotas (igual que el escritorio, 30-09-2026)
+        cuota_texto: g.cuota_texto || "", cuota_actual: g.cuota_actual === undefined ? null : g.cuota_actual,
+        cuotas_totales: g.cuotas_totales === undefined ? null : g.cuotas_totales, monto_total: g.monto_total === undefined ? null : g.monto_total
       };
     });
 
@@ -8742,6 +8745,21 @@
     if((ctx.borrados[uid] || "") >= (ts || "0")) return false;   // se borro aca: no vuelve
     gastoId = insertarGastoConReparto(g.fecha, g.detalle, empresa, categoriaNombre, monto, cuota, reparto, "MANUAL", [anio, mes], descripcion, valorCuota);
     db.run("UPDATE gastos SET uid=?, actualizado_en=? WHERE id=?", [uid, ts || gdAhora(), gastoId]);
+    return true;
+  }
+
+  // Datos de cuota de una nota que llega (igual que el escritorio): con la version mas nueva se copian; si no, solo se
+  // completan cuando aca faltan (una nota que viajo antes sin estos datos). Devuelve true si cambio algo.
+  function gdAplicarCuotasDeNota(id, g, forzar){
+    if(!id || !g || !("cuota_texto" in g)) return false;
+    var nuevo = [g.cuota_texto || null, g.cuota_actual === undefined ? null : g.cuota_actual,
+                 g.cuotas_totales === undefined ? null : g.cuotas_totales, g.monto_total === undefined ? null : g.monto_total];
+    var f = dbGet("SELECT cuota_texto, cuota_actual, cuotas_totales, monto_total FROM gastos_diarios WHERE id=?", [id]);
+    if(!f) return false;
+    var igual = String(f.cuota_texto || "") === String(nuevo[0] || "") && (f.cuota_actual || null) === (nuevo[1] || null) &&
+                (f.cuotas_totales || null) === (nuevo[2] || null) && Number(f.monto_total || 0) === Number(nuevo[3] || 0);
+    if(igual || (!forzar && f.cuota_texto)) return false;
+    db.run("UPDATE gastos_diarios SET cuota_texto=?, cuota_actual=?, cuotas_totales=?, monto_total=? WHERE id=?", nuevo.concat([id]));
     return true;
   }
 
@@ -8924,6 +8942,7 @@
             }
             if(local){
               reclamadas[local.id] = true;
+              if(gdAplicarCuotasDeNota(local.id, g, !!(ts && ts > String(local.actualizado_en || "")))) huboCambios = true;
               if(ts && ts > String(local.actualizado_en || "")){
                 var d2 = new Date(g.fecha + "T00:00:00");
                 db.run("UPDATE gastos_diarios SET anio=?, mes=?, fecha=?, detalle=?, categoria_id=?, monto=?, prescindible=?, medio_pago=?, tipo_tarjeta=?, banco_tarjeta=?, actualizado_en=? WHERE id=?",
@@ -8934,7 +8953,8 @@
               return;
             }
             if((borradosLocales[uid] || "") >= (ts || "0")) return;   // se borro aca: no vuelve
-            insertarGastoDiario(g.fecha, g.detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta, uid, ts || gdAhora());
+            var idNuevaNota = insertarGastoDiario(g.fecha, g.detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta, uid, ts || gdAhora());
+            gdAplicarCuotasDeNota(idNuevaNota || (dbGet("SELECT id FROM gastos_diarios WHERE uid=?", [uid]) || {}).id, g, true);
             huboCambios = true;
             return;
           }
