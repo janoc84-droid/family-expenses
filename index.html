@@ -6126,25 +6126,41 @@
     return JSON.stringify([f.medio_pago || null, f.tipo_tarjeta || null, f.banco_tarjeta || null]);
   }
 
-  function renderGdFiltroTarjeta(claves){
-    var cont = document.getElementById("gdFiltroTarjeta");
-    if(claves.length <= 1){
-      // un solo medio de pago este mes -- no hay nada que filtrar, mismo
-      // criterio que el escritorio.
-      cont.hidden = true;
-      cont.innerHTML = "";
-      return;
-    }
-    cont.hidden = false;
-    claves.sort(function(a, b){
-      return etiquetaMedioPago(a.medio, a.tipo, a.banco).localeCompare(etiquetaMedioPago(b.medio, b.tipo, b.banco));
+  // 02-10-2026 (pedido del usuario: "los filtros de BancoEstado y Mercado Pago tienen que estar si o si... donde
+  // ocupemos las tarjetas siempre tienen que estar los filtros de TODAS las tarjetas"): ya no se arman solo con lo
+  // que tiene el mes -- siempre estan todas las tarjetas (fijas + cualquier otra usada alguna vez), Efectivo y
+  // Transferencia, cada una con cuantos gastos tiene el mes (0 tambien se muestra). Igual que el escritorio.
+  var GD_TARJETAS_FIJAS = [["Tarjeta", "Crédito", "CMR Falabella"], ["Tarjeta", "Crédito", "Líder BCI"],
+                           ["Tarjeta", "Débito", "Mercado Pago"], ["Tarjeta", "Débito", "BancoEstado"]];
+  function gdOpcionesFiltroTarjeta(filasDelMes){
+    var claves = GD_TARJETAS_FIJAS.map(function(t){ return {medio: t[0], tipo: t[1], banco: t[2]}; });
+    dbAll("SELECT DISTINCT tipo_tarjeta AS tipo, banco_tarjeta AS banco FROM gastos_diarios WHERE medio_pago='Tarjeta' " +
+          "AND tipo_tarjeta IS NOT NULL AND banco_tarjeta IS NOT NULL AND banco_tarjeta != '' ORDER BY tipo_tarjeta DESC, banco_tarjeta")
+      .forEach(function(r){ claves.push({medio: "Tarjeta", tipo: r.tipo, banco: r.banco}); });
+    claves.push({medio: "Efectivo", tipo: null, banco: null}, {medio: "Transferencia", tipo: null, banco: null});
+    filasDelMes.forEach(function(f){ claves.push({medio: f.medio_pago, tipo: f.tipo_tarjeta, banco: f.banco_tarjeta}); });
+    var vistas = {}, salida = [];
+    claves.forEach(function(c){
+      var clave = gdClaveTarjeta({medio_pago: c.medio, tipo_tarjeta: c.tipo, banco_tarjeta: c.banco});
+      if(vistas[clave]) return;
+      vistas[clave] = true;
+      c.clave = clave;
+      c.n = filasDelMes.filter(function(f){ return gdClaveTarjeta(f) === clave; }).length;
+      salida.push(c);
     });
+    return salida;
+  }
+
+  function renderGdFiltroTarjeta(opciones, total){
+    var cont = document.getElementById("gdFiltroTarjeta");
+    cont.hidden = false;
     var html = "<button type=\"button\" class=\"btn-ghost cov-filtro-btn" + (gdFiltroTarjeta === null ? " active" : "") +
-      "\" data-gdftarjeta=\"\">Todas</button>";
-    html += claves.map(function(c){
+      "\" data-gdftarjeta=\"\">Todas (" + total + ")</button>";
+    html += opciones.map(function(c){
       var activo = gdFiltroTarjeta === c.clave;
+      var texto = (c.medio === "Tarjeta" && c.banco) ? c.banco : etiquetaMedioPago(c.medio, c.tipo, c.banco);
       return "<button type=\"button\" class=\"btn-ghost cov-filtro-btn" + (activo ? " active" : "") +
-        "\" data-gdftarjeta=\"" + escapeHtml(c.clave) + "\">" + escapeHtml(etiquetaMedioPago(c.medio, c.tipo, c.banco)) + "</button>";
+        "\" data-gdftarjeta=\"" + escapeHtml(c.clave) + "\">" + escapeHtml(texto) + " (" + c.n + ")</button>";
     }).join("");
     cont.innerHTML = html;
     cont.querySelectorAll("[data-gdftarjeta]").forEach(function(b){
@@ -6172,21 +6188,9 @@
       return Number(f.anio) === anio && Number(f.mes) === mes;
     });
 
-    // los chips se arman con TODO el mes (no con lo ya filtrado por texto o
-    // "Sin asignar"), igual que el escritorio -- y si la tarjeta elegida ya
-    // no tiene movimientos este mes, se vuelve a "Todas" en vez de mostrar
-    // una lista vacia sin explicacion.
-    var clavesVistas = {};
-    var claves = [];
-    todasDelMes.forEach(function(f){
-      var clave = gdClaveTarjeta(f);
-      if(!clavesVistas[clave]){
-        clavesVistas[clave] = true;
-        claves.push({clave: clave, medio: f.medio_pago, tipo: f.tipo_tarjeta, banco: f.banco_tarjeta});
-      }
-    });
-    if(gdFiltroTarjeta !== null && !clavesVistas[gdFiltroTarjeta]) gdFiltroTarjeta = null;
-    renderGdFiltroTarjeta(claves);
+    // los chips se arman con TODO el mes (no con lo ya filtrado por texto o "Sin asignar"), igual que el escritorio;
+    // la tarjeta elegida se mantiene aunque este mes no tenga gastos con ella (02-10-2026).
+    renderGdFiltroTarjeta(gdOpcionesFiltroTarjeta(todasDelMes), todasDelMes.length);
 
     var idsConReparto = {};
     dbAll(
