@@ -804,6 +804,7 @@
         <button type="button" class="btn-ghost" id="ecBtnCopiarImagen">📋 Copiar imagen</button>
         <button type="button" class="btn-primary" id="ecBtnWhatsapp">💬 Enviar por WhatsApp</button>
         <button type="button" class="btn-ghost" id="ecBtnHistorial">🕘 Historial de ajustes...</button>
+        <button type="button" class="btn-ghost" id="ecBtnAbono">💵 Registrar abono...</button>
         <button type="button" class="btn-ghost" id="ecBtnSubtotal">➕ Subtotal combinado...</button>
         <button type="button" class="btn-ghost" id="ecBtnUltimasMes">⏰ Últimas cuotas del mes (todos)...</button>
       </div>
@@ -1411,6 +1412,10 @@
       if(!tieneColumna("gastos", c[0])) dbRef.run("ALTER TABLE gastos ADD COLUMN " + c[0] + " " + c[1]);
     });
     dbRef.run("CREATE TABLE IF NOT EXISTS gastos_borrados (uid TEXT PRIMARY KEY, borrado_en TEXT NOT NULL)");
+    // abonos de cada persona (lo que va pagando de lo que debe), igual que el escritorio (05-10-2026)
+    dbRef.run("CREATE TABLE IF NOT EXISTS abonos (id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL UNIQUE, persona TEXT NOT NULL, " +
+              "anio INTEGER NOT NULL, mes INTEGER NOT NULL, fecha TEXT NOT NULL, monto REAL NOT NULL, nota TEXT NOT NULL DEFAULT '')");
+    dbRef.run("CREATE TABLE IF NOT EXISTS abonos_borrados (uid TEXT PRIMARY KEY, borrado_en TEXT NOT NULL)");
     dbRef.run("CREATE TABLE IF NOT EXISTS sync_control (id INTEGER PRIMARY KEY CHECK (id = 1), aplicando INTEGER NOT NULL DEFAULT 0)");
     dbRef.run("INSERT OR IGNORE INTO sync_control (id, aplicando) VALUES (1, 0)");
     dbRef.run("UPDATE sync_control SET aplicando = 0");
@@ -2556,16 +2561,73 @@
       [estado.nombre, estado.anio, estado.mes]
     );
   }
+  // Abonos (05-10-2026, pedido del usuario: "si esa persona hizo un abono... que automaticamente le aparezca"): lo que
+  // la persona va pagando. Quedan en el estado de cuenta de un mes y se descuentan de lo que debe; salen en la
+  // pantalla, el PDF (tambien el de varios meses), la imagen y WhatsApp. Se sincronizan con el escritorio por uid.
+  function abonosEc(estado){
+    if(!estado) return [];
+    return dbAll("SELECT * FROM abonos WHERE persona=? COLLATE NOCASE AND anio=? AND mes=? ORDER BY fecha, id",
+      [estado.nombre, estado.anio, estado.mes]).map(function(r){
+        var f = String(r.fecha || "").slice(0, 10).split("-");
+        return {id: "abono-" + r.uid, etiqueta: "Abono del " + (f.length === 3 ? f[2] + "/" + f[1] + "/" + f[0] : r.fecha),
+                monto: -Math.abs(Number(r.monto)), incluir_en_total: 1, detalle: r.nota || "", es_abono: true, abono_uid: r.uid};
+      });
+  }
+  function ajustesYAbonosEc(estado){ return ajustesEcGuardados(estado).concat(abonosEc(estado)); }
+  function tipoAjusteTxt(a){ return a.es_abono ? "abono, se descuenta" : (a.incluir_en_total ? "suma al total" : "nota, no suma"); }
+  function quitarAbonoEc(uid){
+    if(!confirm("¿Quitar este abono? Lo que debe esta persona vuelve a subir.")) return;
+    db.run("DELETE FROM abonos WHERE uid=?", [uid]);
+    dbRun("INSERT OR REPLACE INTO abonos_borrados (uid, borrado_en) VALUES (?, ?)", [uid, new Date().toISOString().slice(0, 19).replace("T", " ")]);
+    renderEstadoCuenta();
+    mostrarToast("Abono quitado.", "ok");
+  }
+  function abrirRegistrarAbono(){
+    var estado = estadoActual();
+    if(!estado){ mostrarMensajeExportEc("Elige persona, mes y año primero.", "bad"); return; }
+    var actual = MESES_ES[estado.mes] + " " + estado.anio;
+    var opciones = ecMesesDePersona(estado.nombre).map(function(p){ return [p.estado.anio, p.estado.mes]; });
+    if(!opciones.some(function(o){ return o[0] === estado.anio && o[1] === estado.mes; })) opciones.unshift([estado.anio, estado.mes]);
+    var hoy = new Date();
+    var hoyIso = hoy.getFullYear() + "-" + String(hoy.getMonth() + 1).padStart(2, "0") + "-" + String(hoy.getDate()).padStart(2, "0");
+    abrirModal("<h2>Abono de " + escapeHtml(estado.nombre) + "</h2><p class=\"hint\">Lo que pagó (una parte o todo). Se descuenta de lo que debe en el mes elegido " +
+      "y aparece en la pantalla, el PDF (también el de varios meses), la imagen y WhatsApp.</p>" +
+      "<div class=\"form-grid\"><div class=\"field small\"><label>Monto</label><input type=\"number\" id=\"abMonto\" min=\"1\" step=\"1\" placeholder=\"ej. 50000\"></div>" +
+      "<div class=\"field small\"><label>Fecha del abono</label><input type=\"date\" id=\"abFecha\" value=\"" + hoyIso + "\"></div>" +
+      "<div class=\"field small\"><label>Se descuenta en</label><select id=\"abMes\">" + opciones.map(function(o){
+        var t = MESES_ES[o[1]] + " " + o[0];
+        return "<option value=\"" + o[0] + "-" + o[1] + "\"" + (t === actual ? " selected" : "") + ">" + escapeHtml(t) + "</option>";
+      }).join("") + "</select></div>" +
+      "<div class=\"field\"><label>Nota (opcional)</label><input type=\"text\" id=\"abNota\" placeholder=\"ej. transferencia, efectivo\"></div></div>" +
+      "<div class=\"note bad\" id=\"abError\" hidden></div>" +
+      "<div class=\"form-actions\"><button type=\"button\" class=\"btn-primary\" id=\"abGuardar\">Guardar abono</button>" +
+      "<button type=\"button\" class=\"btn-ghost\" id=\"abCancelar\">Cancelar</button></div>");
+    document.getElementById("abCancelar").addEventListener("click", cerrarModal);
+    document.getElementById("abGuardar").addEventListener("click", function(){
+      var err = document.getElementById("abError");
+      var monto = Math.abs(Number(document.getElementById("abMonto").value));
+      var fecha = document.getElementById("abFecha").value;
+      if(!monto || monto < 1){ err.hidden = false; err.textContent = "Escribe el monto del abono (ej. 50000)."; return; }
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(fecha)){ err.hidden = false; err.textContent = "Elige la fecha del abono."; return; }
+      var am = document.getElementById("abMes").value.split("-").map(Number);
+      dbRun("INSERT INTO abonos (uid, persona, anio, mes, fecha, monto, nota) VALUES (?,?,?,?,?,?,?)",
+        [gdNuevoUid(), estado.nombre, am[0], am[1], fecha, monto, document.getElementById("abNota").value.trim()]);
+      cerrarModal();
+      renderEstadoCuenta();
+      mostrarToast("Abono de " + money(monto) + " de " + estado.nombre + " anotado en " + MESES_ES[am[1]] + " " + am[0] + ".", "ok");
+    });
+  }
   function sumaAjustesIncluidos(ajustes){
     return ajustes.reduce(function(a, it){ return a + (it.incluir_en_total ? Number(it.monto) : 0); }, 0);
   }
   function renderFilasAjusteEc(ajustes, conQuitar){
     if(!ajustes.length) return "";
     return ajustes.map(function(a){
-      var tipoTxt = a.incluir_en_total ? "suma al total" : "nota, no suma";
-      return "<div class=\"historial-item\"><p><strong>" + escapeHtml(a.etiqueta) + "</strong> — " + money(a.monto) +
+      var tipoTxt = tipoAjusteTxt(a);
+      return "<div class=\"historial-item\"><p>" + (a.es_abono ? "💵 " : "") + "<strong>" + escapeHtml(a.etiqueta) + "</strong> — " + money(a.monto) +
         " (" + tipoTxt + ")" + (a.detalle ? " — " + escapeHtml(a.detalle) : "") + "</p>" +
-        (conQuitar ? "<button type=\"button\" class=\"btn-danger\" data-quitar-ajuste=\"" + a.id + "\">Quitar</button>" : "") +
+        (conQuitar ? (a.es_abono ? "<button type=\"button\" class=\"btn-danger\" data-quitar-abono=\"" + escapeHtml(a.abono_uid) + "\">Quitar</button>"
+                                 : "<button type=\"button\" class=\"btn-danger\" data-quitar-ajuste=\"" + a.id + "\">Quitar</button>") : "") +
         "</div>";
     }).join("");
   }
@@ -2580,7 +2642,7 @@
   // sumar de ajuste_estado_cuenta, sin tocar nunca gastos/gasto_persona.
   function infoTotalEc(estado){
     var real = totalEcActual();
-    var ajustes = ajustesEcGuardados(estado);
+    var ajustes = ajustesYAbonosEc(estado);
     var incluidos = sumaAjustesIncluidos(ajustes);
     var hayIncluidos = ajustes.some(function(a){ return a.incluir_en_total; });
     return {
@@ -2663,7 +2725,7 @@
   function ecPaqueteDe(nombre, anio, mes){
     var estado = {nombre: nombre, anio: anio, mes: mes};
     var items = ecItemsDe(nombre, anio, mes);
-    var ajustes = ajustesEcGuardados(estado);
+    var ajustes = ajustesYAbonosEc(estado);
     var real = items.reduce(function(a, it){ return a + it.monto; }, 0);
     var hay = ajustes.some(function(a){ return a.incluir_en_total; });
     return {estado: estado, items: items, info: {real: real, ajustes: ajustes, totalMostrado: hay ? real + sumaAjustesIncluidos(ajustes) : real}};
@@ -2690,10 +2752,11 @@
     ecItemsActuales = items;
     var total = items.reduce(function(a, it){ return a + it.monto; }, 0);
     var avisoCuadre = verificarCuadreMes(estado.anio, estado.mes);
-    var ajustes = ajustesEcGuardados(estado);
+    var ajustes = ajustesYAbonosEc(estado);
     var incluidos = sumaAjustesIncluidos(ajustes);
     var hayIncluidos = ajustes.some(function(a){ return a.incluir_en_total; });
     var totalMostrado = hayIncluidos ? total + incluidos : total;
+    var abonadoEc = ajustes.reduce(function(a, x){ return a + (x.es_abono ? -x.monto : 0); }, 0);
     var statTotalLabel = hayIncluidos ? "Total combinado " + MESES_ES[estado.mes] + " " + estado.anio : "Total " + MESES_ES[estado.mes] + " " + estado.anio;
 
     // "Ver solo" (origen) + buscador de texto -- SOLO afectan lo que se ve
@@ -2725,9 +2788,11 @@
     cont.innerHTML =
       (avisoCuadre ? "<div class=\"note warn\">" + escapeHtml(avisoCuadre) + "</div>" : "") +
       "<div class=\"stat-bar\">" + statsHtml + "</div>" +
-      (hayIncluidos ? "<p class=\"hint\">Incluye " + money(incluidos) + " agregado desde Subtotal combinado (total real sin agregados: " + money(total) + ").</p>" : "") +
+      (hayIncluidos ? "<p class=\"hint\">Total real sin ajustes: " + money(total) +
+        (abonadoEc ? " · abonos: -" + money(abonadoEc) : "") +
+        (incluidos + abonadoEc ? " · Subtotal combinado: " + money(incluidos + abonadoEc) : "") + ".</p>" : "") +
       renderTablaEstadoCuenta(itemsFiltrados, mensajeVacio) +
-      (ajustes.length ? "<h3 style=\"font-size:.85rem;color:var(--text-dim);margin:14px 0 8px;\">Ajustes de Subtotal combinado</h3>" + renderFilasAjusteEc(ajustes, true) : "");
+      (ajustes.length ? "<h3 style=\"font-size:.85rem;color:var(--text-dim);margin:14px 0 8px;\">Ajustes y abonos</h3>" + renderFilasAjusteEc(ajustes, true) : "");
     cont.querySelectorAll("[data-ec-vertexto]").forEach(function(b){
       b.addEventListener("click", function(){
         var it = buscarItemEc(Number(b.dataset.ecVertexto));
@@ -2748,6 +2813,9 @@
     });
     cont.querySelectorAll("[data-quitar-ajuste]").forEach(function(b){
       b.addEventListener("click", function(){ quitarAjusteEc(Number(b.dataset.quitarAjuste)); });
+    });
+    cont.querySelectorAll("[data-quitar-abono]").forEach(function(b){
+      b.addEventListener("click", function(){ quitarAbonoEc(b.dataset.quitarAbono); });
     });
   }
   document.getElementById("ecPersona").addEventListener("input", renderEstadoCuenta);
@@ -3843,6 +3911,7 @@
     document.getElementById("scGuardarTotal").addEventListener("click", function(){ guardarNuevas(true); });
   }
   document.getElementById("ecBtnSubtotal").addEventListener("click", abrirSubtotalCombinado);
+  document.getElementById("ecBtnAbono").addEventListener("click", abrirRegistrarAbono);
 
   // -------------------------------------------- Estado de Cuenta: exportar PDF / imagen / WhatsApp
   // Puerto web de family_expenses/app/export/{whatsapp_link,pdf_estado_cuenta,
@@ -3992,34 +4061,51 @@
       money(paquetes.reduce(function(a, p){ return a + p.info.totalMostrado; }, 0)) + ")" : ""), "ok");
   }
 
+  function abonadoPaqueteEc(p){ return p.info.ajustes.reduce(function(a, x){ return a + (x.es_abono ? -x.monto : 0); }, 0); }
   function dibujarResumenPdfEc(doc, paquetes){
-    var nombre = paquetes[0].estado.nombre, marginX = 14, y = 18, rowH = 9, w0 = 130, w1 = 50;
+    var nombre = paquetes[0].estado.nombre, marginX = 14, y = 18, rowH = 9;
+    var hayAbonos = paquetes.some(function(p){ return abonadoPaqueteEc(p) > 0; });
+    var anchos = hayAbonos ? [76, 38, 36, 32] : [130, 52];
     doc.setFont("helvetica", "bold"); doc.setFontSize(18); doc.setTextColor(0, 0, 0);
     doc.text("Estados de Cuenta pendientes", marginX, y); y += 10;
     doc.setFont("helvetica", "normal"); doc.setFontSize(12);
     doc.text("Persona: " + nombre, marginX, y); y += 7;
     doc.text(doc.splitTextToSize("Incluye " + paquetes.length + " meses: " + paquetes.map(function(p){ return MESES_ES[p.estado.mes] + " " + p.estado.anio; }).join(", "), 180), marginX, y);
     y += 11;
-    function fila(texto, monto, relleno, negrita){
+    var ancho = anchos.reduce(function(a, w){ return a + w; }, 0);
+    function fila(textos, relleno, negrita){
       doc.setFillColor(relleno, relleno, relleno); doc.setDrawColor(0, 0, 0);
-      doc.rect(marginX, y, w0, rowH, "FD"); doc.rect(marginX + w0, y, w1, rowH, "FD");
+      var x = marginX;
+      anchos.forEach(function(w){ doc.rect(x, y, w, rowH, "FD"); x += w; });   // (todos los rect antes que los text: bug de jsPDF)
       doc.setFont("helvetica", negrita ? "bold" : "normal"); doc.setFontSize(11); doc.setTextColor(0, 0, 0);
-      doc.text(texto, marginX + 2, y + 6);
-      doc.text(monto, marginX + w0 + w1 - 2 - doc.getTextWidth(monto), y + 6);
+      x = marginX;
+      textos.forEach(function(t, j){
+        if(j === 0) doc.text(t, x + 2, y + 6); else doc.text(t, x + anchos[j] - 2 - doc.getTextWidth(t), y + 6);
+        x += anchos[j];
+      });
       y += rowH;
     }
-    fila("Mes", "Total del mes", 220, true);
+    fila(hayAbonos ? ["Mes", "Total del mes", "Abonos", "Saldo"] : ["Mes", "Total del mes"], 220, true);
     paquetes.forEach(function(p, i){
-      fila(MESES_ES[p.estado.mes] + " " + p.estado.anio + "  (" + p.items.length + " movimientos)", money(p.info.totalMostrado), i % 2 === 0 ? 245 : 255, false);
+      var ab = abonadoPaqueteEc(p);
+      var t = [MESES_ES[p.estado.mes] + " " + p.estado.anio + "  (" + p.items.length + " movimientos)"];
+      t = t.concat(hayAbonos ? [money(p.info.totalMostrado + ab), ab ? "-" + money(ab) : "-", money(p.info.totalMostrado)] : [money(p.info.totalMostrado)]);
+      fila(t, i % 2 === 0 ? 245 : 255, false);
     });
     var total = paquetes.reduce(function(a, p){ return a + p.info.totalMostrado; }, 0);
-    fila("Total de los " + paquetes.length + " meses", money(total), 235, true);
-    y += 12;
+    var totalAb = paquetes.reduce(function(a, p){ return a + abonadoPaqueteEc(p); }, 0);
+    fila(["Total de los " + paquetes.length + " meses"].concat(hayAbonos ? [money(total + totalAb), "-" + money(totalAb), money(total)] : [money(total)]), 235, true);
+    y += 7;
+    if(hayAbonos){
+      doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor(20, 110, 170);
+      doc.text("Abonos de " + nombre + ": " + money(totalAb) + "; el saldo de abajo ya los descuenta.", marginX, y);
+    }
+    y += 8;
     var v = veredictoEstadoCuenta(nombre, total);
     doc.setFont("helvetica", "bold"); doc.setFontSize(14); doc.setTextColor(v.color[0], v.color[1], v.color[2]);
     doc.text(v.etiqueta, marginX, y);
     var mTxt = money(v.monto);
-    doc.text(mTxt, marginX + w0 + w1 - doc.getTextWidth(mTxt), y);
+    doc.text(mTxt, marginX + ancho - doc.getTextWidth(mTxt), y);
     y += 10;
     doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor(90, 90, 90);
     doc.text("En las hojas siguientes va el detalle de cada mes.", marginX, y);
@@ -4136,11 +4222,11 @@
       y += 10;
       if(y > pageBottom){ doc.addPage(); y = 18; }
       doc.setFont("helvetica", "bold"); doc.setFontSize(11); doc.setTextColor(0, 0, 0);
-      doc.text("Ajustes de Subtotal combinado:", marginX, y); y += 6;
+      doc.text("Ajustes y abonos:", marginX, y); y += 6;
       doc.setFont("helvetica", "normal"); doc.setFontSize(9);
       info.ajustes.forEach(function(a){
         if(y + 5 > pageBottom){ doc.addPage(); y = 18; }
-        var tipoTxt = a.incluir_en_total ? "suma al total" : "nota, no suma";
+        var tipoTxt = tipoAjusteTxt(a);
         var linea = a.etiqueta + ": " + money(a.monto) + " (" + tipoTxt + ")" + (a.detalle ? " - " + a.detalle : "");
         doc.text(String(linea).slice(0, 120), marginX, y);
         y += 5;
@@ -4162,7 +4248,7 @@
       "<div style=\"margin-top:16px;\">" +
         "<div style=\"font-size:19px;font-weight:700;color:#5a5a5a;margin-bottom:6px;\">Ajustes de Subtotal combinado</div>" +
         ajustes.map(function(a){
-          var tipoTxt = a.incluir_en_total ? "suma al total" : "nota, no suma";
+          var tipoTxt = tipoAjusteTxt(a);
           return "<div style=\"font-size:18px;padding:3px 0;\">" + escapeHtml(a.etiqueta) + ": " + escapeHtml(money(a.monto)) +
             " (" + tipoTxt + ")" + (a.detalle ? " — " + escapeHtml(a.detalle) : "") + "</div>";
         }).join("") +
@@ -8829,7 +8915,9 @@
             conciliacion: exportarConciliacion(),
             gastos_diarios_borrados: dbAll("SELECT uid, borrado_en FROM gastos_diarios_borrados ORDER BY uid"),
             gastos_borrados: dbAll("SELECT uid, borrado_en FROM gastos_borrados ORDER BY uid"),
-            periodos_tarjeta: dbAll("SELECT anio, mes, tarjeta, desde, hasta FROM periodos_tarjeta ORDER BY anio, mes, tarjeta")};
+            periodos_tarjeta: dbAll("SELECT anio, mes, tarjeta, desde, hasta FROM periodos_tarjeta ORDER BY anio, mes, tarjeta"),
+            abonos: dbAll("SELECT uid, persona, anio, mes, fecha, monto, nota FROM abonos ORDER BY uid"),
+            abonos_borrados: dbAll("SELECT uid, borrado_en FROM abonos_borrados ORDER BY uid")};
   }
 
   // ---- publicar el estado local en la carpeta ----
@@ -9177,6 +9265,20 @@
         });
 
         if(opciones.espejoEscritorio && limpiarCargosDelEscritorioQueSobran(data.gastos) > 0) huboCambios = true;
+        // abonos (por uid): uno nuevo se agrega; uno borrado en el otro dispositivo se borra aca y no vuelve
+        (data.abonos_borrados || []).forEach(function(b){
+          if(!b || !b.uid) return;
+          db.run("INSERT OR IGNORE INTO abonos_borrados (uid, borrado_en) VALUES (?,?)", [String(b.uid), String(b.borrado_en || "")]);
+          db.run("DELETE FROM abonos WHERE uid=?", [String(b.uid)]);
+          if(db.getRowsModified() > 0) huboCambios = true;
+        });
+        (data.abonos || []).forEach(function(a){
+          if(!a || !a.uid || !a.persona || !a.anio || !a.mes || !a.fecha) return;
+          if(dbGet("SELECT 1 AS x FROM abonos_borrados WHERE uid=?", [String(a.uid)])) return;
+          db.run("INSERT OR IGNORE INTO abonos (uid, persona, anio, mes, fecha, monto, nota) VALUES (?,?,?,?,?,?,?)",
+            [String(a.uid), String(a.persona), Number(a.anio), Number(a.mes), String(a.fecha), Math.abs(Number(a.monto) || 0), String(a.nota || "")]);
+          if(db.getRowsModified() > 0) huboCambios = true;
+        });
         // periodos de facturacion: los del escritorio mandan; de otro dispositivo, solo si aca no hay uno
         (data.periodos_tarjeta || []).forEach(function(pt){
           if(!pt || !pt.anio || !pt.mes || !pt.tarjeta || !pt.desde || !pt.hasta) return;
