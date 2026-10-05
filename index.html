@@ -2644,6 +2644,38 @@
       " respecto al PDF confirmado. Puede que algo se haya borrado, editado, o quedado mal repartido -- revisá los movimientos de origen PDF de este mes.";
   }
 
+  function ecItemsDe(nombre, anio, mes){
+    var items = dbAll(
+      "SELECT g.id AS gastoId, g.fecha AS fecha, g.detalle AS detalle, g.empresa AS empresa, g.cuota_texto AS cuota, " +
+      "gp.monto AS monto, g.origen AS origen, g.descripcion AS descripcion, COALESCE(g.proyectado,0) AS proyectado, " +
+      "g.monto_total AS montoTotal, g.monto_operacion AS montoOperacion, COALESCE(g.nota,'') AS nota " +
+      "FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
+      "WHERE p.nombre=? COLLATE NOCASE AND g.anio=? AND g.mes=? ORDER BY g.fecha",
+      [nombre, anio, mes]
+    );
+    items.forEach(function(it){
+      it.estadoCuota = cuotaEstado(it.cuota); it.proyectado = !!it.proyectado;
+      it.detalleMostrado = it.nota ? it.nota + " · " + it.detalle : it.detalle;   // lo que ve quien paga
+    });
+    return items;
+  }
+  // Un estado de cuenta listo para exportar: movimientos + ajustes + total (real + ajustes "incluir en el total").
+  function ecPaqueteDe(nombre, anio, mes){
+    var estado = {nombre: nombre, anio: anio, mes: mes};
+    var items = ecItemsDe(nombre, anio, mes);
+    var ajustes = ajustesEcGuardados(estado);
+    var real = items.reduce(function(a, it){ return a + it.monto; }, 0);
+    var hay = ajustes.some(function(a){ return a.incluir_en_total; });
+    return {estado: estado, items: items, info: {real: real, ajustes: ajustes, totalMostrado: hay ? real + sumaAjustesIncluidos(ajustes) : real}};
+  }
+  // Todos los meses en que la persona tiene movimientos, del mas reciente al mas antiguo (para el PDF de varios meses).
+  function ecMesesDePersona(nombre){
+    return dbAll(
+      "SELECT DISTINCT g.anio AS anio, g.mes AS mes FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id " +
+      "JOIN personas p ON p.id=gp.persona_id WHERE p.nombre=? COLLATE NOCASE ORDER BY g.anio DESC, g.mes DESC", [nombre]
+    ).map(function(r){ return ecPaqueteDe(nombre, Number(r.anio), Number(r.mes)); });
+  }
+
   function renderEstadoCuenta(){
     var estado = estadoActual();
     var cont = document.getElementById("ecResultado");
@@ -2654,18 +2686,7 @@
       return;
     }
     refrescarTelefonoEc(estado.nombre);
-    var items = dbAll(
-      "SELECT g.id AS gastoId, g.fecha AS fecha, g.detalle AS detalle, g.empresa AS empresa, g.cuota_texto AS cuota, " +
-      "gp.monto AS monto, g.origen AS origen, g.descripcion AS descripcion, COALESCE(g.proyectado,0) AS proyectado, " +
-      "g.monto_total AS montoTotal, g.monto_operacion AS montoOperacion, COALESCE(g.nota,'') AS nota " +
-      "FROM gasto_persona gp JOIN gastos g ON g.id=gp.gasto_id JOIN personas p ON p.id=gp.persona_id " +
-      "WHERE p.nombre=? COLLATE NOCASE AND g.anio=? AND g.mes=? ORDER BY g.fecha",
-      [estado.nombre, estado.anio, estado.mes]
-    );
-    items.forEach(function(it){
-      it.estadoCuota = cuotaEstado(it.cuota); it.proyectado = !!it.proyectado;
-      it.detalleMostrado = it.nota ? it.nota + " · " + it.detalle : it.detalle;   // lo que ve quien paga
-    });
+    var items = ecItemsDe(estado.nombre, estado.anio, estado.mes);
     ecItemsActuales = items;
     var total = items.reduce(function(a, it){ return a + it.monto; }, 0);
     var avisoCuadre = verificarCuadreMes(estado.anio, estado.mes);
@@ -3902,6 +3923,10 @@
 
   // -------------------------------------------- exportar a PDF (jsPDF)
 
+  // 05-10-2026 (pedido del usuario: "si a una persona se le acumularon uno, dos o tres estados de cuenta que no pago,
+  // mandar los tres en un solo PDF"): si la persona tiene mas de un mes, primero se eligen los meses (viene marcado el
+  // que se esta viendo). Con varios, la primera hoja es un resumen con el total a pagar de todos, y despues una hoja
+  // por mes con el detalle de siempre. Igual que el escritorio.
   function exportarEstadoCuentaPDF(){
     var estado = estadoActual();
     if(!estado){ mostrarMensajeExportEc("Elige persona, mes y año primero.", "bad"); return; }
@@ -3909,10 +3934,100 @@
       mostrarMensajeExportEc("No se pudo cargar la librería de PDF (vendor/jspdf.umd.min.js). Verifica que la carpeta 'vendor' esté completa.", "bad");
       return;
     }
-    var items = ecItemsActuales;
-    var info = infoTotalEc(estado);
-    var total = info.totalMostrado;
+    var meses = ecMesesDePersona(estado.nombre).filter(function(p){ return p.items.length > 0; });
+    if(meses.length <= 1){
+      generarPdfEstadosCuenta([{estado: estado, items: ecItemsActuales, info: infoTotalEc(estado)}]);
+      return;
+    }
+    var h = "<h2>Exportar a PDF</h2><p class=\"hint\">Marca los meses de " + escapeHtml(estado.nombre) +
+      " que quieres mandar juntos en un solo PDF (ej. los que no ha pagado). Con más de uno, la primera hoja trae el resumen y el total a pagar de todos.</p>" +
+      "<div id=\"ecPdfMeses\" style=\"max-height:320px; overflow:auto; border:1px solid var(--border, #444); border-radius:8px; padding:6px 10px;\">" +
+      meses.map(function(p, i){
+        var marcado = p.estado.anio === estado.anio && p.estado.mes === estado.mes;
+        var proy = p.items.every(function(it){ return it.proyectado; });
+        return "<label style=\"display:flex; gap:8px; align-items:center; padding:5px 0;" + (proy ? " opacity:.65;" : "") + "\">" +
+          "<input type=\"checkbox\" data-ec-pdf-mes=\"" + i + "\"" + (marcado ? " checked" : "") + "> " +
+          escapeHtml(MESES_ES[p.estado.mes] + " " + p.estado.anio) + " — " + escapeHtml(money(p.info.totalMostrado)) +
+          (proy ? " <span class=\"hint\">(⏳ proyectado, todavía no llega el PDF)</span>" : "") + "</label>";
+      }).join("") + "</div><p id=\"ecPdfTotal\" style=\"margin:10px 0 0;\"></p>" +
+      "<div class=\"form-actions\"><button type=\"button\" class=\"btn-primary\" id=\"ecPdfGenerar\">Generar PDF</button>" +
+      "<button type=\"button\" class=\"btn-ghost\" id=\"ecPdfCancelar\">Cancelar</button></div>";
+    abrirModal(h);
+    function elegidos(){
+      return Array.prototype.slice.call(document.querySelectorAll("[data-ec-pdf-mes]:checked"))
+        .map(function(c){ return meses[Number(c.dataset.ecPdfMes)]; });
+    }
+    function actualizarTotal(){
+      var el = elegidos();
+      document.getElementById("ecPdfTotal").textContent = el.length + " mes(es) marcado(s) — total: " +
+        money(el.reduce(function(a, p){ return a + p.info.totalMostrado; }, 0));
+    }
+    document.querySelectorAll("[data-ec-pdf-mes]").forEach(function(c){ c.addEventListener("change", actualizarTotal); });
+    actualizarTotal();
+    document.getElementById("ecPdfCancelar").addEventListener("click", cerrarModal);
+    document.getElementById("ecPdfGenerar").addEventListener("click", function(){
+      var el = elegidos();
+      if(!el.length){ document.getElementById("ecPdfTotal").textContent = "Marca al menos un mes."; return; }
+      cerrarModal();
+      generarPdfEstadosCuenta(el);
+    });
+  }
+
+  function generarPdfEstadosCuenta(paquetes){
+    paquetes = paquetes.slice().sort(function(a, b){ return (a.estado.anio * 100 + a.estado.mes) - (b.estado.anio * 100 + b.estado.mes); });
     var doc = new window.jspdf.jsPDF({unit: "mm", format: "a4"});
+    var varios = paquetes.length > 1;
+    if(varios) dibujarResumenPdfEc(doc, paquetes);
+    paquetes.forEach(function(p, i){
+      if(varios || i > 0) doc.addPage();
+      dibujarMesPdfEc(doc, p.estado, p.items, p.info, varios ? "  (" + (i + 1) + " de " + paquetes.length + ")" : "");
+    });
+    var primero = paquetes[0].estado, ultimo = paquetes[paquetes.length - 1].estado;
+    var nombreArchivo = varios
+      ? "estado-cuenta-" + slugify(primero.nombre) + "-" + slugify(MESES_ES[primero.mes]) + "-" + primero.anio + "-a-" +
+        slugify(MESES_ES[ultimo.mes]) + "-" + ultimo.anio + ".pdf"
+      : nombreArchivoEc(primero, "pdf");
+    doc.save(nombreArchivo);
+    mostrarMensajeExportEc("PDF generado: " + nombreArchivo + (varios ? " (" + paquetes.length + " meses, total " +
+      money(paquetes.reduce(function(a, p){ return a + p.info.totalMostrado; }, 0)) + ")" : ""), "ok");
+  }
+
+  function dibujarResumenPdfEc(doc, paquetes){
+    var nombre = paquetes[0].estado.nombre, marginX = 14, y = 18, rowH = 9, w0 = 130, w1 = 50;
+    doc.setFont("helvetica", "bold"); doc.setFontSize(18); doc.setTextColor(0, 0, 0);
+    doc.text("Estados de Cuenta pendientes", marginX, y); y += 10;
+    doc.setFont("helvetica", "normal"); doc.setFontSize(12);
+    doc.text("Persona: " + nombre, marginX, y); y += 7;
+    doc.text(doc.splitTextToSize("Incluye " + paquetes.length + " meses: " + paquetes.map(function(p){ return MESES_ES[p.estado.mes] + " " + p.estado.anio; }).join(", "), 180), marginX, y);
+    y += 11;
+    function fila(texto, monto, relleno, negrita){
+      doc.setFillColor(relleno, relleno, relleno); doc.setDrawColor(0, 0, 0);
+      doc.rect(marginX, y, w0, rowH, "FD"); doc.rect(marginX + w0, y, w1, rowH, "FD");
+      doc.setFont("helvetica", negrita ? "bold" : "normal"); doc.setFontSize(11); doc.setTextColor(0, 0, 0);
+      doc.text(texto, marginX + 2, y + 6);
+      doc.text(monto, marginX + w0 + w1 - 2 - doc.getTextWidth(monto), y + 6);
+      y += rowH;
+    }
+    fila("Mes", "Total del mes", 220, true);
+    paquetes.forEach(function(p, i){
+      fila(MESES_ES[p.estado.mes] + " " + p.estado.anio + "  (" + p.items.length + " movimientos)", money(p.info.totalMostrado), i % 2 === 0 ? 245 : 255, false);
+    });
+    var total = paquetes.reduce(function(a, p){ return a + p.info.totalMostrado; }, 0);
+    fila("Total de los " + paquetes.length + " meses", money(total), 235, true);
+    y += 12;
+    var v = veredictoEstadoCuenta(nombre, total);
+    doc.setFont("helvetica", "bold"); doc.setFontSize(14); doc.setTextColor(v.color[0], v.color[1], v.color[2]);
+    doc.text(v.etiqueta, marginX, y);
+    var mTxt = money(v.monto);
+    doc.text(mTxt, marginX + w0 + w1 - doc.getTextWidth(mTxt), y);
+    y += 10;
+    doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor(90, 90, 90);
+    doc.text("En las hojas siguientes va el detalle de cada mes.", marginX, y);
+    doc.setTextColor(0, 0, 0);
+  }
+
+  function dibujarMesPdfEc(doc, estado, items, info, deCuantos){
+    var total = info.totalMostrado;
     var marginX = 14;
     var pageBottom = 280;
     var y = 18;
@@ -3921,7 +4036,7 @@
     doc.text("Estado de Cuenta", marginX, y); y += 10;
     doc.setFont("helvetica", "normal"); doc.setFontSize(12);
     doc.text("Persona: " + estado.nombre, marginX, y); y += 7;
-    doc.text("Mes: " + MESES_ES[estado.mes] + " " + estado.anio, marginX, y); y += 9;
+    doc.text("Mes: " + MESES_ES[estado.mes] + " " + estado.anio + (deCuantos || ""), marginX, y); y += 9;
 
     var cols = [
       {label: "Fecha", w: 24, campo: "fecha"}, {label: "Detalle", w: 62, campo: "detalle"},
@@ -4031,10 +4146,6 @@
         y += 5;
       });
     }
-
-    var nombreArchivo = nombreArchivoEc(estado, "pdf");
-    doc.save(nombreArchivo);
-    mostrarMensajeExportEc("PDF generado: " + nombreArchivo, "ok");
   }
   document.getElementById("ecBtnPdf").addEventListener("click", exportarEstadoCuentaPDF);
 
