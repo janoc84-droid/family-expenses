@@ -429,6 +429,8 @@
   .conc-ayuda{ padding:0 12px 4px; }
   .conc-filas{ padding:0 8px 8px; }
   .conc-fila{ display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) 190px; gap:6px; margin-bottom:6px; align-items:stretch; }
+  .conc-encabezado{ font-size:.78rem; font-weight:700; color:var(--text-dim); margin-bottom:2px; }
+  .conc-encabezado > div{ padding:0 10px; }
   .conc-lado{ background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:6px 10px; min-width:0; }
   .conc-lado-vacio{ background:transparent; border-style:dashed; color:var(--text-dim); font-size:.85rem; display:flex; align-items:center; }
   .conc-lado-top{ display:flex; justify-content:space-between; gap:8px; align-items:baseline; }
@@ -445,6 +447,9 @@
   .conc-opcion.sel{ background:var(--accent); color:var(--accent-ink); border-color:transparent; }
   @media (max-width:700px){
     .conc-fila{ grid-template-columns:1fr; }
+    .conc-encabezado{ display:none; }
+    .conc-lado.conc-estado::before{ content:"📄 Estado de cuenta (PDF)"; display:block; font-size:.72rem; font-weight:700; color:var(--text-dim); }
+    .conc-lado.conc-nota::before{ content:"📝 Tu nota en Gastos Diarios"; display:block; font-size:.72rem; font-weight:700; color:var(--text-dim); }
     .conc-acciones{ flex-direction:row; flex-wrap:wrap; align-items:center; }
   }
 
@@ -5485,12 +5490,18 @@
       (chip ? "<span class=\"conc-chip " + chipClase + "\">" + escapeHtml(chip).replace(/\n/g, "<br>") + "</span>" : "") + botones.join("") + "</div></div>";
   }
 
+  // Titulos arriba de cada lado (pedido del usuario 07-10-2026): la Falabella/Lider del PDF del banco vs tu nota diaria
+  function concEncabezadoHtml(){
+    var t = (concUltimo && CONC_ETIQUETA_TARJETA[concUltimo.tarjeta]) || "";
+    return "<div class=\"conc-fila conc-encabezado\"><div>📄 ESTADO DE CUENTA " + escapeHtml(t.toUpperCase()) + " (PDF del banco)</div>" +
+      "<div>📝 TU NOTA EN GASTOS DIARIOS (" + escapeHtml(t) + ")</div><div>QUÉ HACER</div></div>";
+  }
   function concSeccionHtml(clave, titulo, resumen, clase, ayuda, cantidad, filasHtml, accionesHtml){
     var abierta = concAbiertas[clave] && cantidad > 0;
     return "<details class=\"conc-seccion " + clase + "\" data-conc-sec=\"" + clave + "\"" + (abierta ? " open" : "") + (cantidad ? "" : " data-vacia=\"1\"") + ">" +
       "<summary><span class=\"conc-sec-titulo\">" + escapeHtml(titulo) + "</span> <span class=\"conc-sec-resumen\">" +
       escapeHtml(cantidad ? resumen : "— nada aquí —") + "</span>" + (accionesHtml || "") + "</summary>" +
-      (cantidad ? "<p class=\"hint conc-ayuda\">" + escapeHtml(ayuda) + "</p><div class=\"conc-filas\">" + filasHtml + "</div>" : "") + "</details>";
+      (cantidad ? "<p class=\"hint conc-ayuda\">" + escapeHtml(ayuda) + "</p><div class=\"conc-filas\">" + concEncabezadoHtml() + filasHtml + "</div>" : "") + "</details>";
   }
 
   // Cuadre del cobro (07-10-2026, igual que el escritorio, ver cuadre_cobro_service.py): ¿todo lo que trae el estado de
@@ -5540,12 +5551,12 @@
     if(!c) return "";
     var h = "<div class=\"conc-ecuacion\"><b>COBRO A PERSONAS</b> <span>Estado de cuenta " + money(c.totalEstado) + " (" + c.nCargos +
       " cargos) → cobrado a las personas " + money(c.totalCobrado) + "</span> ";
-    if(c.cuadrado) h += "<span class=\"conc-p ok\"><b>✔ Cuadrado: todo está cobrado, no quedó nada pendiente</b></span>";
+    if(c.cuadrado) h += "<span class=\"conc-p ok\" style=\"white-space:normal\"><b>✔ Cuadrado: todo está cobrado, no quedó nada pendiente</b></span>";
     else{
       var det = [];
       if(c.faltaCobrar) det.push("falta cobrar " + money(c.faltaCobrar));
       if(c.cobradoDeMas) det.push("se cobra de más " + money(c.cobradoDeMas));
-      h += "<span class=\"conc-p warn\"><b>⚠ " + c.descuadrados.length + " cargo(s) no cuadran: " + escapeHtml(det.join(" · ")) + "</b></span> " +
+      h += "<span class=\"conc-p warn\" style=\"white-space:normal\"><b>⚠ " + c.descuadrados.length + " cargo(s) no cuadran: " + escapeHtml(det.join(" · ")) + "</b></span> " +
         "<button type=\"button\" class=\"btn-ghost\" id=\"concVerCobro\" style=\"padding:3px 10px;\">Ver cuáles</button>";
     }
     h += "</div>";
@@ -5641,7 +5652,7 @@
     // -- falto anotar
     filas = r.faltoAnotar.map(function(c){
       var tc = concTextoCargo(c);
-      return concFilaHtml(concLadoHtml("conc-estado", tc.principal, c.monto, tc.secundario), concVacioHtml("— sin nota en Gastos Diarios —"), "", "",
+      return concFilaHtml(concLadoHtml("conc-estado", tc.principal, c.monto, tc.secundario), concVacioHtml("— no tienes una nota en Gastos Diarios para este cargo —"), "", "",
         [concBotonHtml("Vincular con nota(s)…", "elegir-nota", {cargo: c.id}), concBotonHtml("Es automático, no se anota", "automatico", {cargo: c.id}),
          concBotonHtml("Anotar en Gastos Diarios…", "anotar-diario", {cargo: c.id})]);
     }).join("");
@@ -5656,7 +5667,7 @@
         "vincular", {cargo: s.parecido.id, nota: s.nota.id}, "btn-primary"));
       botones.push(concBotonHtml("Vincular con un cargo…", "elegir-cargo", {nota: s.nota.id}));
       botones.push(concBotonHtml("No es un gasto…", "no-es-gasto", {nota: s.nota.id}));
-      return concFilaHtml(concVacioHtml("— no aparece en el estado de cuenta —"), concLadoHtml("conc-nota", tn.principal, s.nota.monto, tn.secundario), "", "", botones);
+      return concFilaHtml(concVacioHtml("— no aparece en el estado de cuenta (PDF) —"), concLadoHtml("conc-nota", tn.principal, s.nota.monto, tn.secundario), "", "", botones);
     }).join("");
     html += concSeccionHtml("solo", "? Anotado a diario, pero no aparece en el estado de cuenta", r.soloDiario.length + " · " + money(t.soloDiario), "acc",
       "Puede caer en el próximo estado, tener otro monto (ej. dólares) o no ser un gasto (ej. pago de otra tarjeta).", r.soloDiario.length, filas, "");
@@ -5666,7 +5677,7 @@
       var bs = [concBotonHtml("Vincular con nota(s)…", "elegir-nota", {cargo: c.cargo.id})];
       if(c.motivo === CONC_MOTIVO_AUTOMATICO) bs.push(concBotonHtml("Ya no es automático", "no-automatico", {cargo: c.cargo.id}));
       bs.push(concBotonHtml("Anotar en Gastos Diarios…", "anotar-diario", {cargo: c.cargo.id}));
-      return concFilaHtml(concLadoHtml("conc-estado", tc.principal, c.cargo.monto, tc.secundario), concVacioHtml("— sin nota en Gastos Diarios —"), "", "", bs);
+      return concFilaHtml(concLadoHtml("conc-estado", tc.principal, c.cargo.monto, tc.secundario), concVacioHtml("— no tienes una nota en Gastos Diarios para este cargo —"), "", "", bs);
     }).join("");
     html += concSeccionHtml("conciliados", "✔ Ya conciliado — listo, no hay que hacer nada", conciliados.length + " · cargo " + money(sumaCargos(conciliados)), "ok",
       "Cada cargo ya quedó unido a su nota. Ábrelo solo si quieres revisar o desvincular alguno.", conciliados.length, conciliados.map(filaPar).join(""), "");
@@ -5808,12 +5819,14 @@
       abrirModal("<h2>Anotar en Gastos Diarios</h2><p class=\"hint\">" + escapeHtml("Cargo del banco: " + concFechaCorta(c6.fecha) + "  " + (c6.detalle || c6.descripcion) +
         " — " + money(c6.monto || 0)) + "<br>" + escapeHtml(concDatosCargo(c6)) + "</p>" +
         "<div class=\"form-grid\"><div class=\"field\"><label>¿Qué es? (nombre)</label><input type=\"text\" id=\"concAnNombre\"></div>" +
-        "<div class=\"field\"><label>Categoría</label><input type=\"text\" id=\"concAnCat\" list=\"categoriasList\"></div></div>" +
+        "<div class=\"field\"><label>Categoría</label><input type=\"text\" id=\"concAnCat\" list=\"categoriasList\" placeholder=\"Escribe para buscar la categoría...\" autocomplete=\"off\"></div></div>" +
         "<p class=\"hint\">" + escapeHtml("Monto " + money(c6.monto || 0) + cuota6 + " · fecha " + fecha6.split("-").reverse().join("/") +
         " (estado de cuenta de " + MESES_ES[me] + " " + an + ") · tarjeta " + (CONC_ETIQUETA_TARJETA[c6.tarjeta] || "")) + "<br>" +
         escapeHtml("Personas: " + (c6.personas || "solo tuya") + " (las mismas del cargo)") + "</p>" +
         "<div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"concAnCancelar\">Cancelar</button>" +
         "<button type=\"button\" class=\"btn-primary\" id=\"concAnOk\">Anotar y vincular</button></div>");
+      // buscador de categoria: la lista de sugerencias del navegador filtra mientras se escribe
+      setDatalist("categoriasList", dbAll("SELECT nombre FROM categorias ORDER BY nombre").map(function(r){ return r.nombre; }));
       document.getElementById("concAnNombre").value = c6.detalle || c6.descripcion || "";
       document.getElementById("concAnCat").value = c6.categoria || "";
       document.getElementById("concAnCancelar").addEventListener("click", cerrarModal);
