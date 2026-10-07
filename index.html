@@ -5281,6 +5281,84 @@
       (cantidad ? "<p class=\"hint conc-ayuda\">" + escapeHtml(ayuda) + "</p><div class=\"conc-filas\">" + filasHtml + "</div>" : "") + "</details>";
   }
 
+  // Cuadre del cobro (07-10-2026, igual que el escritorio, ver cuadre_cobro_service.py): ¿todo lo que trae el estado de
+  // cuenta quedo cobrado a alguien? El estado de cuenta es el patron: cada cargo tiene que estar repartido completo
+  // entre las personas. SIN_COBRAR = nadie lo tiene; FALTA = queda una parte sin cobrar; DE_MAS = se cobra de mas.
+  // Nunca corrige nada solo.
+  function concCuadreCobro(anio, mes, tarjeta){
+    var filas = dbAll(
+      "SELECT g.id, g.fecha, g.detalle, COALESCE(g.nota,'') AS nota, g.cuota_texto, g.valor_cuota, g.monto_total, COALESCE(g.proyectado,0) AS proyectado, " +
+      "COALESCE((SELECT SUM(gp.monto) FROM gasto_persona gp WHERE gp.gasto_id=g.id),0) AS cobrado, " +
+      "COALESCE((SELECT GROUP_CONCAT(p.nombre, ', ') FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id WHERE gp.gasto_id=g.id),'') AS personas " +
+      "FROM gastos g WHERE g.anio=? AND g.mes=? AND UPPER(g.origen) IN " + CONC_ORIGENES_SQL[tarjeta] + " ORDER BY g.fecha, g.id", [anio, mes]);
+    if(!filas.length) return null;
+    var c = {tarjeta: tarjeta, anio: anio, mes: mes, nCargos: filas.length, totalEstado: 0, totalCobrado: 0,
+             proyectado: filas.every(function(f){ return Number(f.proyectado) === 1; }), descuadrados: []};
+    filas.forEach(function(f){
+      var cuota = concParseCuota(f.cuota_texto);
+      var valor = (f.valor_cuota !== null && f.valor_cuota !== undefined) ? Number(f.valor_cuota)
+                : ((cuota.total || 1) <= 1 ? Number(f.monto_total || 0) : null);
+      if(valor === null) return;                       // (sin el valor del banco no se puede comparar)
+      var cobrado = Number(f.cobrado) || 0;
+      c.totalEstado += valor; c.totalCobrado += cobrado;
+      if(Math.abs(valor - cobrado) <= 1) return;
+      var tipo = !f.personas ? "SIN_COBRAR" : ((valor >= 0 ? cobrado < valor : cobrado > valor) ? "FALTA" : "DE_MAS");
+      c.descuadrados.push({fecha: f.fecha, detalle: (f.nota || "").trim() || f.detalle || "", cuota: f.cuota_texto || "",
+                           valor: valor, cobrado: cobrado, personas: f.personas, tipo: tipo, diferencia: valor - cobrado});
+    });
+    c.faltaCobrar = c.descuadrados.reduce(function(a, d){ return a + (d.diferencia > 0 ? d.diferencia : 0); }, 0);
+    c.cobradoDeMas = c.descuadrados.reduce(function(a, d){ return a + (d.diferencia < 0 ? -d.diferencia : 0); }, 0);
+    c.cuadrado = !c.descuadrados.length && Math.abs(c.totalEstado - c.totalCobrado) <= 5;
+    return c;
+  }
+  // Meses ya cargados desde el PDF (con su total guardado) donde algo no quedo cobrado. Los meses viejos del Excel no.
+  function concMesesCobroPendiente(){
+    var salida = [];
+    dbAll("SELECT anio, mes FROM meses_conciliados WHERE monto_conciliado_pdf IS NOT NULL ORDER BY anio, mes").forEach(function(m){
+      ["CMR", "LIDER"].forEach(function(t){
+        var c = concCuadreCobro(Number(m.anio), Number(m.mes), t);
+        if(c && !c.proyectado && !c.cuadrado) salida.push(c);
+      });
+    });
+    return salida;
+  }
+  function concCuadreCobroHtml(anio, mes, tarjeta){
+    var c = concCuadreCobro(anio, mes, tarjeta);
+    concUltimoCuadre = c;
+    if(!c) return "";
+    var h = "<div class=\"conc-ecuacion\"><b>COBRO A PERSONAS</b> <span>Estado de cuenta " + money(c.totalEstado) + " (" + c.nCargos +
+      " cargos) → cobrado a las personas " + money(c.totalCobrado) + "</span> ";
+    if(c.cuadrado) h += "<span class=\"conc-p ok\"><b>✔ Cuadrado: todo está cobrado, no quedó nada pendiente</b></span>";
+    else{
+      var det = [];
+      if(c.faltaCobrar) det.push("falta cobrar " + money(c.faltaCobrar));
+      if(c.cobradoDeMas) det.push("se cobra de más " + money(c.cobradoDeMas));
+      h += "<span class=\"conc-p warn\"><b>⚠ " + c.descuadrados.length + " cargo(s) no cuadran: " + escapeHtml(det.join(" · ")) + "</b></span> " +
+        "<button type=\"button\" class=\"btn-ghost\" id=\"concVerCobro\" style=\"padding:3px 10px;\">Ver cuáles</button>";
+    }
+    h += "</div>";
+    var otros = concMesesCobroPendiente().filter(function(o){ return !(o.tarjeta === tarjeta && o.anio === anio && o.mes === mes); });
+    if(otros.length) h += "<p class=\"hint\" style=\"color:var(--warn)\">⚠ También hay cargos sin cobrar (o cobrados de más) en: " +
+      escapeHtml(otros.map(function(o){ return MESES_ES[o.mes] + " " + o.anio + " (" + CONC_ETIQUETA_TARJETA[o.tarjeta] + ")"; }).join(", ")) + "</p>";
+    return h;
+  }
+  var concUltimoCuadre = null;
+  function concVerCobroPendiente(){
+    var c = concUltimoCuadre;
+    if(!c) return;
+    var tipos = {SIN_COBRAR: "Nadie lo tiene", FALTA: "Falta cobrar una parte", DE_MAS: "Se cobra de más"};
+    abrirModal("<h2>Cargos que no cuadran</h2><p class=\"hint\">" + escapeHtml(CONC_ETIQUETA_TARJETA[c.tarjeta] + " · " + MESES_ES[c.mes] + " " + c.anio) +
+      ". Lo que cobra el banco manda: corrige el reparto en Estado de Cuenta. Aquí no se cambia nada solo.</p>" +
+      "<div class=\"table-wrap\"><table class=\"data-table\"><thead><tr><th>Fecha</th><th>Cargo</th><th>Cuota</th><th>Cobra el banco</th>" +
+      "<th>Cobrado</th><th>Diferencia</th><th>Personas</th><th>Qué pasa</th></tr></thead><tbody>" +
+      c.descuadrados.map(function(d){
+        return "<tr><td>" + escapeHtml(d.fecha) + "</td><td>" + escapeHtml(d.detalle) + "</td><td>" + escapeHtml(d.cuota) + "</td><td class=\"money\">" +
+          money(d.valor) + "</td><td class=\"money\">" + money(d.cobrado) + "</td><td class=\"money\" style=\"color:var(--warn)\">" + money(d.diferencia) +
+          "</td><td>" + escapeHtml(d.personas || "—") + "</td><td style=\"color:var(--warn)\">" + tipos[d.tipo] + "</td></tr>";
+      }).join("") + "</tbody></table></div><div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"concCobroCerrar\">Cerrar</button></div>");
+    document.getElementById("concCobroCerrar").addEventListener("click", cerrarModal);
+  }
+
   function renderConciliacion(){
     var cont = document.getElementById("concCuerpo"), resEl = document.getElementById("concResumen");
     if(!cont || !db) return;
@@ -5302,7 +5380,7 @@
     if(t.paresSinConfirmar.length) avisos.push(t.paresSinConfirmar.length + " par(es) propuesto(s) esperan tu confirmación");
     if(t.diferenciaEnPares) avisos.push("en los pares hay una diferencia de montos de " + money(t.diferenciaEnPares) + " (nota − cargo)");
     if(r.sinMonto.length) avisos.push(r.sinMonto.length + " cargo(s) sin monto este mes (compra nueva: la primera cuota parte el mes siguiente) no cuentan");
-    resEl.innerHTML =
+    resEl.innerHTML = concCuadreCobroHtml(anio, mes, tarjeta) +
       "<div class=\"conc-ecuacion\"><b>ESTADO DE CUENTA " + escapeHtml(nombre) + " · " + MESES_ES[mes] + " " + anio + "</b> " + pieza("tot", "Total " + money(t.estado) + " =") + " " +
         pieza("ok", "✔ Ya anotado " + money(t.contemplado) + " (" + r.contemplados.length + ")") + " + " +
         pieza("mut", "▪ No se anota a diario " + money(t.noDiario) + " (" + r.noDiario.length + ")") + " + " +
@@ -5312,6 +5390,8 @@
         pieza("acc", "? No aparece en el estado " + money(t.soloDiario) + " (" + r.soloDiario.length + ")") + " + " +
         pieza("mut", "⊘ No es un gasto " + money(t.ignorado) + " (" + r.ignoradas.length + ")") + "</div>" +
       (avisos.length ? "<p class=\"hint\">ℹ " + escapeHtml(avisos.join(" · ")) + "</p>" : "");
+    var btnCobro = document.getElementById("concVerCobro");
+    if(btnCobro) btnCobro.addEventListener("click", concVerCobroPendiente);
 
     var html = "";
     // -- pares: por confirmar (arriba) / ya conciliados (ocultos, al final)
