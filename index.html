@@ -5211,6 +5211,39 @@
             Math.abs([nota].concat(otras).reduce(function(a, n){ return a + n.monto; }, 0) - cargo.monto) <= 0.5 * (1 + otras.length)) tipo = CONC_TIPO_MONTO;
     concGuardarEnlace(cargo.id, nota.id, tipo, null, otras.map(function(n){ return n.id; }));
   }
+  // "Anotar en Gastos Diarios" (07-10-2026): un cargo que no se anoto (deuda antigua que se daba por automatica, o
+  // compra nueva olvidada) pasa a Gastos Diarios con el monto del banco, la tarjeta, la cuota y las mismas personas, en
+  // una fecha dentro de ese estado de cuenta, y queda vinculado al cargo.
+  var CONC_BANCO_DE_TARJETA = {CMR: "CMR Falabella", LIDER: "Líder BCI"};
+  function concFechaParaDiario(cargo, anio, mes){
+    var t = cargo.tarjeta, e = perMesDelEstado(t, cargo.fecha);
+    if(e[0] === anio && e[1] === mes) return cargo.fecha;
+    var dia = Number(String(cargo.fecha).slice(8, 10)) || 1;
+    var candidatos = [[anio, mes], perMesAnt(anio, mes)];
+    for(var i = 0; i < candidatos.length; i++){
+      var a = candidatos[i][0], m = candidatos[i][1], ult = new Date(Date.UTC(a, m, 0)).getUTCDate();
+      var f = a + "-" + String(m).padStart(2, "0") + "-" + String(Math.min(dia, ult)).padStart(2, "0");
+      var em = perMesDelEstado(t, f);
+      if(em[0] === anio && em[1] === mes) return f;
+    }
+    return perPeriodo(t, anio, mes)[1];
+  }
+  function concAnotarEnDiario(cargo, anio, mes, nombre, categoria){
+    if(cargo.monto === null || Math.abs(cargo.monto) < 0.005) throw new Error("Ese cargo no cobra nada este mes: no hay qué anotar.");
+    var fecha = concFechaParaDiario(cargo, anio, mes);
+    var id = insertarGastoDiario(fecha, (nombre || "").trim() || cargo.detalle || cargo.descripcion, categoria || "", cargo.monto, false,
+                                 "Tarjeta", "Crédito", CONC_BANCO_DE_TARJETA[cargo.tarjeta] || "");
+    if(cargo.cuotasTotales && cargo.cuotasTotales > 1 && cargo.cuotaActual){
+      dbRun("UPDATE gastos_diarios SET cuota_texto=?, cuota_actual=?, cuotas_totales=?, monto_total=? WHERE id=?",
+        [String(cargo.cuotaActual).padStart(2, "0") + "/" + String(cargo.cuotasTotales).padStart(2, "0"), cargo.cuotaActual, cargo.cuotasTotales, cargo.montoTotal, id]);
+    }
+    var reparto = {};
+    dbAll("SELECT p.nombre AS nombre, gp.monto AS monto FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id WHERE gp.gasto_id=? ORDER BY gp.id", [cargo.id])
+      .forEach(function(r){ reparto[r.nombre] = Number(r.monto); });
+    if(Object.keys(reparto).length) dividirGastoDiario(id, reparto, {});
+    concGuardarEnlace(cargo.id, id, CONC_TIPO_MONTO);
+    return id;
+  }
   function concCargosLibresPara(res, nota){
     var libres = res.faltoAnotar.concat(res.noDiario.map(function(c){ return c.cargo; }));
     function cerca(c){ return c.monto === null ? Infinity : Math.abs(c.monto - nota.monto); }
@@ -5609,7 +5642,8 @@
     filas = r.faltoAnotar.map(function(c){
       var tc = concTextoCargo(c);
       return concFilaHtml(concLadoHtml("conc-estado", tc.principal, c.monto, tc.secundario), concVacioHtml("— sin nota en Gastos Diarios —"), "", "",
-        [concBotonHtml("Vincular con nota(s)…", "elegir-nota", {cargo: c.id}), concBotonHtml("Es automático, no se anota", "automatico", {cargo: c.id})]);
+        [concBotonHtml("Vincular con nota(s)…", "elegir-nota", {cargo: c.id}), concBotonHtml("Es automático, no se anota", "automatico", {cargo: c.id}),
+         concBotonHtml("Anotar en Gastos Diarios…", "anotar-diario", {cargo: c.id})]);
     }).join("");
     html += concSeccionHtml("falto", "✎ Faltó anotar — está en el estado de cuenta y no en tus notas", r.faltoAnotar.length + " · " + money(t.faltoAnotar), "warn",
       "Compras del periodo que el banco cobró y no tienen nota diaria. Si sí la anotaste con otro monto, vincúlala.", r.faltoAnotar.length, filas, "");
@@ -5631,6 +5665,7 @@
       var tc = concTextoCargo(c.cargo, c.motivo);
       var bs = [concBotonHtml("Vincular con nota(s)…", "elegir-nota", {cargo: c.cargo.id})];
       if(c.motivo === CONC_MOTIVO_AUTOMATICO) bs.push(concBotonHtml("Ya no es automático", "no-automatico", {cargo: c.cargo.id}));
+      bs.push(concBotonHtml("Anotar en Gastos Diarios…", "anotar-diario", {cargo: c.cargo.id}));
       return concFilaHtml(concLadoHtml("conc-estado", tc.principal, c.cargo.monto, tc.secundario), concVacioHtml("— sin nota en Gastos Diarios —"), "", "", bs);
     }).join("");
     html += concSeccionHtml("conciliados", "✔ Ya conciliado — listo, no hay que hacer nada", conciliados.length + " · cargo " + money(sumaCargos(conciliados)), "ok",
@@ -5765,6 +5800,28 @@
       concAbrirElegirNotas(p4.cargo, libres, function(el){
         concEjecutar(function(){ concVincularManual(p4.cargo, p4.nota, (p4.notasExtra || []).concat(el)); });
       }, concNotasDePar(p4));
+    }
+    else if(accion === "anotar-diario"){
+      var c6 = concUltimo.cargos.filter(function(c){ return c.id === cargoId; })[0]; if(!c6) return;
+      var an = concUltimo.anio, me = concUltimo.mes, fecha6 = concFechaParaDiario(c6, an, me);
+      var cuota6 = (c6.cuotasTotales && c6.cuotasTotales > 1) ? " · cuota " + c6.cuotaActual + "/" + c6.cuotasTotales : "";
+      abrirModal("<h2>Anotar en Gastos Diarios</h2><p class=\"hint\">" + escapeHtml("Cargo del banco: " + concFechaCorta(c6.fecha) + "  " + (c6.detalle || c6.descripcion) +
+        " — " + money(c6.monto || 0)) + "<br>" + escapeHtml(concDatosCargo(c6)) + "</p>" +
+        "<div class=\"form-grid\"><div class=\"field\"><label>¿Qué es? (nombre)</label><input type=\"text\" id=\"concAnNombre\"></div>" +
+        "<div class=\"field\"><label>Categoría</label><input type=\"text\" id=\"concAnCat\" list=\"categoriasList\"></div></div>" +
+        "<p class=\"hint\">" + escapeHtml("Monto " + money(c6.monto || 0) + cuota6 + " · fecha " + fecha6.split("-").reverse().join("/") +
+        " (estado de cuenta de " + MESES_ES[me] + " " + an + ") · tarjeta " + (CONC_ETIQUETA_TARJETA[c6.tarjeta] || "")) + "<br>" +
+        escapeHtml("Personas: " + (c6.personas || "solo tuya") + " (las mismas del cargo)") + "</p>" +
+        "<div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"concAnCancelar\">Cancelar</button>" +
+        "<button type=\"button\" class=\"btn-primary\" id=\"concAnOk\">Anotar y vincular</button></div>");
+      document.getElementById("concAnNombre").value = c6.detalle || c6.descripcion || "";
+      document.getElementById("concAnCat").value = c6.categoria || "";
+      document.getElementById("concAnCancelar").addEventListener("click", cerrarModal);
+      document.getElementById("concAnOk").addEventListener("click", function(){
+        var nom = document.getElementById("concAnNombre").value, cat = document.getElementById("concAnCat").value.trim();
+        cerrarModal();
+        concEjecutar(function(){ concAnotarEnDiario(c6, an, me, nom, cat); });
+      });
     }
     else if(accion === "automatico" || accion === "no-automatico"){
       var c5 = concUltimo.cargos.filter(function(c){ return c.id === cargoId; })[0]; if(!c5) return;
