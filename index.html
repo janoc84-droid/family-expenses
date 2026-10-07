@@ -1312,6 +1312,20 @@
     "  PRIMARY KEY (gasto_id, gasto_diario_id)",
     ");",
     "CREATE INDEX IF NOT EXISTS idx_conciliacion_diario_nota ON conciliacion_diario(gasto_diario_id);",
+    // la MISMA compra anotada en varias notas (07-10-2026, igual que el escritorio): la principal en conciliacion_diario,
+    // las demas aca, colgando del mismo cargo
+    "CREATE TABLE IF NOT EXISTS conciliacion_notas_extra (",
+    "  gasto_diario_id INTEGER PRIMARY KEY REFERENCES gastos_diarios(id) ON DELETE CASCADE,",
+    "  gasto_id INTEGER NOT NULL REFERENCES gastos(id) ON DELETE CASCADE,",
+    "  actualizado_en TEXT NOT NULL DEFAULT (datetime('now'))",
+    ");",
+    // comercios "es automatico, no se anota" (suscripciones): clave = concClaveComercio(descripcion)
+    "CREATE TABLE IF NOT EXISTS conciliacion_automaticos (",
+    "  clave TEXT PRIMARY KEY,",
+    "  ejemplo TEXT NOT NULL DEFAULT '',",
+    "  activo INTEGER NOT NULL DEFAULT 1,",
+    "  actualizado_en TEXT NOT NULL DEFAULT (datetime('now'))",
+    ");",
     "CREATE INDEX IF NOT EXISTS idx_gastos_anio_mes ON gastos(anio, mes);",
     "CREATE INDEX IF NOT EXISTS idx_gasto_persona_gasto ON gasto_persona(gasto_id);",
     "CREATE INDEX IF NOT EXISTS idx_gasto_persona_persona ON gasto_persona(persona_id);",
@@ -4544,6 +4558,12 @@
   var CONC_PCT_PARECIDO = 0.03;         // pista "parecido a..." (ej. compra en dolares convertida distinto)
   var CONC_DIAS_POSTERIOR_AL_CORTE = 20;
   var CONC_DIAS_ANTES_DEL_MES = 7;
+  // compra en cuotas CON INTERES y compra anotada en varias notas (07-10-2026, igual que el escritorio)
+  var CONC_RATIO_TOTAL_MIN = 0.80, CONC_RATIO_TOTAL_MAX = 1.02, CONC_MAX_NOTAS_GRUPO = 3;
+  var CONC_MOTIVO_AUTOMATICO = "Cobro automático (marcado por ti: no se anota a diario)";
+  var CONC_PALABRAS_VACIAS = {compra: 1, compras: 1, pago: 1, pagos: 1, cuota: 1, cuotas: 1, santiago: 1, chile: 1, para: 1,
+    mercadopago: 1, dlocal: 1, com: 1, www: 1, the: 1, con: 1, del: 1, las: 1, los: 1, mes: 1, pendiente: 1, pasado: 1,
+    jano: 1, pame: 1, nino: 1, vivi: 1};
 
   function concSinAcentos(t){
     return String(t == null ? "" : t).normalize("NFD").replace(/[̀-ͯ]/g, "");
@@ -4601,8 +4621,9 @@
 
   // Si el cargo es de los que NO se anotan a diario, el por que; null si es una
   // compra normal que si se esperaria en las notas. (Solo para cargos sin pareja.)
-  function concMotivoNoDiario(c){
+  function concMotivoNoDiario(c, automaticos){
     if(c.monto !== null && c.monto < 0) return "Abono o devolución";
+    if(concEsAutomatico(c, automaticos)) return CONC_MOTIVO_AUTOMATICO;
     var categoria = concNorm(c.categoria);
     var texto = (concNorm(c.descripcion) + " " + concNorm(c.detalle)).split("sin interes").join("");   // TODAS las apariciones (como .replace de Python)
     if(categoria === "prestamos y deudas" || texto.indexOf("avance") >= 0) return "Préstamo o avance";
@@ -4616,6 +4637,23 @@
     return null;
   }
 
+  function concPalabras(t){
+    return concNorm(t).replace(/[^a-z]+/g, " ").split(" ").filter(function(w){ return w.length >= 4 && !CONC_PALABRAS_VACIAS[w]; });
+  }
+  // ¿Hablan del mismo comercio? (comparten una palabra, o una es el comienzo de la otra: "aliexpre" / "aliexpress")
+  function concNombresParecidos(a, b){
+    var pa = concPalabras(a), pb = concPalabras(b);
+    return pa.some(function(x){
+      return pb.some(function(y){ return x === y || (Math.min(x.length, y.length) >= 5 && (x.indexOf(y) === 0 || y.indexOf(x) === 0)); });
+    });
+  }
+  function concNombresCargo(c){ return (c.detalle || "") + " " + (c.descripcion || ""); }
+  // El comercio sin ciudad ni montos: "Icloud.com (Cupertino)" -> "icloud.com" (para recordar los cobros automaticos)
+  function concClaveComercio(descripcion){
+    var t = concNorm(descripcion).replace(/\(.*?\)/g, " ");
+    return t.split(/\s+/).filter(function(w){ return w && !/\d/.test(w); }).join(" ").trim();
+  }
+  function concEsAutomatico(c, automaticos){ return !!(automaticos && automaticos[concClaveComercio(c.descripcion || c.detalle)]); }
   function concCuotaReal(cuotasTotales){ return !!(cuotasTotales && cuotasTotales > 1); }
   function concDias(a, b){
     var ra = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(a || "")), rb = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(b || ""));
@@ -4634,6 +4672,37 @@
     return !!((c.montoTotal && Math.abs(c.montoTotal - monto) <= CONC_TOL_EXACTA) ||
               (c.montoOperacion && Math.abs(c.montoOperacion - monto) <= CONC_TOL_EXACTA));
   }
+  // ¿`monto` puede ser el precio de una compra en cuotas CON INTERES? (cuotas x valor de la cuota, algo mayor)
+  function concEsCompraCompletaAprox(c, monto){
+    if(!concCuotaReal(c.cuotasTotales) || c.monto === null || c.monto <= 0) return false;
+    if(concEsValorDeLaCompra(c, monto)) return true;
+    var base = c.monto * (c.cuotasTotales || 1);
+    return CONC_RATIO_TOTAL_MIN * base <= monto && monto <= CONC_RATIO_TOTAL_MAX * base && Math.abs(monto - c.monto) > CONC_TOL_EXACTA;
+  }
+  // 2 o 3 notas que suman exacto el cargo, del mismo comercio (o del mismo dia entre ellas): la de fechas mas cercanas
+  function concBuscarGrupo(c, candidatas){
+    var mejor = null, mejorDias = null;
+    function probar(combo){
+      var suma = combo.reduce(function(a, n){ return a + n.monto; }, 0);
+      if(Math.abs(suma - (c.monto || 0)) > CONC_TOL_EXACTA * combo.length) return;
+      var todos = combo.every(function(n){ return concNombresParecidos(n.detalle, concNombresCargo(c)); });
+      var algun = combo.some(function(n){ return concNombresParecidos(n.detalle, concNombresCargo(c)); });
+      var fechas = {}; combo.forEach(function(n){ fechas[n.fecha] = 1; });
+      if(!(todos || (Object.keys(fechas).length === 1 && algun))) return;
+      var dias = combo.reduce(function(a, n){ return a + concDias(c.fecha, n.fecha); }, 0);
+      if(mejorDias === null || dias < mejorDias){
+        mejor = combo.slice().sort(function(a, b){ return (b.monto - a.monto) || (a.id - b.id); }); mejorDias = dias;
+      }
+    }
+    for(var k = 2; k <= CONC_MAX_NOTAS_GRUPO; k++){
+      (function combinar(inicio, actual){
+        if(actual.length === k){ probar(actual); return; }
+        for(var i = inicio; i < candidatas.length; i++) combinar(i + 1, actual.concat([candidatas[i]]));
+      })(0, []);
+      if(mejor) return mejor;
+    }
+    return null;
+  }
   function concEsCompraCompleta(c, n){
     return !!(concCuotaReal(c.cuotasTotales) && !concCuotaReal(n.cuotasTotales) && concEsValorDeLaCompra(c, n.monto) &&
               c.monto !== null && Math.abs(c.monto - n.monto) > CONC_TOL_EXACTA);
@@ -4648,6 +4717,12 @@
     if(cargoEnCuotas && !notaEnCuotas && concEsValorDeLaCompra(c, n.monto) &&
        Math.abs(c.monto - n.monto) > CONC_TOL_EXACTA){
       return {cargo: c, nota: n, tipo: CONC_TIPO_TOTAL, prioridad: 1, dias: dias, esParDeCuota: false, exacto: true};
+    }
+    // la nota trae el PRECIO de una compra en cuotas con interes (caso real: "COMPRA FAMILYSHOP" $24.480, el banco
+    // cobra 3 cuotas de $8.749): mismo comercio, fechas parecidas. Siempre "revisar".
+    if(cargoEnCuotas && !notaEnCuotas && dias <= CONC_DIAS_ALTA_CONFIANZA && concEsCompraCompletaAprox(c, n.monto) &&
+       concNombresParecidos(n.detalle, concNombresCargo(c))){
+      return {cargo: c, nota: n, tipo: CONC_TIPO_TOTAL, prioridad: 3, dias: dias, esParDeCuota: false, exacto: false};
     }
     var exacto = Math.abs(c.monto - n.monto) <= CONC_TOL_EXACTA;
     var cercano = concEsMontoCercano(c.monto, n.monto);
@@ -4674,14 +4749,17 @@
       if(c.monto === null || c.monto <= 0 || n.monto <= 0) return;
       var dif = Math.abs(c.monto - n.monto);
       if(dif <= CONC_TOL_EXACTA || dif / Math.max(c.monto, n.monto) > CONC_PCT_PARECIDO) return;
+      if(!concNombresParecidos(n.detalle, concNombresCargo(c))) return;   // nunca sugerir unir comercios distintos
       if(mejorDif === null || dif < mejorDif){ mejor = c; mejorDif = dif; }
     });
     return mejor;
   }
 
+  function concNotasDePar(p){ return [p.nota].concat(p.notasExtra || []); }
+  function concMontoNotas(p){ return concR2(concNotasDePar(p).reduce(function(a, n){ return a + n.monto; }, 0)); }
   function concDiferenciaDePar(p){
     if(p.tipo === CONC_TIPO_TOTAL || p.cargo.monto === null) return 0;
-    return concR2(p.nota.monto - p.cargo.monto);
+    return concR2(concMontoNotas(p) - p.cargo.monto);
   }
 
   // Reparte todos los cargos del estado de cuenta y todas las notas de tarjeta en sus cajones.
@@ -4691,7 +4769,7 @@
   //   ignoradas  -- {notaId: motivo}
   //   seriesTotal-- {claveSerie: notaId} compras ya confirmadas como "la nota trae el total"
   //   rechazados -- {"cargoId|notaId": true}
-  function concConciliar(cargos, notas, enlaces, ignoradas, seriesTotal, rechazados){
+  function concConciliar(cargos, notas, enlaces, ignoradas, seriesTotal, rechazados, automaticos){
     seriesTotal = seriesTotal || {}; rechazados = rechazados || {};
     ignoradas = ignoradas || {};
     var notasPorId = {}; notas.forEach(function(n){ notasPorId[n.id] = n; });
@@ -4708,13 +4786,17 @@
     conMonto.forEach(function(c){
       var e = enlacePorCargo[c.id];
       var nota = e ? notasPorId[e.notaId] : null;
-      if(e && nota) res.contemplados.push({cargo: c, nota: nota, tipo: e.tipo, confirmado: true, confianza: "alta"});
+      if(e && nota){
+        var extras = (e.notasExtra || []).map(function(i){ return notasPorId[i]; }).filter(Boolean);
+        res.contemplados.push({cargo: c, nota: nota, tipo: e.tipo, confirmado: true, confianza: "alta", notasExtra: extras});
+      }
       else pendientes.push(c);   // sin enlace (o su nota ya no esta): se vuelve a evaluar
     });
 
     var usadas = {}, notasTotalOk = {};
     res.contemplados.forEach(function(p){
       if(p.tipo !== CONC_TIPO_TOTAL) usadas[p.nota.id] = true; else notasTotalOk[p.nota.id] = true;
+      (p.notasExtra || []).forEach(function(n){ usadas[n.id] = true; });
     });
     var ignoradasIds = {}; Object.keys(ignoradas).forEach(function(k){ ignoradasIds[k] = true; });
     var reservadas = {}; Object.keys(seriesTotal).forEach(function(k){ reservadas[seriesTotal[k]] = true; });
@@ -4772,13 +4854,30 @@
       res.contemplados.push({cargo: a.cargo, nota: a.nota, tipo: a.tipo, confirmado: false, confianza: alta ? "alta" : "media"});
     });
 
+    // 3b) la misma compra anotada en VARIAS notas (caso real: "Compras tottus" $17.159 = $8.580 + $8.579)
+    var ocupadas = {};
+    Object.keys(notaPorMonto).forEach(function(k){ ocupadas[k] = true; });
+    Object.keys(notasTotalOk).forEach(function(k){ ocupadas[k] = true; });
+    pendientes.forEach(function(c){
+      if(cargoAsignado[c.id] || c.monto === null || c.monto <= 0 || concMotivoNoDiario(c, automaticos)) return;
+      var candidatas = disponibles.filter(function(n){
+        return !ocupadas[n.id] && !rechazados[c.id + "|" + n.id] && n.monto > 0 && n.monto < c.monto && concDias(c.fecha, n.fecha) <= CONC_DIAS_ALTA_CONFIANZA;
+      });
+      var grupo = concBuscarGrupo(c, candidatas);
+      if(grupo){
+        grupo.forEach(function(n){ ocupadas[n.id] = true; });
+        cargoAsignado[c.id] = true;
+        res.contemplados.push({cargo: c, nota: grupo[0], tipo: CONC_TIPO_MONTO, confirmado: false, confianza: "media", notasExtra: grupo.slice(1)});
+      }
+    });
+
     var emparejados = {}, enPares = {};
-    res.contemplados.forEach(function(p){ emparejados[p.cargo.id] = true; enPares[p.nota.id] = true; });
+    res.contemplados.forEach(function(p){ emparejados[p.cargo.id] = true; concNotasDePar(p).forEach(function(n){ enPares[n.id] = true; }); });
 
     // 4) lo que quedo sin pareja del estado de cuenta
     conMonto.forEach(function(c){
       if(emparejados[c.id]) return;
-      var motivo = concMotivoNoDiario(c);
+      var motivo = concMotivoNoDiario(c, automaticos);
       if(motivo) res.noDiario.push({cargo: c, motivo: motivo}); else res.faltoAnotar.push(c);
     });
 
@@ -4798,7 +4897,7 @@
         pista = "Es posterior al último cargo de este estado de cuenta: lo más probable es que aparezca en el próximo.";
       }
       var parecido = concCargoParecido(n, res.faltoAnotar);
-      if(parecido && !pista) pista = "Hay un cargo con monto parecido (puede ser la misma compra con otro monto, ej. dólares).";
+      if(parecido && !pista) pista = "Hay un cargo del mismo comercio con monto parecido (puede ser la misma compra, ej. dólares).";
       res.soloDiario.push({nota: n, pista: pista, parecido: parecido});
     });
 
@@ -4816,7 +4915,7 @@
   function concTotales(res){
     function suma(arr, f){ var s = 0; arr.forEach(function(x){ s += f(x); }); return concR2(s); }
     var notasContempladas = [], vistas = {};
-    res.contemplados.forEach(function(p){ if(!vistas[p.nota.id]){ vistas[p.nota.id] = true; notasContempladas.push(p.nota); } });
+    res.contemplados.forEach(function(p){ concNotasDePar(p).forEach(function(n){ if(!vistas[n.id]){ vistas[n.id] = true; notasContempladas.push(n); } }); });
     var t = {
       contemplado: suma(res.contemplados, function(p){ return p.cargo.monto || 0; }),
       noDiario: suma(res.noDiario, function(c){ return c.cargo.monto || 0; }),
@@ -4927,16 +5026,16 @@
 
   function concListarNotas(tarjeta, rangos, cargoIds, notasExtra){
     var ocupadas = {};
-    dbAll("SELECT gasto_id, gasto_diario_id FROM conciliacion_diario").forEach(function(r){
+    dbAll("SELECT gasto_id, gasto_diario_id FROM conciliacion_diario UNION ALL SELECT gasto_id, gasto_diario_id FROM conciliacion_notas_extra").forEach(function(r){
       if(!cargoIds[r.gasto_id]) ocupadas[r.gasto_diario_id] = true;
     });
     var extrasSet = {}; notasExtra.forEach(function(id){ extrasSet[id] = true; });
     var extras = notasExtra.map(Number).filter(function(x){ return isFinite(x); });
     var filas = dbAll(
       "SELECT gd.id, gd.fecha, gd.detalle, gd.monto, gd.monto_total, gd.cuota_actual, gd.cuotas_totales, " +
-      "gd.medio_pago, gd.tipo_tarjeta, gd.banco_tarjeta, " +
+      "gd.medio_pago, gd.tipo_tarjeta, gd.banco_tarjeta, COALESCE(cat.nombre,'') AS categoria, " +
       "COALESCE((SELECT GROUP_CONCAT(persona, ', ') FROM gasto_diario_persona WHERE gasto_diario_id=gd.id),'') AS personas " +
-      "FROM gastos_diarios gd WHERE gd.medio_pago='Tarjeta' AND ((gd.fecha >= ? AND gd.fecha <= ?) OR gd.id IN (" +
+      "FROM gastos_diarios gd LEFT JOIN categorias cat ON cat.id=gd.categoria_id WHERE gd.medio_pago='Tarjeta' AND ((gd.fecha >= ? AND gd.fecha <= ?) OR gd.id IN (" +
       (extras.length ? extras.join(",") : "NULL") + ")) ORDER BY gd.fecha, gd.id",
       [rangos.poolDesde, rangos.poolHasta]);
     var notas = [];
@@ -4946,7 +5045,8 @@
       notas.push({
         id: f.id, fecha: f.fecha, detalle: f.detalle || "", monto: Number(f.monto), montoTotal: concNum(f.monto_total),
         cuotaActual: concNum(f.cuota_actual), cuotasTotales: concNum(f.cuotas_totales), banco: f.banco_tarjeta || "",
-        personas: f.personas, enVentana: f.fecha >= rangos.ventDesde && f.fecha <= rangos.ventHasta
+        personas: f.personas, enVentana: f.fecha >= rangos.ventDesde && f.fecha <= rangos.ventHasta,
+        categoria: f.categoria || "", tipoTarjeta: f.tipo_tarjeta || ""
       });
     });
     return notas;
@@ -4955,8 +5055,16 @@
   function concListarEnlaces(cargoIds){
     var ids = Object.keys(cargoIds).map(Number);
     if(!ids.length) return [];
+    var extras = {};
+    dbAll("SELECT gasto_id, gasto_diario_id FROM conciliacion_notas_extra WHERE gasto_id IN (" + ids.join(",") + ") ORDER BY gasto_diario_id")
+      .forEach(function(r){ (extras[r.gasto_id] = extras[r.gasto_id] || []).push(r.gasto_diario_id); });
     return dbAll("SELECT gasto_id, gasto_diario_id, tipo FROM conciliacion_diario WHERE gasto_id IN (" + ids.join(",") + ")")
-      .map(function(r){ return {cargoId: r.gasto_id, notaId: r.gasto_diario_id, tipo: r.tipo}; });
+      .map(function(r){ return {cargoId: r.gasto_id, notaId: r.gasto_diario_id, tipo: r.tipo, notasExtra: extras[r.gasto_id] || []}; });
+  }
+  function concListarAutomaticos(){
+    var out = {};
+    dbAll("SELECT clave FROM conciliacion_automaticos WHERE activo=1").forEach(function(r){ out[r.clave] = true; });
+    return out;
   }
   function concSeriesTotalConfirmadas(tarjeta){
     var series = {};
@@ -4988,42 +5096,66 @@
     var enlaces = concListarEnlaces(cargoIds);
     var series = concSeriesTotalConfirmadas(tarjeta);
     var rangos = concRangosDeTarjeta(anio, mes, tarjeta);
-    var extra = {}; enlaces.forEach(function(e){ extra[e.notaId] = true; });
+    var extra = {}; enlaces.forEach(function(e){ extra[e.notaId] = true; e.notasExtra.forEach(function(i){ extra[i] = true; }); });
     Object.keys(series).forEach(function(k){ extra[series[k]] = true; });
     var notas = concListarNotas(tarjeta, rangos, cargoIds, Object.keys(extra));
-    var resultado = concConciliar(cargos, notas, enlaces, concListarIgnorados(), series, concListarRechazados(cargoIds));
+    cargos.forEach(function(c){ c.tarjeta = tarjeta; });
+    var resultado = concConciliar(cargos, notas, enlaces, concListarIgnorados(), series, concListarRechazados(cargoIds), concListarAutomaticos());
     return {anio: anio, mes: mes, tarjeta: tarjeta, hayEstado: true, resultado: resultado, totales: concTotales(resultado), cargos: cargos, notas: notas};
   }
 
   // ---- decisiones del usuario ------------------------------------------
 
-  function concGuardarEnlace(cargoId, notaId, tipo, actualizadoEn){
+  function concGuardarEnlace(cargoId, notaId, tipo, actualizadoEn, notasExtra){
     if([CONC_TIPO_MONTO, CONC_TIPO_TOTAL, CONC_TIPO_MANUAL].indexOf(tipo) < 0) throw new Error("tipo de enlace invalido: " + tipo);
+    notasExtra = notasExtra || [];
+    notasExtra.forEach(function(x){
+      if(x === notaId || dbGet("SELECT 1 AS x FROM conciliacion_diario WHERE gasto_diario_id=? UNION ALL SELECT 1 FROM conciliacion_notas_extra WHERE gasto_diario_id=? AND gasto_id<>?", [x, x, cargoId]))
+        throw new Error("Una de esas notas ya está unida a otro cargo del estado de cuenta.");
+    });
+    if(dbGet("SELECT 1 AS x FROM conciliacion_notas_extra WHERE gasto_diario_id=? AND gasto_id<>?", [notaId, cargoId]))
+      throw new Error("Esa nota ya está unida a otro cargo del estado de cuenta.");
     if(tipo !== CONC_TIPO_TOTAL){
       var otro = dbGet("SELECT gasto_id FROM conciliacion_diario WHERE gasto_diario_id=? AND gasto_id<>?", [notaId, cargoId]);
       if(otro) throw new Error("Esa nota ya está emparejada con otro cargo del estado de cuenta.");
     }
     dbRun("INSERT OR REPLACE INTO conciliacion_diario (gasto_id, gasto_diario_id, tipo, actualizado_en) VALUES (?,?,?, COALESCE(?, datetime('now')))",
       [cargoId, notaId, tipo, actualizadoEn || null]);
+    dbRun("DELETE FROM conciliacion_notas_extra WHERE gasto_id=? OR gasto_diario_id=?", [cargoId, notaId]);
+    notasExtra.forEach(function(x){
+      dbRun("INSERT OR REPLACE INTO conciliacion_notas_extra (gasto_diario_id, gasto_id, actualizado_en) VALUES (?,?, COALESCE(?, datetime('now')))", [x, cargoId, actualizadoEn || null]);
+      dbRun("UPDATE conciliacion_ignorados SET activo=0, actualizado_en=datetime('now') WHERE gasto_diario_id=? AND activo=1", [x]);
+    });
     // si antes se habia rechazado este mismo par, el usuario cambio de opinion
     dbRun("DELETE FROM conciliacion_rechazados WHERE gasto_id=? AND gasto_diario_id=?", [cargoId, notaId]);
     // si estaba marcada como "no es un gasto", al emparejarla deja de estarlo
     dbRun("UPDATE conciliacion_ignorados SET activo=0, actualizado_en=datetime('now') WHERE gasto_diario_id=? AND activo=1", [notaId]);
   }
-  function concBorrarEnlace(cargoId){ dbRun("DELETE FROM conciliacion_diario WHERE gasto_id=?", [cargoId]); }
+  function concBorrarEnlace(cargoId){
+    dbRun("DELETE FROM conciliacion_diario WHERE gasto_id=?", [cargoId]);
+    dbRun("DELETE FROM conciliacion_notas_extra WHERE gasto_id=?", [cargoId]);
+  }
+  function concGuardarAutomatico(cargo, activo){
+    var clave = concClaveComercio(cargo.descripcion || cargo.detalle);
+    if(!clave) throw new Error("Ese cargo no trae el nombre del comercio: no se puede recordar como automático.");
+    dbRun("INSERT INTO conciliacion_automaticos (clave, ejemplo, activo, actualizado_en) VALUES (?,?,?, datetime('now')) " +
+          "ON CONFLICT(clave) DO UPDATE SET activo=excluded.activo, ejemplo=excluded.ejemplo, actualizado_en=excluded.actualizado_en",
+          [clave, cargo.descripcion || cargo.detalle || "", activo ? 1 : 0]);
+  }
   function concGuardarRechazo(cargoId, notaId, actualizadoEn){
     dbRun("INSERT OR REPLACE INTO conciliacion_rechazados (gasto_id, gasto_diario_id, actualizado_en) VALUES (?,?, COALESCE(?, datetime('now')))",
       [cargoId, notaId, actualizadoEn || null]);
   }
   function concGuardarIgnorado(notaId, motivo){
     if(!CONC_ETIQUETA_MOTIVO[motivo]) throw new Error("motivo invalido: " + motivo);
-    if(dbGet("SELECT 1 AS x FROM conciliacion_diario WHERE gasto_diario_id=?", [notaId])) throw new Error("Esa nota está emparejada con un cargo: primero hay que desvincularla.");
+    if(dbGet("SELECT 1 AS x FROM conciliacion_diario WHERE gasto_diario_id=? UNION ALL SELECT 1 FROM conciliacion_notas_extra WHERE gasto_diario_id=?", [notaId, notaId])) throw new Error("Esa nota está emparejada con un cargo: primero hay que desvincularla.");
     dbRun("INSERT OR REPLACE INTO conciliacion_ignorados (gasto_diario_id, motivo, activo, actualizado_en) VALUES (?,?,1, datetime('now'))", [notaId, motivo]);
   }
   function concVolverAConsiderar(notaId){
     dbRun("UPDATE conciliacion_ignorados SET activo=0, actualizado_en=datetime('now') WHERE gasto_diario_id=?", [notaId]);
   }
-  function concConfirmarPar(p){ concGuardarEnlace(p.cargo.id, p.nota.id, p.tipo); }
+  function concIdsExtra(p){ return (p.notasExtra || []).map(function(n){ return n.id; }); }
+  function concConfirmarPar(p){ concGuardarEnlace(p.cargo.id, p.nota.id, p.tipo, null, concIdsExtra(p)); }
   // Al confirmar Cargar mes (pedido del usuario 29-09-2026, "manda el PDF", igual que el escritorio): lo aprobado con
   // el nombre de una nota de Gastos Diarios queda vinculado a esa nota, y se confirman solos los pares claros del mes.
   // Nunca pisa un vinculo/rechazo existente. Sin transaccion propia (va dentro de la de quien llama).
@@ -5046,7 +5178,7 @@
       var mt = mesesTarjetas[k], vista = concCalcular(mt.anio, mt.mes, mt.tarjeta);
       if(!vista.hayEstado) return;
       vista.totales.paresClaros.forEach(function(p){
-        try{ concGuardarEnlace(p.cargo.id, p.nota.id, p.tipo); nuevos++; }catch(e){ /* nota ya emparejada en este paso */ }
+        try{ concGuardarEnlace(p.cargo.id, p.nota.id, p.tipo, null, concIdsExtra(p)); nuevos++; }catch(e){ /* nota ya emparejada en este paso */ }
       });
     });
     return nuevos;
@@ -5054,7 +5186,7 @@
   function concConfirmarPares(pares){
     db.run("BEGIN");
     try{
-      pares.forEach(function(p){ concGuardarEnlace(p.cargo.id, p.nota.id, p.tipo); });
+      pares.forEach(function(p){ concGuardarEnlace(p.cargo.id, p.nota.id, p.tipo, null, concIdsExtra(p)); });
       db.run("COMMIT");
     }catch(e){ db.run("ROLLBACK"); throw e; }
     return pares.length;
@@ -5063,27 +5195,36 @@
     db.run("BEGIN");
     try{
       concBorrarEnlace(p.cargo.id);
-      concGuardarRechazo(p.cargo.id, p.nota.id);
+      concNotasDePar(p).forEach(function(n){ concGuardarRechazo(p.cargo.id, n.id); });
       db.run("COMMIT");
     }catch(e){ db.run("ROLLBACK"); throw e; }
   }
   // Deshace un par ya confirmado; queda como "no es este" para que no vuelva a proponerse al instante.
   function concDesvincular(p){ concRechazarPar(p); }
-  function concVincularManual(cargo, nota){
-    concGuardarEnlace(cargo.id, nota.id, concEsCompraCompleta(cargo, nota) ? CONC_TIPO_TOTAL : CONC_TIPO_MANUAL);
+  // Unir a mano un cargo con UNA nota o con VARIAS (la compra se anoto en partes). Una nota con el precio completo de una
+  // compra en cuotas (tambien con interes) queda TOTAL: asi las cuotas siguientes se proponen solas.
+  function concVincularManual(cargo, nota, otras){
+    otras = otras || [];
+    var tipo = CONC_TIPO_MANUAL;
+    if(!otras.length && (concEsCompraCompleta(cargo, nota) || concEsCompraCompletaAprox(cargo, nota.monto))) tipo = CONC_TIPO_TOTAL;
+    else if(otras.length && cargo.monto !== null &&
+            Math.abs([nota].concat(otras).reduce(function(a, n){ return a + n.monto; }, 0) - cargo.monto) <= 0.5 * (1 + otras.length)) tipo = CONC_TIPO_MONTO;
+    concGuardarEnlace(cargo.id, nota.id, tipo, null, otras.map(function(n){ return n.id; }));
   }
   function concCargosLibresPara(res, nota){
     var libres = res.faltoAnotar.concat(res.noDiario.map(function(c){ return c.cargo; }));
     function cerca(c){ return c.monto === null ? Infinity : Math.abs(c.monto - nota.monto); }
+    function mismo(c){ return concNombresParecidos(nota.detalle, concNombresCargo(c)) ? 0 : 1; }
     return libres.slice().sort(function(a, b){
-      return ((concEsCompraCompleta(a, nota) ? 0 : 1) - (concEsCompraCompleta(b, nota) ? 0 : 1)) || (cerca(a) - cerca(b)) || concCmp(a.fecha, b.fecha);
+      return (mismo(a) - mismo(b)) || ((concEsCompraCompleta(a, nota) ? 0 : 1) - (concEsCompraCompleta(b, nota) ? 0 : 1)) || (cerca(a) - cerca(b)) || concCmp(a.fecha, b.fecha);
     });
   }
   function concNotasLibresPara(res, cargo){
     var libres = res.soloDiario.map(function(s){ return s.nota; });
     function cerca(n){ return cargo.monto === null ? Infinity : Math.abs(n.monto - cargo.monto); }
+    function mismo(n){ return concNombresParecidos(n.detalle, concNombresCargo(cargo)) ? 0 : 1; }
     return libres.slice().sort(function(a, b){
-      return ((concEsCompraCompleta(cargo, a) ? 0 : 1) - (concEsCompraCompleta(cargo, b) ? 0 : 1)) || (cerca(a) - cerca(b)) || concCmp(a.fecha, b.fecha);
+      return (mismo(a) - mismo(b)) || ((concEsCompraCompleta(cargo, a) ? 0 : 1) - (concEsCompraCompleta(cargo, b) ? 0 : 1)) || (cerca(a) - cerca(b)) || concCmp(a.fecha, b.fecha);
     });
   }
 
@@ -5105,7 +5246,11 @@
       "SELECT gd.fecha, gd.detalle, gd.monto, i.motivo, i.activo, i.actualizado_en FROM conciliacion_ignorados i " +
       "JOIN gastos_diarios gd ON gd.id=i.gasto_diario_id ORDER BY gd.id")
       .map(function(f){ return {nota: {fecha: f.fecha, detalle: f.detalle, monto: f.monto}, motivo: f.motivo, activo: !!f.activo, actualizado_en: f.actualizado_en}; });
-    return {vinculos: vinculos, ignorados: ignorados, rechazados: rechazados};
+    var notasExtra = dbAll(CONC_SQL_GASTO_NOTA + " FROM conciliacion_notas_extra c JOIN gastos g ON g.id=c.gasto_id JOIN gastos_diarios gd ON gd.id=c.gasto_diario_id ORDER BY g.id, gd.id")
+      .map(function(f){ return {gasto: concRefGasto(f), nota: {fecha: f.n_fecha, detalle: f.n_detalle, monto: f.n_monto, uid: f.n_uid || ""}, actualizado_en: f.actualizado_en}; });
+    var automaticos = dbAll("SELECT clave, ejemplo, activo, actualizado_en FROM conciliacion_automaticos ORDER BY clave")
+      .map(function(f){ return {clave: f.clave, ejemplo: f.ejemplo, activo: !!f.activo, actualizado_en: f.actualizado_en}; });
+    return {vinculos: vinculos, ignorados: ignorados, rechazados: rechazados, notas_extra: notasExtra, automaticos: automaticos};
   }
 
   function concBuscarGastoPorClave(ref){
@@ -5141,7 +5286,7 @@
     }
     if(libre){
       for(i = 0; i < filas.length; i++){
-        if(!dbGet("SELECT 1 AS x FROM conciliacion_diario WHERE gasto_diario_id=? UNION ALL SELECT 1 FROM conciliacion_ignorados WHERE gasto_diario_id=? AND activo=1", [filas[i].id, filas[i].id])) return filas[i].id;
+        if(!dbGet("SELECT 1 AS x FROM conciliacion_diario WHERE gasto_diario_id=? UNION ALL SELECT 1 FROM conciliacion_notas_extra WHERE gasto_diario_id=? UNION ALL SELECT 1 FROM conciliacion_ignorados WHERE gasto_diario_id=? AND activo=1", [filas[i].id, filas[i].id, filas[i].id])) return filas[i].id;
       }
     }
     return filas[0].id;
@@ -5163,7 +5308,7 @@
       var t = ts(it);
       var vinculo = dbGet("SELECT actualizado_en FROM conciliacion_diario WHERE gasto_id=? AND gasto_diario_id=?", [gastoId, notaId]);
       if(vinculo && vinculo.actualizado_en >= t) return;   // aca el par se confirmo DESPUES (o a la vez) de que el otro lo rechazara
-      if(vinculo){ db.run("DELETE FROM conciliacion_diario WHERE gasto_id=?", [gastoId]); nuevas++; }
+      if(vinculo){ db.run("DELETE FROM conciliacion_diario WHERE gasto_id=?", [gastoId]); db.run("DELETE FROM conciliacion_notas_extra WHERE gasto_id=?", [gastoId]); nuevas++; }
       var local = dbGet("SELECT actualizado_en FROM conciliacion_rechazados WHERE gasto_id=? AND gasto_diario_id=?", [gastoId, notaId]);
       if(!local){
         db.run("INSERT INTO conciliacion_rechazados (gasto_id, gasto_diario_id, actualizado_en) VALUES (?,?,?)", [gastoId, notaId, t || ahora]);
@@ -5183,7 +5328,7 @@
       if(rechazo && rechazo.actualizado_en >= t) return;   // aca se dijo "no es este" DESPUES (o a la vez) de ese vinculo
       var propio = dbGet("SELECT gasto_diario_id, actualizado_en FROM conciliacion_diario WHERE gasto_id=?", [gastoId]);
       if(propio && propio.actualizado_en >= t) return;      // gana lo mas reciente; ante empate, lo de este equipo
-      if(tipo !== CONC_TIPO_TOTAL && dbGet("SELECT 1 AS x FROM conciliacion_diario WHERE gasto_diario_id=? AND gasto_id<>?", [notaId, gastoId])) return;   // par 1 a 1
+      if(tipo !== CONC_TIPO_TOTAL && dbGet("SELECT 1 AS x FROM conciliacion_diario WHERE gasto_diario_id=? AND gasto_id<>? UNION ALL SELECT 1 FROM conciliacion_notas_extra WHERE gasto_diario_id=?", [notaId, gastoId, notaId])) return;   // par 1 a 1
       if(rechazo) db.run("DELETE FROM conciliacion_rechazados WHERE gasto_id=? AND gasto_diario_id=?", [gastoId, notaId]);
       db.run("INSERT OR REPLACE INTO conciliacion_diario (gasto_id, gasto_diario_id, tipo, actualizado_en) VALUES (?,?,?,?)", [gastoId, notaId, tipo, t || ahora]);
       db.run("UPDATE conciliacion_ignorados SET activo=0, actualizado_en=? WHERE gasto_diario_id=? AND activo=1", [t || ahora, notaId]);
@@ -5215,6 +5360,26 @@
       db.run("INSERT INTO conciliacion_ignorados (gasto_diario_id, motivo, activo, actualizado_en) VALUES (?,?,?,?)", [notaId, motivo, activo, t || ahora]);
       if(activo) nuevas++;
     });
+
+    // otras notas de la misma compra: solo si ese cargo ya tiene su nota principal aca y la nota esta libre
+    (seccion.notas_extra || []).forEach(function(it){
+      var gastoId = concBuscarGastoPorClave(it.gasto), notaId = concBuscarNotaPorClave(it.nota, true, false);
+      if(gastoId === null || notaId === null) return;
+      if(!dbGet("SELECT 1 AS x FROM conciliacion_diario WHERE gasto_id=?", [gastoId])) return;
+      if(dbGet("SELECT 1 AS x FROM conciliacion_diario WHERE gasto_diario_id=? UNION ALL SELECT 1 FROM conciliacion_notas_extra WHERE gasto_diario_id=?", [notaId, notaId])) return;
+      db.run("INSERT INTO conciliacion_notas_extra (gasto_diario_id, gasto_id, actualizado_en) VALUES (?,?,?)", [notaId, gastoId, ts(it) || ahora]);
+      nuevas++;
+    });
+    // comercios "automaticos": gana lo mas reciente
+    (seccion.automaticos || []).forEach(function(it){
+      var clave = String((it && it.clave) || "").trim();
+      if(!clave) return;
+      var activo = it.activo === false ? 0 : 1, t = ts(it) || ahora;
+      var local = dbGet("SELECT activo, actualizado_en FROM conciliacion_automaticos WHERE clave=?", [clave]);
+      if(local && (local.actualizado_en >= t || Number(local.activo) === activo)) return;
+      db.run("INSERT OR REPLACE INTO conciliacion_automaticos (clave, ejemplo, activo, actualizado_en) VALUES (?,?,?,?)", [clave, String(it.ejemplo || ""), activo, t]);
+      nuevas++;
+    });
     return nuevas;
   }
 
@@ -5242,26 +5407,40 @@
   }
 
   function concLadoHtml(clase, principal, monto, secundario){
-    return "<div class=\"conc-lado " + clase + "\"><div class=\"conc-lado-top\"><span class=\"conc-lado-nombre\">" + escapeHtml(principal) + "</span>" +
+    return "<div class=\"conc-lado " + clase + "\"><div class=\"conc-lado-top\"><span class=\"conc-lado-nombre\">" + escapeHtml(principal).replace(/\n/g, "<br>") + "</span>" +
       "<b class=\"conc-monto\">" + escapeHtml(money(monto)) + "</b></div>" +
       (secundario ? "<div class=\"conc-lado-sec\">" + escapeHtml(secundario) + "</div>" : "") + "</div>";
   }
   function concVacioHtml(texto){ return "<div class=\"conc-lado conc-lado-vacio\">" + escapeHtml(texto) + "</div>"; }
-  function concTextoCargo(c, motivo){
+  // Todos los datos de cada lado (pedido del usuario 07-10-2026: "deberian salir todos los parametros asociados")
+  function concDatosCargo(c, motivo){
     var nombre = c.detalle || c.descripcion;
     var partes = [];
+    if(c.tarjeta) partes.push("Tarjeta " + (CONC_ETIQUETA_TARJETA[c.tarjeta] || c.tarjeta));
     if(c.descripcion && c.descripcion !== nombre) partes.push("Banco: " + c.descripcion);
-    var cuota = concTextoCuota(c); if(cuota) partes.push(cuota);
-    if(c.personas) partes.push(c.personas);
+    if(c.cuotasTotales && c.cuotasTotales > 1){
+      partes.push("Cuota " + (c.cuotaActual || "?") + "/" + c.cuotasTotales + " (este mes " + money(c.monto || 0) + ")");
+      partes.push("Total a pagar " + money(c.montoTotal));
+    }
+    if(c.montoOperacion && Math.abs(c.montoOperacion - (c.montoTotal || 0)) > 0.5) partes.push("Monto de la operación " + money(c.montoOperacion));
+    if(c.categoria) partes.push("Categoría: " + c.categoria);
+    partes.push(c.personas ? "Personas: " + c.personas : "Sin personas asignadas");
     if(motivo) partes.push(motivo);
-    return {principal: concFechaCorta(c.fecha) + "  " + nombre, secundario: partes.join(" · ")};
+    return partes.join(" · ");
+  }
+  function concDatosNota(n){
+    var partes = [(n.banco || n.tipoTarjeta) ? ("Tarjeta " + (n.tipoTarjeta || "") + " " + (n.banco || "")).replace(/\s+/g, " ").trim() : "Tarjeta (sin banco)"];
+    if(n.cuotasTotales && n.cuotasTotales > 1) partes.push("Cuota " + (n.cuotaActual || "?") + "/" + n.cuotasTotales + (n.montoTotal ? " (total " + money(n.montoTotal) + ")" : ""));
+    else if(n.montoTotal && Math.abs(n.montoTotal - n.monto) > 0.5) partes.push("Total " + money(n.montoTotal));
+    if(n.categoria) partes.push("Categoría: " + n.categoria);
+    partes.push(n.personas ? "Personas: " + n.personas : "Solo tuya");
+    return partes.join(" · ");
+  }
+  function concTextoCargo(c, motivo){
+    return {principal: concFechaCorta(c.fecha) + "  " + (c.detalle || c.descripcion), secundario: concDatosCargo(c, motivo)};
   }
   function concTextoNota(n){
-    var partes = [];
-    if(n.banco) partes.push(n.banco);
-    if(n.cuotasTotales && n.cuotasTotales > 1 && n.cuotaActual !== null) partes.push("cuota " + n.cuotaActual + "/" + n.cuotasTotales);
-    if(n.personas) partes.push(n.personas);
-    return {principal: concFechaCorta(n.fecha) + "  " + n.detalle, secundario: partes.join(" · ")};
+    return {principal: concFechaCorta(n.fecha) + "  " + n.detalle, secundario: concDatosNota(n)};
   }
   function concBotonHtml(texto, accion, attrs, clase){
     var a = "";
@@ -5397,17 +5576,27 @@
     // -- pares: por confirmar (arriba) / ya conciliados (ocultos, al final)
     var filaPar = function(p){
       var tc = concTextoCargo(p.cargo), tn = concTextoNota(p.nota);
-      if(p.tipo === CONC_TIPO_TOTAL) tn.secundario = (tn.secundario ? tn.secundario + " · " : "") + "la nota trae el valor total de la compra";
+      var notasP = concNotasDePar(p);
+      if(notasP.length > 1){
+        tn.principal = notasP.map(function(n){ return concFechaCorta(n.fecha) + "  " + n.detalle + "  " + money(n.monto); }).join("\n");
+        tn.secundario = "Suma de " + notasP.length + " notas de la misma compra · " + tn.secundario;
+      }
+      if(p.tipo === CONC_TIPO_TOTAL){
+        tn.secundario = (tn.secundario ? tn.secundario + " · " : "") + "la nota trae el valor total de la compra";
+        if(p.cargo.cuotasTotales && Math.abs(p.nota.monto - (p.cargo.montoTotal || 0)) > 0.5 && Math.abs(p.nota.monto - (p.cargo.montoOperacion || 0)) > 0.5)
+          tn.secundario += " (la diferencia con " + money(p.cargo.montoTotal || (p.cargo.monto * p.cargo.cuotasTotales)) + " puede ser interés del banco: revísala)";
+      }
       var chip, clase, botones;
       var ids = {cargo: p.cargo.id, nota: p.nota.id};
-      if(p.confirmado){ chip = "✔ Confirmado"; clase = "ok"; botones = [concBotonHtml("Desvincular", "desvincular", ids)]; }
+      if(p.confirmado){ chip = "✔ Confirmado"; clase = "ok"; botones = [concBotonHtml("Desvincular", "desvincular", ids), concBotonHtml("Agregar otra nota…", "agregar-nota", ids)]; }
       else{
         chip = p.confianza === "alta" ? "Propuesto · claro" : "Propuesto · revisar"; clase = p.confianza === "alta" ? "acc" : "warn";
         botones = [concBotonHtml("Confirmar", "confirmar", ids, "btn-primary"), concBotonHtml("No es este", "rechazar", ids)];
       }
       if(p.tipo === CONC_TIPO_MANUAL) chip += " (a mano)";
+      if(notasP.length > 1 && !p.confirmado) chip += "\n" + notasP.length + " notas suman el cargo";
       var dif = concDiferenciaDePar(p); if(dif) chip += "\nnota − cargo: " + money(dif);
-      return concFilaHtml(concLadoHtml("conc-estado", tc.principal, p.cargo.monto, tc.secundario), concLadoHtml("conc-nota", tn.principal, p.nota.monto, tn.secundario), chip, clase, botones);
+      return concFilaHtml(concLadoHtml("conc-estado", tc.principal, p.cargo.monto, tc.secundario), concLadoHtml("conc-nota", tn.principal, concMontoNotas(p), tn.secundario), chip, clase, botones);
     };
     var porConfirmar = r.contemplados.filter(function(p){ return !p.confirmado; });
     var conciliados = r.contemplados.filter(function(p){ return p.confirmado; });
@@ -5420,7 +5609,7 @@
     filas = r.faltoAnotar.map(function(c){
       var tc = concTextoCargo(c);
       return concFilaHtml(concLadoHtml("conc-estado", tc.principal, c.monto, tc.secundario), concVacioHtml("— sin nota en Gastos Diarios —"), "", "",
-        [concBotonHtml("Vincular con una nota…", "elegir-nota", {cargo: c.id})]);
+        [concBotonHtml("Vincular con nota(s)…", "elegir-nota", {cargo: c.id}), concBotonHtml("Es automático, no se anota", "automatico", {cargo: c.id})]);
     }).join("");
     html += concSeccionHtml("falto", "✎ Faltó anotar — está en el estado de cuenta y no en tus notas", r.faltoAnotar.length + " · " + money(t.faltoAnotar), "warn",
       "Compras del periodo que el banco cobró y no tienen nota diaria. Si sí la anotaste con otro monto, vincúlala.", r.faltoAnotar.length, filas, "");
@@ -5440,8 +5629,9 @@
     // -- no se anota a diario
     filas = r.noDiario.map(function(c){
       var tc = concTextoCargo(c.cargo, c.motivo);
-      return concFilaHtml(concLadoHtml("conc-estado", tc.principal, c.cargo.monto, tc.secundario), concVacioHtml("— sin nota en Gastos Diarios —"), "", "",
-        [concBotonHtml("Vincular con una nota…", "elegir-nota", {cargo: c.cargo.id})]);
+      var bs = [concBotonHtml("Vincular con nota(s)…", "elegir-nota", {cargo: c.cargo.id})];
+      if(c.motivo === CONC_MOTIVO_AUTOMATICO) bs.push(concBotonHtml("Ya no es automático", "no-automatico", {cargo: c.cargo.id}));
+      return concFilaHtml(concLadoHtml("conc-estado", tc.principal, c.cargo.monto, tc.secundario), concVacioHtml("— sin nota en Gastos Diarios —"), "", "", bs);
     }).join("");
     html += concSeccionHtml("conciliados", "✔ Ya conciliado — listo, no hay que hacer nada", conciliados.length + " · cargo " + money(sumaCargos(conciliados)), "ok",
       "Cada cargo ya quedó unido a su nota. Ábrelo solo si quieres revisar o desvincular alguno.", conciliados.length, conciliados.map(filaPar).join(""), "");
@@ -5462,7 +5652,7 @@
   function concAbrirElegir(titulo, mensaje, opciones, textoBoton, alElegir){
     var html = "<h2>" + escapeHtml(titulo) + "</h2><p class=\"hint\" style=\"white-space:pre-wrap;\">" + escapeHtml(mensaje) + "</p>" +
       "<div class=\"conc-elegir\">" + opciones.map(function(o, i){
-        return "<button type=\"button\" class=\"conc-opcion\" data-i=\"" + i + "\">" + escapeHtml(o.texto) + "</button>";
+        return "<button type=\"button\" class=\"conc-opcion\" data-i=\"" + i + "\" style=\"white-space:pre-wrap;text-align:left;\">" + escapeHtml(o.texto) + "</button>";
       }).join("") + "</div>" +
       "<div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"concElegirCancelar\">Cancelar</button>" +
       "<button type=\"button\" class=\"btn-primary\" id=\"concElegirOk\" disabled>" + escapeHtml(textoBoton) + "</button></div>";
@@ -5481,6 +5671,45 @@
       var obj = opciones[elegido].valor;
       cerrarModal();
       alElegir(obj);
+    });
+  }
+
+  function concAbrirElegirNotas(cargo, notas, alAceptar, yaUnidas){
+    yaUnidas = yaUnidas || [];
+    var h = "<h2>Vincular con nota(s)</h2><p><b>Cargo del banco: " + escapeHtml(concFechaCorta(cargo.fecha) + "  " + (cargo.detalle || cargo.descripcion)) +
+      " — " + escapeHtml(money(cargo.monto || 0)) + "</b></p><p class=\"hint\">" + escapeHtml(concDatosCargo(cargo)) + "</p>" +
+      (yaUnidas.length ? "<p class=\"hint\" style=\"color:var(--ok, #3ecf8e)\">Ya unidas: " + escapeHtml(yaUnidas.map(function(n){ return n.detalle + " " + money(n.monto); }).join(", ")) + "</p>" : "") +
+      "<p>Marca la nota de Gastos Diarios que es la misma compra. Si la anotaste en varias partes, marca todas (★ = mismo comercio):</p>" +
+      "<div class=\"conc-elegir\" id=\"concNotasLista\">" + notas.map(function(n, i){
+        var mismo = concNombresParecidos(n.detalle, concNombresCargo(cargo));
+        var dif = cargo.monto !== null ? n.monto - cargo.monto : 0;
+        return "<label class=\"conc-opcion\" style=\"display:flex;gap:8px;align-items:flex-start;\"><input type=\"checkbox\" data-conc-nota=\"" + i + "\"> <span>" +
+          (mismo ? "★ " : "") + "<b>" + escapeHtml(concFechaCorta(n.fecha) + "  " + n.detalle + "   " + money(n.monto)) + "</b>" +
+          escapeHtml(Math.abs(dif) > 0.5 ? "   (Δ " + money(dif) + ")" : "   (mismo monto)") + "<br><small>" + escapeHtml(concDatosNota(n)) + "</small></span></label>";
+      }).join("") + "</div><p id=\"concNotasSuma\" class=\"hint\"></p>" +
+      "<div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"concNotasCancelar\">Cancelar</button>" +
+      "<button type=\"button\" class=\"btn-primary\" id=\"concNotasOk\" disabled>Vincular</button></div>";
+    abrirModal(h);
+    function elegidas(){
+      return Array.prototype.slice.call(document.querySelectorAll("[data-conc-nota]:checked")).map(function(c){ return notas[Number(c.dataset.concNota)]; });
+    }
+    function actualizar(){
+      var el = elegidas(), todas = yaUnidas.concat(el), ok = document.getElementById("concNotasOk"), p = document.getElementById("concNotasSuma");
+      if(!el.length){ p.textContent = "Marca al menos una nota."; ok.disabled = true; return; }
+      var suma = todas.reduce(function(a, n){ return a + n.monto; }, 0), dif = suma - (cargo.monto || 0);
+      var calza = Math.abs(dif) <= 0.5 * todas.length;
+      p.textContent = todas.length + " nota(s) suman " + money(suma) + " · cargo " + money(cargo.monto || 0) + (calza ? " · ✔ calza exacto" : " · diferencia " + money(dif));
+      p.style.color = calza ? "var(--ok, #3ecf8e)" : "var(--warn)";
+      ok.disabled = false;
+    }
+    document.querySelectorAll("[data-conc-nota]").forEach(function(c){ c.addEventListener("change", actualizar); });
+    actualizar();
+    document.getElementById("concNotasCancelar").addEventListener("click", cerrarModal);
+    document.getElementById("concNotasOk").addEventListener("click", function(){
+      var el = elegidas().sort(function(a, b){ return (b.monto - a.monto) || (a.id - b.id); });
+      if(!el.length) return;
+      cerrarModal();
+      alAceptar(el);
     });
   }
 
@@ -5527,21 +5756,31 @@
       var cargo = concUltimo.cargos.filter(function(c){ return c.id === cargoId; })[0]; if(!cargo) return;
       var notas = concNotasLibresPara(r, cargo);
       if(!notas.length){ mostrarToast("No hay notas de Gastos Diarios sin pareja con esta tarjeta en este periodo.", "bad"); return; }
-      concAbrirElegir("Vincular con una nota",
-        "Cargo del banco: " + (cargo.detalle || cargo.descripcion) + " — " + money(cargo.monto || 0) + "\nElige la nota de Gastos Diarios que es la misma compra:",
-        notas.map(function(n){
-          var d = (cargo.monto !== null && Math.abs(n.monto - cargo.monto) > 0.5) ? "   (Δ " + money(n.monto - cargo.monto) + ")" : "";
-          return {texto: concFechaCorta(n.fecha) + "  " + n.detalle + "   " + money(n.monto) + d, valor: n};
-        }), "Vincular", function(n){ concEjecutar(function(){ concVincularManual(cargo, n); }); });
+      concAbrirElegirNotas(cargo, notas, function(el){ concEjecutar(function(){ concVincularManual(cargo, el[0], el.slice(1)); }); });
+    }
+    else if(accion === "agregar-nota"){
+      var p4 = concBuscarPar(cargoId, notaId); if(!p4) return;
+      var libres = concNotasLibresPara(r, p4.cargo);
+      if(!libres.length){ mostrarToast("No hay otras notas libres con esta tarjeta en este periodo.", "bad"); return; }
+      concAbrirElegirNotas(p4.cargo, libres, function(el){
+        concEjecutar(function(){ concVincularManual(p4.cargo, p4.nota, (p4.notasExtra || []).concat(el)); });
+      }, concNotasDePar(p4));
+    }
+    else if(accion === "automatico" || accion === "no-automatico"){
+      var c5 = concUltimo.cargos.filter(function(c){ return c.id === cargoId; })[0]; if(!c5) return;
+      if(accion === "automatico" && !confirm("«" + (c5.descripcion || c5.detalle) + "» es un cobro automático (ej. una suscripción) que no se anota a diario?\n\n" +
+          "Desde ahora sus cargos de todos los meses pasan a «No se anota a diario». Lo puedes deshacer con «Ya no es automático».")) return;
+      concEjecutar(function(){ concGuardarAutomatico(c5, accion === "automatico"); });
     }
     else if(accion === "elegir-cargo"){
       var nota2 = concUltimo.notas.filter(function(n){ return n.id === notaId; })[0]; if(!nota2) return;
       var cargos = concCargosLibresPara(r, nota2);
       if(!cargos.length){ mostrarToast("No hay cargos del estado de cuenta sin pareja en este mes.", "bad"); return; }
       concAbrirElegir("Vincular con un cargo",
-        "Tu nota: " + nota2.detalle + " — " + money(nota2.monto) + "\nElige el cargo del estado de cuenta que es la misma compra:",
+        "Tu nota: " + concFechaCorta(nota2.fecha) + "  " + nota2.detalle + " — " + money(nota2.monto) + "\n" + concDatosNota(nota2) + "\n\nElige el cargo del estado de cuenta que es la misma compra (★ = mismo comercio):",
         cargos.map(function(c){
-          return {texto: concFechaCorta(c.fecha) + "  " + (c.detalle || c.descripcion) + "   " + money(c.monto || 0) + (concTextoCuota(c) ? "   " + concTextoCuota(c) : ""), valor: c};
+          return {texto: (concNombresParecidos(nota2.detalle, concNombresCargo(c)) ? "★ " : "") + concFechaCorta(c.fecha) + "  " + (c.detalle || c.descripcion) + "   " + money(c.monto || 0) +
+                         "\n      " + concDatosCargo(c), valor: c};
         }), "Vincular", function(c){ concEjecutar(function(){ concVincularManual(c, nota2); }); });
     }
   });
