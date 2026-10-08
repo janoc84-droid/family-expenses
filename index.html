@@ -1994,6 +1994,27 @@
       poblarSelectAnio(document.getElementById(par[1]), par[2]);
     });
   }
+  // Recordar lo ultimo que se dejo elegido (mes/año de cada pestaña y la persona de Estado de Cuenta), pedido del usuario
+  // 09-10-2026: "que quede en el ultimo estado que deje filtrado... para no estar cambiando a cada rato".
+  var FILTROS_RECORDADOS = ["ecPersona"].concat(Array.prototype.concat.apply([], PERIODO_SELECTS.map(function(p){ return [p[0], p[1]]; })));
+  function guardarFiltros(){
+    var datos = {};
+    FILTROS_RECORDADOS.forEach(function(id){ var el = document.getElementById(id); if(el && el.value) datos[id] = el.value; });
+    try{ localStorage.setItem("gf_filtros", JSON.stringify(datos)); }catch(e){}
+  }
+  function restaurarFiltrosGuardados(){
+    var datos = null;
+    try{ datos = JSON.parse(localStorage.getItem("gf_filtros") || "null"); }catch(e){ datos = null; }
+    if(!datos) return;
+    FILTROS_RECORDADOS.forEach(function(id){
+      var el = document.getElementById(id), v = datos[id];
+      if(!el || v === undefined || v === null || v === "") return;
+      if(el.tagName === "SELECT" && !Array.prototype.some.call(el.options, function(o){ return o.value === String(v); })) return;
+      el.value = v;
+    });
+  }
+  document.addEventListener("change", function(ev){ if(ev.target && FILTROS_RECORDADOS.indexOf(ev.target.id) >= 0) guardarFiltros(); }, true);
+  document.addEventListener("input", function(ev){ if(ev.target && ev.target.id === "ecPersona") guardarFiltros(); }, true);
   function inicializarPeriodoADiaDeHoy(){
     var hoy = new Date();
     PERIODO_SELECTS.forEach(function(par){
@@ -2596,7 +2617,7 @@
       [estado.nombre, estado.anio, estado.mes]).map(function(r){
         var f = String(r.fecha || "").slice(0, 10).split("-");
         return {id: "abono-" + r.uid, etiqueta: "Abono del " + (f.length === 3 ? f[2] + "/" + f[1] + "/" + f[0] : r.fecha),
-                monto: -Math.abs(Number(r.monto)), incluir_en_total: 1, detalle: r.nota || "", es_abono: true, abono_uid: r.uid};
+                monto: -Math.abs(Number(r.monto)), incluir_en_total: 1, detalle: r.nota || "", es_abono: true, abono_uid: r.uid, fecha: r.fecha};
       });
   }
   // Cuenta de deuda (08-10-2026): la forman los meses que el usuario elige; los abonos a la deuda van SIN mes
@@ -2648,6 +2669,16 @@
     d.saldo = Math.max(d.total - d.abonado, 0); d.aFavor = Math.max(d.abonado - d.total, 0);
     var saldo = d.total;
     filas.forEach(function(r){ saldo -= Number(r.monto); d.abonos.push({uid: r.uid, fecha: r.fecha, monto: Number(r.monto), nota: r.nota || "", saldoDespues: saldo}); });
+    // que abono pago cuanto de cada mes (para mostrar la FECHA de cada abono en el estado de cuenta, 09-10-2026)
+    var cap = d.meses.map(function(m){ m.aplicaciones = []; return Math.max(m.total, 0); }), i = 0;
+    d.abonos.forEach(function(a){
+      var resto = a.monto;
+      while(resto > 0.005 && i < d.meses.length){
+        var usar = Math.min(resto, cap[i]);
+        if(usar > 0.005){ d.meses[i].aplicaciones.push({fecha: a.fecha, monto: usar, nota: a.nota}); cap[i] -= usar; resto -= usar; }
+        if(cap[i] <= 0.005) i++;
+      }
+    });
     return d;
   }
   function ajustesYAbonosEc(estado, sinDeuda){
@@ -2657,8 +2688,10 @@
     if(!esDeDeuda) return out;
     var d = deudaCalcular(estado.nombre);
     var mm = d ? d.meses.filter(function(m){ return m.anio === estado.anio && m.mes === estado.mes; })[0] : null;
-    if(mm && mm.cubierto > 0.005) out.push({id: "deuda", etiqueta: "Abonos a la deuda acumulada", monto: -mm.cubierto, incluir_en_total: 1,
-      detalle: "abonado en total " + money(d.abonado) + ", le queda " + money(d.saldo), es_abono: true, de_deuda: true, abono_uid: ""});
+    (mm ? mm.aplicaciones : []).forEach(function(ap, k){
+      out.push({id: "deuda-" + k, etiqueta: "Abono del " + String(ap.fecha).slice(0, 10).split("-").reverse().join("/") + " (deuda acumulada)",
+        monto: -ap.monto, incluir_en_total: 1, detalle: ap.nota || "", es_abono: true, de_deuda: true, abono_uid: "", fecha: ap.fecha});
+    });
     return out;
   }
   function tipoAjusteTxt(a){ return a.es_abono ? "abono, se descuenta" : (a.incluir_en_total ? "suma al total" : "nota, no suma"); }
@@ -4238,6 +4271,14 @@
     var nombreP = paquetes[0].estado.nombre, dd = deudaCalcular(nombreP);
     var historial = (dd && dd.abonos.length && paquetes.some(function(p){ return deudaMeses(nombreP).some(function(m){ return m[0] === p.estado.anio && m[1] === p.estado.mes; }); })) ? dd.abonos : [];
     if(historial.length) varios = true;
+    // tambien los abonos anotados a un mes puntual, con su fecha (09-10-2026)
+    historial = historial.map(function(a){ return {fecha: a.fecha, monto: a.monto, nota: a.nota, aplicado: "Deuda acumulada", quedaba: money(Math.max(a.saldoDespues, 0))}; });
+    paquetes.forEach(function(p){
+      p.info.ajustes.forEach(function(a){
+        if(a.es_abono && !a.de_deuda) historial.push({fecha: a.fecha || "", monto: -a.monto, nota: a.detalle || "", aplicado: MESES_ES[p.estado.mes] + " " + p.estado.anio, quedaba: "-"});
+      });
+    });
+    historial.sort(function(a, b){ return concCmp(a.fecha, b.fecha); });
     if(varios) dibujarResumenPdfEc(doc, paquetes, historial);
     paquetes.forEach(function(p, i){
       if(varios || i > 0) doc.addPage();
@@ -4302,20 +4343,20 @@
     if(historial && historial.length){
       y += 4;
       doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(0, 0, 0);
-      doc.text("Historial de abonos", marginX, y); y += 4;
-      var ah = [30, 40, 80, 32], xh = [marginX], k;
+      doc.text("Abonos realizados", marginX, y); y += 4;
+      var ah = [26, 32, 60, 38, 26], xh = [marginX], k;
       for(k = 1; k < ah.length; k++) xh.push(xh[k - 1] + ah[k - 1]);
       var filaH = function(textos, relleno, negrita){
         doc.setFillColor(relleno, relleno, relleno); doc.setDrawColor(0, 0, 0);
         ah.forEach(function(w, j){ doc.rect(xh[j], y, w, 7, "FD"); });
         doc.setFont("helvetica", negrita ? "bold" : "normal"); doc.setFontSize(10); doc.setTextColor(0, 0, 0);
-        textos.forEach(function(t, j){ if(j === 0 || j === 2) doc.text(String(t).slice(0, 45), xh[j] + 2, y + 5); else doc.text(t, xh[j] + ah[j] - 2 - doc.getTextWidth(t), y + 5); });
+        textos.forEach(function(t, j){ if(j === 1 || j === 4) doc.text(t, xh[j] + ah[j] - 2 - doc.getTextWidth(t), y + 5); else doc.text(String(t).slice(0, j === 2 ? 32 : 22), xh[j] + 2, y + 5); });
         y += 7;
       };
-      filaH(["Fecha", "Abono", "Nota", "Le quedaba"], 220, true);
+      filaH(["Fecha", "Abono", "Nota", "Se aplicó a", "Le quedaba"], 220, true);
       historial.forEach(function(a, i){
         if(y > 270){ doc.addPage(); y = 18; }
-        filaH([a.fecha.split("-").reverse().join("/"), money(a.monto), a.nota || "", money(Math.max(a.saldoDespues, 0))], i % 2 === 0 ? 245 : 255, false);
+        filaH([String(a.fecha || "-").slice(0, 10).split("-").reverse().join("/"), money(a.monto), a.nota || "", a.aplicado, a.quedaba], i % 2 === 0 ? 245 : 255, false);
       });
       y += 6;
     }
@@ -10502,6 +10543,7 @@
     limpiarFormularioGD();
     refrescarSelectoresPeriodo();
     inicializarPeriodoADiaDeHoy();
+    restaurarFiltrosGuardados();
     refrescarTodo();
 
     var lastTab = null;
