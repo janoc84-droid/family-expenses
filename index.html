@@ -4799,6 +4799,8 @@
   var CONC_DIAS_ANTES_DEL_MES = 7;
   // compra en cuotas CON INTERES y compra anotada en varias notas (07-10-2026, igual que el escritorio)
   var CONC_RATIO_TOTAL_MIN = 0.80, CONC_RATIO_TOTAL_MAX = 1.02, CONC_MAX_NOTAS_GRUPO = 3;
+  // misma cuota que el banco redondea distinto (09-10-2026, igual que el escritorio) y cuantos candidatos se muestran
+  var CONC_TOL_REDONDEO_CUOTA_PCT = 0.03, CONC_TOL_REDONDEO_CUOTA_MAX = 2000, CONC_DIAS_REDONDEO_CUOTA = 7, CONC_CANDIDATOS_A_MOSTRAR = 4;
   var CONC_MOTIVO_AUTOMATICO = "Cobro automático (marcado por ti: no se anota a diario)";
   var CONC_PALABRAS_VACIAS = {compra: 1, compras: 1, pago: 1, pagos: 1, cuota: 1, cuotas: 1, santiago: 1, chile: 1, para: 1,
     mercadopago: 1, dlocal: 1, com: 1, www: 1, the: 1, con: 1, del: 1, las: 1, los: 1, mes: 1, pendiente: 1, pasado: 1,
@@ -4900,6 +4902,40 @@
     var ta = Date.UTC(+ra[1], +ra[2] - 1, +ra[3]), tb = Date.UTC(+rb[1], +rb[2] - 1, +rb[3]);
     return Math.abs(Math.round((ta - tb) / 86400000));
   }
+  function concSumarMesesIso(iso, n){
+    var f = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || "")); if(!f) return iso;
+    var t = Number(f[1]) * 12 + (Number(f[2]) - 1) + n, a = Math.floor(t / 12), m = t % 12 + 1;
+    var ult = new Date(Date.UTC(a, m, 0)).getUTCDate();
+    return a + "-" + String(m).padStart(2, "0") + "-" + String(Math.min(Number(f[3]), ult)).padStart(2, "0");
+  }
+  // Para una nota de cuota (ej. 3/3 del 15/09) la fecha de la compra original (15/07)
+  function concFechaCompraEsperada(n){
+    if(!concCuotaReal(n.cuotasTotales) || !n.cuotaActual || n.cuotaActual <= 1) return n.fecha;
+    return concSumarMesesIso(n.fecha, -(n.cuotaActual - 1));
+  }
+  // Dias a la compra original; un mes de desfase solo si la compra fue cerca o despues del corte (dia 20 en adelante)
+  function concDiasALaCompra(n, fechaCargo){
+    var esperada = concFechaCompraEsperada(n), dias = concDias(esperada, fechaCargo);
+    if(concCuotaReal(n.cuotasTotales) && Number(String(fechaCargo).slice(8, 10)) >= 20) dias = Math.min(dias, concDias(concSumarMesesIso(esperada, -1), fechaCargo));
+    return dias;
+  }
+  function concEsMismaCuotaRedondeada(c, n){
+    if(!concCuotaReal(c.cuotasTotales) || !concCuotaReal(n.cuotasTotales) || c.monto === null) return false;
+    if(c.cuotasTotales !== n.cuotasTotales || c.cuotaActual !== n.cuotaActual) return false;
+    if(Math.abs(c.monto - n.monto) > Math.min(CONC_TOL_REDONDEO_CUOTA_MAX, CONC_TOL_REDONDEO_CUOTA_PCT * Math.abs(c.monto))) return false;
+    return concDiasALaCompra(n, c.fecha) <= CONC_DIAS_REDONDEO_CUOTA;
+  }
+  // Que tan probable es que la nota y el cargo sean la misma compra (MENOS = mas probable)
+  function concPuntajeCandidato(n, c){
+    if(c.monto === null) return 1e9;
+    var difPct = (concEsCompraCompleta(c, n) || concEsCompraCompletaAprox(c, n.monto)) ? 0 : 100 * Math.abs(n.monto - c.monto) / Math.max(Math.abs(c.monto), Math.abs(n.monto), 1);
+    var p = Math.min(difPct, 60) + Math.min(concDiasALaCompra(n, c.fecha), 60) / 3;
+    var cn = concCuotaReal(n.cuotasTotales), cc = concCuotaReal(c.cuotasTotales);
+    if(cn && cc) p += (n.cuotasTotales === c.cuotasTotales ? 0 : 15) + (n.cuotaActual === c.cuotaActual ? 0 : 5);
+    else if(cn !== cc && difPct > 0) p += 10;
+    if(concNombresParecidos(n.detalle, concNombresCargo(c))) p -= 20;
+    return p;
+  }
   function concEsMontoCercano(a, b){
     var dif = Math.abs(a - b);
     if(dif <= CONC_TOL_EXACTA) return false;   // eso es exacto, no "cercano"
@@ -4964,7 +5000,7 @@
       return {cargo: c, nota: n, tipo: CONC_TIPO_TOTAL, prioridad: 3, dias: dias, esParDeCuota: false, exacto: false};
     }
     var exacto = Math.abs(c.monto - n.monto) <= CONC_TOL_EXACTA;
-    var cercano = concEsMontoCercano(c.monto, n.monto);
+    var cercano = concEsMontoCercano(c.monto, n.monto) || concEsMismaCuotaRedondeada(c, n);
     if(!exacto && !cercano) return null;
     if(cargoEnCuotas && notaEnCuotas){
       // las dos traen cuota real: tiene que ser LA MISMA cuota... salvo la misma compra anotada con otro numero de
@@ -4975,6 +5011,7 @@
         if(!mismoTotal || dias > CONC_DIAS_ALTA_CONFIANZA) return null;
         return {cargo: c, nota: n, tipo: CONC_TIPO_MONTO, prioridad: exacto ? 0 : 2, dias: dias, esParDeCuota: false, exacto: exacto};
       }
+      if(!exacto && concDiasALaCompra(n, c.fecha) > CONC_DIAS_REDONDEO_CUOTA) return null;   // misma cuota "casi igual" de OTRA compra
       return {cargo: c, nota: n, tipo: CONC_TIPO_MONTO, prioridad: exacto ? 0 : 2, dias: dias, esParDeCuota: true, exacto: exacto};
     }
     if(cercano && dias > CONC_DIAS_MAX_CERCANO) return null;   // "casi igual" sin fecha parecida es casualidad
@@ -4988,7 +5025,7 @@
       if(c.monto === null || c.monto <= 0 || n.monto <= 0) return;
       var dif = Math.abs(c.monto - n.monto);
       if(dif <= CONC_TOL_EXACTA || dif / Math.max(c.monto, n.monto) > CONC_PCT_PARECIDO) return;
-      if(!concNombresParecidos(n.detalle, concNombresCargo(c))) return;   // nunca sugerir unir comercios distintos
+      if(!concNombresParecidos(n.detalle, concNombresCargo(c)) && !concEsMismaCuotaRedondeada(c, n)) return;   // nunca sugerir unir comercios distintos (salvo la misma cuota redondeada)
       if(mejorDif === null || dif < mejorDif){ mejor = c; mejorDif = dif; }
     });
     return mejor;
@@ -5135,7 +5172,7 @@
       if(ultimaFecha && dias > 0 && dias <= CONC_DIAS_POSTERIOR_AL_CORTE && n.fecha > ultimaFecha){
         pista = "Es posterior al último cargo de este estado de cuenta: lo más probable es que aparezca en el próximo.";
       }
-      var parecido = concCargoParecido(n, res.faltoAnotar);
+      var parecido = concCargoParecido(n, res.faltoAnotar.concat(res.noDiario.map(function(x){ return x.cargo; }).filter(function(c){ return concEsMismaCuotaRedondeada(c, n); })));
       if(parecido && !pista) pista = "Hay un cargo del mismo comercio con monto parecido (puede ser la misma compra, ej. dólares).";
       res.soloDiario.push({nota: n, pista: pista, parecido: parecido});
     });
@@ -5486,17 +5523,15 @@
   function concCargosLibresPara(res, nota){
     var libres = res.faltoAnotar.concat(res.noDiario.map(function(c){ return c.cargo; }));
     function cerca(c){ return c.monto === null ? Infinity : Math.abs(c.monto - nota.monto); }
-    function mismo(c){ return concNombresParecidos(nota.detalle, concNombresCargo(c)) ? 0 : 1; }
     return libres.slice().sort(function(a, b){
-      return (mismo(a) - mismo(b)) || ((concEsCompraCompleta(a, nota) ? 0 : 1) - (concEsCompraCompleta(b, nota) ? 0 : 1)) || (cerca(a) - cerca(b)) || concCmp(a.fecha, b.fecha);
+      return (concPuntajeCandidato(nota, a) - concPuntajeCandidato(nota, b)) || concCmp(a.fecha, b.fecha) || (a.id - b.id);
     });
   }
   function concNotasLibresPara(res, cargo){
     var libres = res.soloDiario.map(function(s){ return s.nota; });
     function cerca(n){ return cargo.monto === null ? Infinity : Math.abs(n.monto - cargo.monto); }
-    function mismo(n){ return concNombresParecidos(n.detalle, concNombresCargo(cargo)) ? 0 : 1; }
     return libres.slice().sort(function(a, b){
-      return (mismo(a) - mismo(b)) || ((concEsCompraCompleta(cargo, a) ? 0 : 1) - (concEsCompraCompleta(cargo, b) ? 0 : 1)) || (cerca(a) - cerca(b)) || concCmp(a.fecha, b.fecha);
+      return (concPuntajeCandidato(a, cargo) - concPuntajeCandidato(b, cargo)) || concCmp(a.fecha, b.fecha) || (a.id - b.id);
     });
   }
 
@@ -5954,8 +5989,10 @@
     });
   }
 
-  function concAbrirElegirNotas(cargo, notas, alAceptar, yaUnidas){
+  function concAbrirElegirNotas(cargo, notas, alAceptar, yaUnidas, todas){
     yaUnidas = yaUnidas || [];
+    var todasLasNotas = notas;
+    if(!todas && notas.length > CONC_CANDIDATOS_A_MOSTRAR) notas = notas.slice(0, CONC_CANDIDATOS_A_MOSTRAR);
     var h = "<h2>Vincular con nota(s)</h2><p><b>Cargo del banco: " + escapeHtml(concFechaCorta(cargo.fecha) + "  " + (cargo.detalle || cargo.descripcion)) +
       " — " + escapeHtml(money(cargo.monto || 0)) + "</b></p><p class=\"hint\">" + escapeHtml(concDatosCargo(cargo)) + "</p>" +
       (yaUnidas.length ? "<p class=\"hint\" style=\"color:var(--ok, #3ecf8e)\">Ya unidas: " + escapeHtml(yaUnidas.map(function(n){ return n.detalle + " " + money(n.monto); }).join(", ")) + "</p>" : "") +
@@ -5966,7 +6003,8 @@
         return "<label class=\"conc-opcion\" style=\"display:flex;gap:8px;align-items:flex-start;\"><input type=\"checkbox\" data-conc-nota=\"" + i + "\"> <span>" +
           (mismo ? "★ " : "") + "<b>" + escapeHtml(concFechaCorta(n.fecha) + "  " + n.detalle + "   " + money(n.monto)) + "</b>" +
           escapeHtml(Math.abs(dif) > 0.5 ? "   (Δ " + money(dif) + ")" : "   (mismo monto)") + "<br><small>" + escapeHtml(concDatosNota(n)) + "</small></span></label>";
-      }).join("") + "</div><p id=\"concNotasSuma\" class=\"hint\"></p>" +
+      }).join("") + "</div>" + (notas.length < todasLasNotas.length ? "<button type=\"button\" class=\"btn-ghost\" id=\"concNotasTodas\">🔎 Ver todas las notas (" + todasLasNotas.length + ")</button>" : "") +
+      "<p id=\"concNotasSuma\" class=\"hint\"></p>" +
       "<div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"concNotasCancelar\">Cancelar</button>" +
       "<button type=\"button\" class=\"btn-primary\" id=\"concNotasOk\" disabled>Vincular</button></div>";
     abrirModal(h);
@@ -5985,6 +6023,8 @@
     document.querySelectorAll("[data-conc-nota]").forEach(function(c){ c.addEventListener("change", actualizar); });
     actualizar();
     document.getElementById("concNotasCancelar").addEventListener("click", cerrarModal);
+    var btnTodas = document.getElementById("concNotasTodas");
+    if(btnTodas) btnTodas.addEventListener("click", function(){ cerrarModal(); concAbrirElegirNotas(cargo, todasLasNotas, alAceptar, yaUnidas, true); });
     document.getElementById("concNotasOk").addEventListener("click", function(){
       var el = elegidas().sort(function(a, b){ return (b.monto - a.monto) || (a.id - b.id); });
       if(!el.length) return;
@@ -6076,16 +6116,27 @@
           "Desde ahora sus cargos de todos los meses pasan a «No se anota a diario». Lo puedes deshacer con «Ya no es automático».")) return;
       concEjecutar(function(){ concGuardarAutomatico(c5, accion === "automatico"); });
     }
-    else if(accion === "elegir-cargo"){
+    else if(accion === "elegir-cargo" || accion === "elegir-cargo-todos"){
       var nota2 = concUltimo.notas.filter(function(n){ return n.id === notaId; })[0]; if(!nota2) return;
       var cargos = concCargosLibresPara(r, nota2);
       if(!cargos.length){ mostrarToast("No hay cargos del estado de cuenta sin pareja en este mes.", "bad"); return; }
+      // solo los mas probables (fecha, cuotas, monto, comercio); "Ver todos" muestra la lista completa (09-10-2026)
+      var hayMas = accion === "elegir-cargo" && cargos.length > CONC_CANDIDATOS_A_MOSTRAR;
+      if(hayMas) cargos = cargos.slice(0, CONC_CANDIDATOS_A_MOSTRAR);
+      var VER_TODOS = {verTodos: true};
       concAbrirElegir("Vincular con un cargo",
-        "Tu nota: " + concFechaCorta(nota2.fecha) + "  " + nota2.detalle + " — " + money(nota2.monto) + "\n" + concDatosNota(nota2) + "\n\nElige el cargo del estado de cuenta que es la misma compra (★ = mismo comercio):",
+        "Tu nota: " + concFechaCorta(nota2.fecha) + "  " + nota2.detalle + " — " + money(nota2.monto) + "\n" + concDatosNota(nota2) + "\n\n" +
+        (hayMas ? "Los más probables según la fecha, las cuotas y el monto" : "Elige el cargo del estado de cuenta que es la misma compra") + " (★ = mismo comercio):",
         cargos.map(function(c){
           return {texto: (concNombresParecidos(nota2.detalle, concNombresCargo(c)) ? "★ " : "") + concFechaCorta(c.fecha) + "  " + (c.detalle || c.descripcion) + "   " + money(c.monto || 0) +
                          "\n      " + concDatosCargo(c), valor: c};
-        }), "Vincular", function(c){ concEjecutar(function(){ concVincularManual(c, nota2); }); });
+        }).concat(hayMas ? [{texto: "🔎 Ver todos los cargos del estado de cuenta…", valor: VER_TODOS}] : []), "Vincular", function(c){
+          if(c === VER_TODOS){
+            var falso = document.createElement("button"); falso.dataset.conc = "elegir-cargo-todos"; falso.dataset.nota = String(nota2.id);
+            document.getElementById("concCuerpo").appendChild(falso); falso.click(); falso.remove(); return;
+          }
+          concEjecutar(function(){ concVincularManual(c, nota2); });
+        });
     }
   });
   ["concTarjeta", "concMes", "concAnio"].forEach(function(id){
