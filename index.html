@@ -810,6 +810,7 @@
         <button type="button" class="btn-primary" id="ecBtnWhatsapp">💬 Enviar por WhatsApp</button>
         <button type="button" class="btn-ghost" id="ecBtnHistorial">🕘 Historial de ajustes...</button>
         <button type="button" class="btn-ghost" id="ecBtnAbono">💵 Registrar abono...</button>
+        <button type="button" class="btn-ghost" id="ecBtnDeuda">💳 Deuda y abonos...</button>
         <button type="button" class="btn-ghost" id="ecBtnSubtotal">➕ Subtotal combinado...</button>
         <button type="button" class="btn-ghost" id="ecBtnUltimasMes">⏰ Últimas cuotas del mes (todos)...</button>
       </div>
@@ -1435,6 +1436,9 @@
     dbRef.run("CREATE TABLE IF NOT EXISTS abonos (id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL UNIQUE, persona TEXT NOT NULL, " +
               "anio INTEGER NOT NULL, mes INTEGER NOT NULL, fecha TEXT NOT NULL, monto REAL NOT NULL, nota TEXT NOT NULL DEFAULT '')");
     dbRef.run("CREATE TABLE IF NOT EXISTS abonos_borrados (uid TEXT PRIMARY KEY, borrado_en TEXT NOT NULL)");
+    // cuenta de deuda de una persona: que meses la forman (08-10-2026, igual que el escritorio)
+    dbRef.run("CREATE TABLE IF NOT EXISTS deudas_acumuladas (persona TEXT PRIMARY KEY COLLATE NOCASE, meses TEXT NOT NULL DEFAULT '', " +
+              "actualizado_en TEXT NOT NULL DEFAULT (datetime('now')))");
     dbRef.run("CREATE TABLE IF NOT EXISTS sync_control (id INTEGER PRIMARY KEY CHECK (id = 1), aplicando INTEGER NOT NULL DEFAULT 0)");
     dbRef.run("INSERT OR IGNORE INTO sync_control (id, aplicando) VALUES (1, 0)");
     dbRef.run("UPDATE sync_control SET aplicando = 0");
@@ -2592,7 +2596,50 @@
                 monto: -Math.abs(Number(r.monto)), incluir_en_total: 1, detalle: r.nota || "", es_abono: true, abono_uid: r.uid};
       });
   }
-  function ajustesYAbonosEc(estado){ return ajustesEcGuardados(estado).concat(abonosEc(estado)); }
+  // Cuenta de deuda (08-10-2026): la forman los meses que el usuario elige; los abonos a la deuda van SIN mes
+  // (abonos con anio=0, mes=0) y se aplican solos desde el mes mas antiguo.
+  function deudaMeses(persona){
+    var f = dbGet("SELECT meses FROM deudas_acumuladas WHERE persona=? COLLATE NOCASE", [persona]);
+    var vistos = {}, out = [];
+    String((f && f.meses) || "").split(",").forEach(function(p){
+      var m = /^(\d{4})-(\d{2})$/.exec(p.trim()); if(!m) return;
+      var k = m[1] + "-" + m[2]; if(vistos[k]) return; vistos[k] = 1;
+      out.push([Number(m[1]), Number(m[2])]);
+    });
+    return out.sort(function(a, b){ return (a[0] * 100 + a[1]) - (b[0] * 100 + b[1]); });
+  }
+  function deudaGuardarMeses(persona, meses){
+    var txt = meses.slice().sort(function(a, b){ return (a[0] * 100 + a[1]) - (b[0] * 100 + b[1]); })
+      .map(function(m){ return m[0] + "-" + String(m[1]).padStart(2, "0"); }).join(",");
+    db.run("DELETE FROM deudas_acumuladas WHERE persona=? COLLATE NOCASE", [persona]);
+    dbRun("INSERT INTO deudas_acumuladas (persona, meses, actualizado_en) VALUES (?,?,?)", [persona, txt, new Date().toISOString().slice(0, 19).replace("T", " ")]);
+  }
+  function deudaCalcular(persona){
+    var meses = deudaMeses(persona);
+    var filas = dbAll("SELECT uid, fecha, monto, nota FROM abonos WHERE persona=? COLLATE NOCASE AND anio=0 ORDER BY fecha, id", [persona]);
+    if(!meses.length && !filas.length) return null;
+    var d = {persona: persona, meses: [], abonos: []};
+    meses.forEach(function(m){ d.meses.push({anio: m[0], mes: m[1], total: Math.round(ecPaqueteDe(persona, m[0], m[1], true).info.totalMostrado * 100) / 100, cubierto: 0}); });
+    var resto = filas.reduce(function(a, r){ return a + Number(r.monto); }, 0);
+    d.meses.forEach(function(m){ var c = Math.min(Math.max(m.total, 0), Math.max(resto, 0)); m.cubierto = c; m.queda = m.total - c; resto -= c; });
+    d.total = d.meses.reduce(function(a, m){ return a + m.total; }, 0);
+    d.abonado = filas.reduce(function(a, r){ return a + Number(r.monto); }, 0);
+    d.saldo = Math.max(d.total - d.abonado, 0); d.aFavor = Math.max(d.abonado - d.total, 0);
+    var saldo = d.total;
+    filas.forEach(function(r){ saldo -= Number(r.monto); d.abonos.push({uid: r.uid, fecha: r.fecha, monto: Number(r.monto), nota: r.nota || "", saldoDespues: saldo}); });
+    return d;
+  }
+  function ajustesYAbonosEc(estado, sinDeuda){
+    var out = ajustesEcGuardados(estado).concat(abonosEc(estado));
+    if(sinDeuda || !estado) return out;
+    var esDeDeuda = deudaMeses(estado.nombre).some(function(m){ return m[0] === estado.anio && m[1] === estado.mes; });
+    if(!esDeDeuda) return out;
+    var d = deudaCalcular(estado.nombre);
+    var mm = d ? d.meses.filter(function(m){ return m.anio === estado.anio && m.mes === estado.mes; })[0] : null;
+    if(mm && mm.cubierto > 0.005) out.push({id: "deuda", etiqueta: "Abonos a la deuda acumulada", monto: -mm.cubierto, incluir_en_total: 1,
+      detalle: "abonado en total " + money(d.abonado) + ", le queda " + money(d.saldo), es_abono: true, de_deuda: true, abono_uid: ""});
+    return out;
+  }
   function tipoAjusteTxt(a){ return a.es_abono ? "abono, se descuenta" : (a.incluir_en_total ? "suma al total" : "nota, no suma"); }
   function quitarAbonoEc(uid){
     if(!confirm("¿Quitar este abono? Lo que debe esta persona vuelve a subir.")) return;
@@ -2645,7 +2692,8 @@
       var tipoTxt = tipoAjusteTxt(a);
       return "<div class=\"historial-item\"><p>" + (a.es_abono ? "💵 " : "") + "<strong>" + escapeHtml(a.etiqueta) + "</strong> — " + money(a.monto) +
         " (" + tipoTxt + ")" + (a.detalle ? " — " + escapeHtml(a.detalle) : "") + "</p>" +
-        (conQuitar ? (a.es_abono ? "<button type=\"button\" class=\"btn-danger\" data-quitar-abono=\"" + escapeHtml(a.abono_uid) + "\">Quitar</button>"
+        (conQuitar ? (a.de_deuda ? "<button type=\"button\" class=\"btn-ghost\" data-ver-deuda=\"1\">Ver deuda</button>" :
+                      a.es_abono ? "<button type=\"button\" class=\"btn-danger\" data-quitar-abono=\"" + escapeHtml(a.abono_uid) + "\">Quitar</button>"
                                  : "<button type=\"button\" class=\"btn-danger\" data-quitar-ajuste=\"" + a.id + "\">Quitar</button>") : "") +
         "</div>";
     }).join("");
@@ -2741,10 +2789,10 @@
     return items;
   }
   // Un estado de cuenta listo para exportar: movimientos + ajustes + total (real + ajustes "incluir en el total").
-  function ecPaqueteDe(nombre, anio, mes){
+  function ecPaqueteDe(nombre, anio, mes, sinDeuda){
     var estado = {nombre: nombre, anio: anio, mes: mes};
     var items = ecItemsDe(nombre, anio, mes);
-    var ajustes = ajustesYAbonosEc(estado);
+    var ajustes = ajustesYAbonosEc(estado, sinDeuda);
     var real = items.reduce(function(a, it){ return a + it.monto; }, 0);
     var hay = ajustes.some(function(a){ return a.incluir_en_total; });
     return {estado: estado, items: items, info: {real: real, ajustes: ajustes, totalMostrado: hay ? real + sumaAjustesIncluidos(ajustes) : real}};
@@ -2833,6 +2881,7 @@
     cont.querySelectorAll("[data-quitar-ajuste]").forEach(function(b){
       b.addEventListener("click", function(){ quitarAjusteEc(Number(b.dataset.quitarAjuste)); });
     });
+    cont.querySelectorAll("[data-ver-deuda]").forEach(function(b){ b.addEventListener("click", abrirDeudaEc); });
     cont.querySelectorAll("[data-quitar-abono]").forEach(function(b){
       b.addEventListener("click", function(){ quitarAbonoEc(b.dataset.quitarAbono); });
     });
@@ -3931,6 +3980,93 @@
   }
   document.getElementById("ecBtnSubtotal").addEventListener("click", abrirSubtotalCombinado);
   document.getElementById("ecBtnAbono").addEventListener("click", abrirRegistrarAbono);
+  document.getElementById("ecBtnDeuda").addEventListener("click", abrirDeudaEc);
+  function abrirDeudaEc(){
+    var estado = estadoActual();
+    if(!estado){ mostrarMensajeExportEc("Elige persona, mes y año primero.", "bad"); return; }
+    var persona = estado.nombre;
+    var sel = deudaMeses(persona);
+    if(!sel.length) sel = [[estado.anio, estado.mes]];   // primera vez: el mes que se miraba
+    var esSel = function(a, m){ return sel.some(function(x){ return x[0] === a && x[1] === m; }); };
+    var d = deudaCalcular(persona);
+    var total = d && d.meses.length ? d.total : 0, abonado = d ? d.abonado : 0, saldo = d ? d.saldo : total;
+    var pct = total > 0 ? Math.min(abonado / total, 1) * 100 : 0;
+    var h = "<h2>💳 Cuenta de deuda de " + escapeHtml(persona) + "</h2><p class=\"hint\">Marca los estados de cuenta que forman la deuda y anota cada abono. " +
+      "No hace falta decir a qué mes va: se descuenta solo desde el mes más antiguo.</p>" +
+      "<div style=\"border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin:8px 0;\">" +
+      "<div id=\"deudaResumen\" style=\"font-size:1.05rem;font-weight:700;color:" + (saldo <= 0.5 && total > 0 ? "var(--ok)" : "var(--bad, #e5484d)") + "\">Deuda " + money(total) +
+      " · Abonado " + money(abonado) + " · LE QUEDA " + money(saldo) + "</div>" +
+      "<div style=\"height:10px;background:var(--surface-2);border-radius:6px;margin:8px 0;overflow:hidden;\"><div style=\"height:100%;width:" + pct.toFixed(1) + "%;background:var(--ok);\"></div></div>" +
+      (d && d.aFavor ? "<p style=\"color:var(--ok)\">Abonó " + money(d.aFavor) + " de más: queda a favor de " + escapeHtml(persona) + ".</p>" : "") +
+      (d ? d.meses.map(function(m){
+        var t = MESES_ES[m.mes] + " " + m.anio;
+        if(m.queda <= 0.5) return "<div style=\"color:var(--ok)\">✔ " + t + ": debía " + money(m.total) + " — pagado</div>";
+        if(m.cubierto > 0.5) return "<div style=\"color:var(--warn)\">◐ " + t + ": debía " + money(m.total) + " — abonado " + money(m.cubierto) + ", queda " + money(m.queda) + "</div>";
+        return "<div>○ " + t + ": debe " + money(m.total) + " — sin abonos todavía</div>";
+      }).join("") : "") + "</div>" +
+      "<h3 style=\"font-size:.95rem;margin:10px 0 4px;\">1. Estados de cuenta que forman la deuda</h3><div id=\"deudaMeses\">" +
+      ecMesesDePersona(persona).filter(function(p){ return p.items.length || esSel(p.estado.anio, p.estado.mes); }).map(function(p){
+        var a = p.estado.anio, m = p.estado.mes, base = ecPaqueteDe(persona, a, m, true).info.totalMostrado;
+        var proy = p.items.length && p.items.every(function(it){ return it.proyectado; });
+        return "<label style=\"display:flex;gap:8px;padding:3px 0;" + (proy ? "opacity:.65;" : "") + "\"><input type=\"checkbox\" data-deuda-mes=\"" + a + "-" + m + "\"" +
+          (esSel(a, m) ? " checked" : "") + "> " + escapeHtml(MESES_ES[m] + " " + a) + " — " + money(base) + (proy ? " (⏳ proyectado)" : "") + "</label>";
+      }).join("") + "</div>" +
+      "<h3 style=\"font-size:.95rem;margin:10px 0 4px;\">2. Anotar un abono</h3>" +
+      "<div class=\"form-grid\"><div class=\"field small\"><label>Monto</label><input type=\"number\" id=\"deudaMonto\" min=\"1\" step=\"1\" placeholder=\"ej. 50000\"></div>" +
+      "<div class=\"field small\"><label>Fecha</label><input type=\"date\" id=\"deudaFecha\"></div>" +
+      "<div class=\"field\"><label>Nota</label><input type=\"text\" id=\"deudaNota\" placeholder=\"ej. transferencia\"></div></div>" +
+      "<div class=\"note bad\" id=\"deudaError\" hidden></div>" +
+      "<button type=\"button\" class=\"btn-primary\" id=\"deudaAgregar\">Agregar abono</button>" +
+      "<h3 style=\"font-size:.95rem;margin:14px 0 4px;\">Historial de abonos</h3>" +
+      (d && d.abonos.length ? "<div class=\"table-wrap\"><table class=\"data-table\"><thead><tr><th>Fecha</th><th>Abono</th><th>Nota</th><th>Le quedaba</th><th></th></tr></thead><tbody>" +
+        d.abonos.map(function(a){
+          return "<tr><td>" + escapeHtml(a.fecha.split("-").reverse().join("/")) + "</td><td class=\"money\">" + money(a.monto) + "</td><td>" + escapeHtml(a.nota || "—") +
+            "</td><td class=\"money\">" + money(Math.max(a.saldoDespues, 0)) + "</td><td><button type=\"button\" class=\"btn-danger\" data-deuda-quitar=\"" + escapeHtml(a.uid) + "\">Quitar</button></td></tr>";
+        }).join("") + "</tbody></table></div>" : "<p class=\"hint\">Todavía no hay abonos.</p>") +
+      "<div class=\"form-actions\"><button type=\"button\" class=\"btn-ghost\" id=\"deudaPdf\">📄 Exportar PDF de la deuda</button>" +
+      "<button type=\"button\" class=\"btn-ghost\" id=\"deudaCerrar\">Cerrar</button></div>";
+    abrirModal(h);
+    var hoy = new Date();
+    document.getElementById("deudaFecha").value = hoy.getFullYear() + "-" + String(hoy.getMonth() + 1).padStart(2, "0") + "-" + String(hoy.getDate()).padStart(2, "0");
+    function mesesMarcados(){
+      return Array.prototype.slice.call(document.querySelectorAll("[data-deuda-mes]:checked")).map(function(c){ return c.dataset.deudaMes.split("-").map(Number); });
+    }
+    function guardarSiCambio(){
+      var actuales = deudaMeses(persona), nuevos = mesesMarcados();
+      var k = function(ms){ return ms.map(function(m){ return m[0] * 100 + m[1]; }).sort().join(","); };
+      if(k(actuales) !== k(nuevos)) deudaGuardarMeses(persona, nuevos);
+    }
+    document.querySelectorAll("[data-deuda-mes]").forEach(function(c){
+      c.addEventListener("change", function(){ guardarSiCambio(); renderEstadoCuenta(); abrirDeudaEc(); });
+    });
+    document.getElementById("deudaAgregar").addEventListener("click", function(){
+      var err = document.getElementById("deudaError"), monto = Math.abs(Number(document.getElementById("deudaMonto").value));
+      var fecha = document.getElementById("deudaFecha").value;
+      if(!monto || monto < 1){ err.hidden = false; err.textContent = "Escribe el monto del abono (ej. 50000)."; return; }
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(fecha)){ err.hidden = false; err.textContent = "Elige la fecha del abono."; return; }
+      guardarSiCambio();
+      dbRun("INSERT INTO abonos (uid, persona, anio, mes, fecha, monto, nota) VALUES (?,?,0,0,?,?,?)",
+        [gdNuevoUid(), persona, fecha, monto, document.getElementById("deudaNota").value.trim()]);
+      renderEstadoCuenta(); abrirDeudaEc();
+      mostrarToast("Abono de " + money(monto) + " anotado.", "ok");
+    });
+    document.querySelectorAll("[data-deuda-quitar]").forEach(function(b){
+      b.addEventListener("click", function(){
+        if(!confirm("¿Quitar este abono? Lo que le queda por pagar vuelve a subir.")) return;
+        db.run("DELETE FROM abonos WHERE uid=?", [b.dataset.deudaQuitar]);
+        dbRun("INSERT OR REPLACE INTO abonos_borrados (uid, borrado_en) VALUES (?, ?)", [b.dataset.deudaQuitar, new Date().toISOString().slice(0, 19).replace("T", " ")]);
+        renderEstadoCuenta(); abrirDeudaEc();
+      });
+    });
+    document.getElementById("deudaPdf").addEventListener("click", function(){
+      guardarSiCambio();
+      var paquetes = deudaMeses(persona).map(function(m){ return ecPaqueteDe(persona, m[0], m[1]); }).filter(function(p){ return p.items.length; });
+      if(!paquetes.length){ mostrarToast("Marca al menos un estado de cuenta en la deuda.", "bad"); return; }
+      cerrarModal();
+      generarPdfEstadosCuenta(paquetes);
+    });
+    document.getElementById("deudaCerrar").addEventListener("click", cerrarModal);
+  }
 
   // -------------------------------------------- Estado de Cuenta: exportar PDF / imagen / WhatsApp
   // Puerto web de family_expenses/app/export/{whatsapp_link,pdf_estado_cuenta,
@@ -4065,7 +4201,10 @@
     paquetes = paquetes.slice().sort(function(a, b){ return (a.estado.anio * 100 + a.estado.mes) - (b.estado.anio * 100 + b.estado.mes); });
     var doc = new window.jspdf.jsPDF({unit: "mm", format: "a4"});
     var varios = paquetes.length > 1;
-    if(varios) dibujarResumenPdfEc(doc, paquetes);
+    var nombreP = paquetes[0].estado.nombre, dd = deudaCalcular(nombreP);
+    var historial = (dd && dd.abonos.length && paquetes.some(function(p){ return deudaMeses(nombreP).some(function(m){ return m[0] === p.estado.anio && m[1] === p.estado.mes; }); })) ? dd.abonos : [];
+    if(historial.length) varios = true;
+    if(varios) dibujarResumenPdfEc(doc, paquetes, historial);
     paquetes.forEach(function(p, i){
       if(varios || i > 0) doc.addPage();
       dibujarMesPdfEc(doc, p.estado, p.items, p.info, varios ? "  (" + (i + 1) + " de " + paquetes.length + ")" : "");
@@ -4081,7 +4220,7 @@
   }
 
   function abonadoPaqueteEc(p){ return p.info.ajustes.reduce(function(a, x){ return a + (x.es_abono ? -x.monto : 0); }, 0); }
-  function dibujarResumenPdfEc(doc, paquetes){
+  function dibujarResumenPdfEc(doc, paquetes, historial){
     var nombre = paquetes[0].estado.nombre, marginX = 14, y = 18, rowH = 9;
     var hayAbonos = paquetes.some(function(p){ return abonadoPaqueteEc(p) > 0; });
     var anchos = hayAbonos ? [76, 38, 36, 32] : [130, 52];
@@ -4126,6 +4265,26 @@
     var mTxt = money(v.monto);
     doc.text(mTxt, marginX + ancho - doc.getTextWidth(mTxt), y);
     y += 10;
+    if(historial && historial.length){
+      y += 4;
+      doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(0, 0, 0);
+      doc.text("Historial de abonos", marginX, y); y += 4;
+      var ah = [30, 40, 80, 32], xh = [marginX], k;
+      for(k = 1; k < ah.length; k++) xh.push(xh[k - 1] + ah[k - 1]);
+      var filaH = function(textos, relleno, negrita){
+        doc.setFillColor(relleno, relleno, relleno); doc.setDrawColor(0, 0, 0);
+        ah.forEach(function(w, j){ doc.rect(xh[j], y, w, 7, "FD"); });
+        doc.setFont("helvetica", negrita ? "bold" : "normal"); doc.setFontSize(10); doc.setTextColor(0, 0, 0);
+        textos.forEach(function(t, j){ if(j === 0 || j === 2) doc.text(String(t).slice(0, 45), xh[j] + 2, y + 5); else doc.text(t, xh[j] + ah[j] - 2 - doc.getTextWidth(t), y + 5); });
+        y += 7;
+      };
+      filaH(["Fecha", "Abono", "Nota", "Le quedaba"], 220, true);
+      historial.forEach(function(a, i){
+        if(y > 270){ doc.addPage(); y = 18; }
+        filaH([a.fecha.split("-").reverse().join("/"), money(a.monto), a.nota || "", money(Math.max(a.saldoDespues, 0))], i % 2 === 0 ? 245 : 255, false);
+      });
+      y += 6;
+    }
     doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor(90, 90, 90);
     doc.text("En las hojas siguientes va el detalle de cada mes.", marginX, y);
     doc.setTextColor(0, 0, 0);
@@ -9306,7 +9465,8 @@
             gastos_borrados: dbAll("SELECT uid, borrado_en FROM gastos_borrados ORDER BY uid"),
             periodos_tarjeta: dbAll("SELECT anio, mes, tarjeta, desde, hasta FROM periodos_tarjeta ORDER BY anio, mes, tarjeta"),
             abonos: dbAll("SELECT uid, persona, anio, mes, fecha, monto, nota FROM abonos ORDER BY uid"),
-            abonos_borrados: dbAll("SELECT uid, borrado_en FROM abonos_borrados ORDER BY uid")};
+            abonos_borrados: dbAll("SELECT uid, borrado_en FROM abonos_borrados ORDER BY uid"),
+            deudas_acumuladas: dbAll("SELECT persona, meses, actualizado_en FROM deudas_acumuladas ORDER BY persona")};
   }
 
   // ---- publicar el estado local en la carpeta ----
@@ -9654,6 +9814,16 @@
         });
 
         if(opciones.espejoEscritorio && limpiarCargosDelEscritorioQueSobran(data.gastos) > 0) huboCambios = true;
+        // que meses forman la cuenta de deuda de cada persona: gana lo mas reciente
+        (data.deudas_acumuladas || []).forEach(function(d){
+          if(!d || !d.persona) return;
+          var local = dbGet("SELECT meses, actualizado_en FROM deudas_acumuladas WHERE persona=? COLLATE NOCASE", [d.persona]);
+          var ts = String(d.actualizado_en || "");
+          if(local && (local.actualizado_en >= ts || local.meses === String(d.meses || ""))) return;
+          db.run("DELETE FROM deudas_acumuladas WHERE persona=? COLLATE NOCASE", [d.persona]);
+          db.run("INSERT INTO deudas_acumuladas (persona, meses, actualizado_en) VALUES (?,?,?)", [d.persona, String(d.meses || ""), ts]);
+          huboCambios = true;
+        });
         // abonos (por uid): uno nuevo se agrega; uno borrado en el otro dispositivo se borra aca y no vuelve
         (data.abonos_borrados || []).forEach(function(b){
           if(!b || !b.uid) return;
@@ -9662,7 +9832,8 @@
           if(db.getRowsModified() > 0) huboCambios = true;
         });
         (data.abonos || []).forEach(function(a){
-          if(!a || !a.uid || !a.persona || !a.anio || !a.mes || !a.fecha) return;
+          // (anio=0, mes=0 = abono a la deuda acumulada, sin mes)
+          if(!a || !a.uid || !a.persona || a.anio === undefined || a.anio === null || a.mes === undefined || a.mes === null || !a.fecha) return;
           if(dbGet("SELECT 1 AS x FROM abonos_borrados WHERE uid=?", [String(a.uid)])) return;
           db.run("INSERT OR IGNORE INTO abonos (uid, persona, anio, mes, fecha, monto, nota) VALUES (?,?,?,?,?,?,?)",
             [String(a.uid), String(a.persona), Number(a.anio), Number(a.mes), String(a.fecha), Math.abs(Number(a.monto) || 0), String(a.nota || "")]);
