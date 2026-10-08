@@ -1326,6 +1326,13 @@
     "  actualizado_en TEXT NOT NULL DEFAULT (datetime('now'))",
     ");",
     // comercios "es automatico, no se anota" (suscripciones): clave = concClaveComercio(descripcion)
+    // compras con cobro DIFERIDO del PDF ("00/03 nov-2026"), las carga el escritorio (09-10-2026)
+    "CREATE TABLE IF NOT EXISTS compras_diferidas (",
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT, tarjeta TEXT NOT NULL, anio INTEGER NOT NULL, mes INTEGER NOT NULL,",
+    "  fecha TEXT NOT NULL, descripcion TEXT NOT NULL, monto_operacion REAL, monto_total REAL NOT NULL,",
+    "  cuotas_totales INTEGER NOT NULL, primer_cobro TEXT NOT NULL DEFAULT '',",
+    "  UNIQUE (tarjeta, anio, mes, fecha, descripcion, monto_total)",
+    ");",
     "CREATE TABLE IF NOT EXISTS conciliacion_automaticos (",
     "  clave TEXT PRIMARY KEY,",
     "  ejemplo TEXT NOT NULL DEFAULT '',",
@@ -5045,11 +5052,25 @@
   //   ignoradas  -- {notaId: motivo}
   //   seriesTotal-- {claveSerie: notaId} compras ya confirmadas como "la nota trae el total"
   //   rechazados -- {"cargoId|notaId": true}
-  function concConciliar(cargos, notas, enlaces, ignoradas, seriesTotal, rechazados, automaticos){
+  // La compra diferida del PDF que es esta nota: fecha cercana (<= 3 dias) y el mismo valor (total con redondeo, precio
+  // de la operacion o una cuota del total). Igual que el escritorio (09-10-2026).
+  function concCompraDiferidaDe(n, diferidas){
+    var mejor = null, mejorDias = null;
+    (diferidas || []).forEach(function(c){
+      var dias = concDias(n.fecha, c.fecha);
+      if(dias > 3) return;
+      function cerca(a, b, pct){ return !!a && !!b && Math.abs(a - b) <= Math.max(2, pct * Math.abs(b)); }
+      var cuota = c.montoTotal / Math.max(c.cuotasTotales, 1);
+      var calza = cerca(n.montoTotal, c.montoTotal, 0.01) || cerca(n.monto, c.montoTotal, 0.01) || cerca(n.monto, c.montoOperacion, 0.01) || cerca(n.monto, cuota, 0.03);
+      if(calza && (mejorDias === null || dias < mejorDias)){ mejor = c; mejorDias = dias; }
+    });
+    return mejor;
+  }
+  function concConciliar(cargos, notas, enlaces, ignoradas, seriesTotal, rechazados, automaticos, diferidas){
     seriesTotal = seriesTotal || {}; rechazados = rechazados || {};
     ignoradas = ignoradas || {};
     var notasPorId = {}; notas.forEach(function(n){ notasPorId[n.id] = n; });
-    var res = {contemplados: [], noDiario: [], faltoAnotar: [], sinMonto: [], soloDiario: [], ignoradas: []};
+    var res = {contemplados: [], noDiario: [], faltoAnotar: [], sinMonto: [], soloDiario: [], ignoradas: [], diferidas: []};
 
     var conMonto = [];
     cargos.forEach(function(c){
@@ -5172,6 +5193,8 @@
       if(ultimaFecha && dias > 0 && dias <= CONC_DIAS_POSTERIOR_AL_CORTE && n.fecha > ultimaFecha){
         pista = "Es posterior al último cargo de este estado de cuenta: lo más probable es que aparezca en el próximo.";
       }
+      var compraDif = concCompraDiferidaDe(n, diferidas);
+      if(compraDif){ res.diferidas.push({nota: n, compra: compraDif}); return; }   // esta en el PDF, se cobra mas adelante
       var parecido = concCargoParecido(n, res.faltoAnotar.concat(res.noDiario.map(function(x){ return x.cargo; }).filter(function(c){ return concEsMismaCuotaRedondeada(c, n); })));
       if(parecido && !pista) pista = "Hay un cargo del mismo comercio con monto parecido (puede ser la misma compra, ej. dólares).";
       res.soloDiario.push({nota: n, pista: pista, parecido: parecido});
@@ -5200,12 +5223,13 @@
       diarioContemplado: suma(notasContempladas, function(n){ return n.monto; }),
       soloDiario: suma(res.soloDiario, function(s){ return s.nota.monto; }),
       ignorado: suma(res.ignoradas, function(s){ return s.nota.monto; }),
+      diferido: suma(res.diferidas || [], function(s){ return s.nota.monto; }),
       diferenciaEnPares: suma(res.contemplados, concDiferenciaDePar),
       paresSinConfirmar: res.contemplados.filter(function(p){ return !p.confirmado; })
     };
     t.paresClaros = t.paresSinConfirmar.filter(function(p){ return p.confianza === "alta"; });
     t.estado = concR2(t.contemplado + t.noDiario + t.faltoAnotar);
-    t.diario = concR2(t.diarioContemplado + t.soloDiario + t.ignorado);
+    t.diario = concR2(t.diarioContemplado + t.soloDiario + t.ignorado + t.diferido);
     return t;
   }
 
@@ -5376,7 +5400,9 @@
     Object.keys(series).forEach(function(k){ extra[series[k]] = true; });
     var notas = concListarNotas(tarjeta, rangos, cargoIds, Object.keys(extra));
     cargos.forEach(function(c){ c.tarjeta = tarjeta; });
-    var resultado = concConciliar(cargos, notas, enlaces, concListarIgnorados(), series, concListarRechazados(cargoIds), concListarAutomaticos());
+    var diferidas = dbAll("SELECT fecha, descripcion, monto_operacion, monto_total, cuotas_totales, primer_cobro FROM compras_diferidas WHERE tarjeta=? AND anio=? AND mes=? ORDER BY fecha, id", [tarjeta, anio, mes])
+      .map(function(r){ return {fecha: r.fecha, descripcion: r.descripcion, montoOperacion: concNum(r.monto_operacion), montoTotal: Number(r.monto_total), cuotasTotales: Number(r.cuotas_totales), primerCobro: r.primer_cobro || ""}; });
+    var resultado = concConciliar(cargos, notas, enlaces, concListarIgnorados(), series, concListarRechazados(cargoIds), concListarAutomaticos(), diferidas);
     return {anio: anio, mes: mes, tarjeta: tarjeta, hayEstado: true, resultado: resultado, totales: concTotales(resultado), cargos: cargos, notas: notas};
   }
 
@@ -5694,7 +5720,7 @@
 
   var concUltimo = null;               // ultima vista calculada (para resolver los ids de los botones)
   // lo YA conciliado queda oculto (seccion cerrada al final) -- pedido del usuario 29-09-2026, igual que el escritorio
-  var concAbiertas = {pares: true, falto: true, solo: true, conciliados: false, nodiario: false, ignoradas: false};
+  var concAbiertas = {pares: true, falto: true, solo: true, diferidas: true, conciliados: false, nodiario: false, ignoradas: false};
   var concPeriodoInicialListo = false;
 
   function concFechaCorta(iso){
@@ -5880,6 +5906,7 @@
       "<div class=\"conc-ecuacion\"><b>TUS NOTAS DE GASTOS DIARIOS con esta tarjeta</b> " + pieza("tot", "Total " + money(t.diario) + " =") + " " +
         pieza("ok", "✔ Ya en el estado de cuenta " + money(t.diarioContemplado) + " (" + t.notasContempladas.length + ")") + " + " +
         pieza("acc", "? No aparece en el estado " + money(t.soloDiario) + " (" + r.soloDiario.length + ")") + " + " +
+        pieza("mut", "⏳ Se cobra más adelante " + money(t.diferido) + " (" + r.diferidas.length + ")") + " + " +
         pieza("mut", "⊘ No es un gasto " + money(t.ignorado) + " (" + r.ignoradas.length + ")") + "</div>" +
       (avisos.length ? "<p class=\"hint\">ℹ " + escapeHtml(avisos.join(" · ")) + "</p>" : "");
     var btnCobro = document.getElementById("concVerCobro");
@@ -5948,6 +5975,19 @@
       bs.push(concBotonHtml("Anotar en Gastos Diarios…", "anotar-diario", {cargo: c.cargo.id}));
       return concFilaHtml(concLadoHtml("conc-estado", tc.principal, c.cargo.monto, tc.secundario), concVacioHtml("— no tienes una nota en Gastos Diarios para este cargo —"), "", "", bs);
     }).join("");
+    // -- compras con cobro diferido (estan en el PDF, la primera cuota se cobra mas adelante)
+    filas = r.diferidas.map(function(d){
+      var c = d.compra, pm = /^(\d{4})-(\d{2})$/.exec(c.primerCobro || "");
+      var primer = pm ? MESES_ES[Number(pm[2])].toLowerCase() + " " + pm[1] : "más adelante";
+      var sec = "Compra con cobro diferido en el PDF · " + c.cuotasTotales + " cuotas de ~" + money(c.montoTotal / Math.max(c.cuotasTotales, 1)) +
+        " · primer cobro: " + primer + (c.montoOperacion && Math.abs(c.montoOperacion - c.montoTotal) > 0.5 ? " · monto de la operación " + money(c.montoOperacion) : "");
+      var tn = concTextoNota(d.nota);
+      return concFilaHtml(concLadoHtml("conc-estado", concFechaCorta(c.fecha) + "  " + c.descripcion, c.montoTotal, sec),
+        concLadoHtml("conc-nota", tn.principal, d.nota.monto, tn.secundario), "⏳ Se cobra desde " + primer, "mut", []);
+    }).join("");
+    html += concSeccionHtml("diferidas", "⏳ Está en el estado de cuenta, pero se empieza a cobrar más adelante", r.diferidas.length + " · " + money(t.diferido), "mut",
+      "Compras que el PDF ya trae con «00/03» o similar: se compraron, pero la primera cuota se cobra en un mes posterior. Tu nota está bien; cuando llegue ese estado de cuenta aparecerá la cuota 1.",
+      r.diferidas.length, filas, "");
     html += concSeccionHtml("conciliados", "✔ Ya conciliado — listo, no hay que hacer nada", conciliados.length + " · cargo " + money(sumaCargos(conciliados)), "ok",
       "Cada cargo ya quedó unido a su nota. Ábrelo solo si quieres revisar o desvincular alguno.", conciliados.length, conciliados.map(filaPar).join(""), "");
     html += concSeccionHtml("nodiario", "▪ No se anota a diario — cuotas de meses anteriores, impuestos, intereses, avances", r.noDiario.length + " · " + money(t.noDiario), "mut",
@@ -9593,6 +9633,7 @@
             abonos: dbAll("SELECT uid, persona, anio, mes, fecha, monto, nota FROM abonos ORDER BY uid"),
             abonos_borrados: dbAll("SELECT uid, borrado_en FROM abonos_borrados ORDER BY uid"),
             deudas_acumuladas: dbAll("SELECT persona, meses, actualizado_en FROM deudas_acumuladas ORDER BY persona"),
+            compras_diferidas: dbAll("SELECT tarjeta, anio, mes, fecha, descripcion, monto_operacion, monto_total, cuotas_totales, primer_cobro FROM compras_diferidas ORDER BY tarjeta, anio, mes, fecha"),
             estados_pagados: dbAll("SELECT persona, anio, mes, pagado, actualizado_en FROM estados_pagados ORDER BY persona, anio, mes")
               .map(function(r){ return {persona: r.persona, anio: r.anio, mes: r.mes, pagado: !!r.pagado, actualizado_en: r.actualizado_en}; })};
   }
@@ -9942,6 +9983,13 @@
         });
 
         if(opciones.espejoEscritorio && limpiarCargosDelEscritorioQueSobran(data.gastos) > 0) huboCambios = true;
+        // compras con cobro diferido del PDF (las carga el escritorio): solo se agregan
+        (data.compras_diferidas || []).forEach(function(c){
+          if(!c || !c.tarjeta || !c.anio || !c.mes || !c.fecha || !c.descripcion) return;
+          db.run("INSERT OR IGNORE INTO compras_diferidas (tarjeta, anio, mes, fecha, descripcion, monto_operacion, monto_total, cuotas_totales, primer_cobro) VALUES (?,?,?,?,?,?,?,?,?)",
+            [c.tarjeta, Number(c.anio), Number(c.mes), c.fecha, c.descripcion, c.monto_operacion === undefined ? null : c.monto_operacion, Number(c.monto_total), Number(c.cuotas_totales), c.primer_cobro || ""]);
+          if(db.getRowsModified() > 0) huboCambios = true;
+        });
         // estados de cuenta "pagado / no pagado": gana lo mas reciente
         (data.estados_pagados || []).forEach(function(e){
           if(!e || !e.persona || !e.anio || !e.mes) return;
