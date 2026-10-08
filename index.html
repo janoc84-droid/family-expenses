@@ -1436,6 +1436,9 @@
     dbRef.run("CREATE TABLE IF NOT EXISTS abonos (id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT NOT NULL UNIQUE, persona TEXT NOT NULL, " +
               "anio INTEGER NOT NULL, mes INTEGER NOT NULL, fecha TEXT NOT NULL, monto REAL NOT NULL, nota TEXT NOT NULL DEFAULT '')");
     dbRef.run("CREATE TABLE IF NOT EXISTS abonos_borrados (uid TEXT PRIMARY KEY, borrado_en TEXT NOT NULL)");
+    // ¿la persona ya pago ese estado de cuenta? (boton "Pagado / No pagado", 08-10-2026, igual que el escritorio)
+    dbRef.run("CREATE TABLE IF NOT EXISTS estados_pagados (persona TEXT NOT NULL COLLATE NOCASE, anio INTEGER NOT NULL, mes INTEGER NOT NULL, " +
+              "pagado INTEGER NOT NULL DEFAULT 0, actualizado_en TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY (persona, anio, mes))");
     // cuenta de deuda de una persona: que meses la forman (08-10-2026, igual que el escritorio)
     dbRef.run("CREATE TABLE IF NOT EXISTS deudas_acumuladas (persona TEXT PRIMARY KEY COLLATE NOCASE, meses TEXT NOT NULL DEFAULT '', " +
               "actualizado_en TEXT NOT NULL DEFAULT (datetime('now')))");
@@ -2598,6 +2601,24 @@
   }
   // Cuenta de deuda (08-10-2026): la forman los meses que el usuario elige; los abonos a la deuda van SIN mes
   // (abonos con anio=0, mes=0) y se aplican solos desde el mes mas antiguo.
+  // Pagado / No pagado de un estado de cuenta (una marca por persona y mes; gana el cambio mas reciente al sincronizar)
+  function ecEstadoPagado(persona, anio, mes){
+    var f = dbGet("SELECT pagado, actualizado_en FROM estados_pagados WHERE persona=? COLLATE NOCASE AND anio=? AND mes=?", [persona, anio, mes]);
+    return f ? {pagado: !!f.pagado, cuando: f.actualizado_en} : {pagado: false, cuando: null};
+  }
+  function ecMarcarPagado(persona, anio, mes, pagado){
+    dbRun("INSERT INTO estados_pagados (persona, anio, mes, pagado, actualizado_en) VALUES (?,?,?,?,?) " +
+          "ON CONFLICT(persona, anio, mes) DO UPDATE SET pagado=excluded.pagado, actualizado_en=excluded.actualizado_en",
+          [persona, anio, mes, pagado ? 1 : 0, new Date().toISOString().slice(0, 19).replace("T", " ")]);
+  }
+  function ecBotonPagadoHtml(estado, abonado, queda){
+    var p = ecEstadoPagado(estado.nombre, estado.anio, estado.mes);
+    var dia = p.cuando ? " el " + String(p.cuando).slice(0, 10).split("-").reverse().join("/") : "";
+    var extra = abonado > 0.5 ? (queda > 1 ? " · abonado " + escapeHtml(money(abonado)) + ", queda " + escapeHtml(money(queda)) : " · los abonos ya lo cubren") : "";
+    return "<div style=\"display:flex;justify-content:flex-end;margin-top:12px;\"><button type=\"button\" id=\"ecBtnPagado\" style=\"padding:9px 16px;font-weight:700;border-radius:10px;cursor:pointer;" +
+      (p.pagado ? "background:var(--ok);color:#0a1a12;border:none;\">✔ PAGADO" + dia + " &nbsp;(clic: no pagado)"
+                : "background:transparent;color:var(--bad);border:2px solid var(--bad);\">✘ NO PAGADO" + extra + " &nbsp;(clic: marcar pagado)") + "</button></div>";
+  }
   function deudaMeses(persona){
     var f = dbGet("SELECT meses FROM deudas_acumuladas WHERE persona=? COLLATE NOCASE", [persona]);
     var vistos = {}, out = [];
@@ -2859,7 +2880,8 @@
         (abonadoEc ? " · abonos: -" + money(abonadoEc) : "") +
         (incluidos + abonadoEc ? " · Subtotal combinado: " + money(incluidos + abonadoEc) : "") + ".</p>" : "") +
       renderTablaEstadoCuenta(itemsFiltrados, mensajeVacio) +
-      (ajustes.length ? "<h3 style=\"font-size:.85rem;color:var(--text-dim);margin:14px 0 8px;\">Ajustes y abonos</h3>" + renderFilasAjusteEc(ajustes, true) : "");
+      (ajustes.length ? "<h3 style=\"font-size:.85rem;color:var(--text-dim);margin:14px 0 8px;\">Ajustes y abonos</h3>" + renderFilasAjusteEc(ajustes, true) : "") +
+      ecBotonPagadoHtml(estado, abonadoEc, totalMostrado);
     cont.querySelectorAll("[data-ec-vertexto]").forEach(function(b){
       b.addEventListener("click", function(){
         var it = buscarItemEc(Number(b.dataset.ecVertexto));
@@ -2882,6 +2904,16 @@
       b.addEventListener("click", function(){ quitarAjusteEc(Number(b.dataset.quitarAjuste)); });
     });
     cont.querySelectorAll("[data-ver-deuda]").forEach(function(b){ b.addEventListener("click", abrirDeudaEc); });
+    var btnPagado = document.getElementById("ecBtnPagado");
+    if(btnPagado) btnPagado.addEventListener("click", function(){
+      var yaPagado = ecEstadoPagado(estado.nombre, estado.anio, estado.mes).pagado;
+      // si hay abonos y todavia queda plata, se pregunta antes de marcarlo pagado (08-10-2026)
+      if(!yaPagado && abonadoEc > 0.5 && totalMostrado > 1 &&
+         !confirm("Este estado de cuenta tiene abonos por " + money(abonadoEc) + " y todavía le quedan " + money(totalMostrado) +
+                  " por pagar.\n\n¿Lo marcas igual como PAGADO?\n(Los abonos no cambian: solo queda la marca de pagado.)")) return;
+      ecMarcarPagado(estado.nombre, estado.anio, estado.mes, !yaPagado);
+      renderEstadoCuenta();
+    });
     cont.querySelectorAll("[data-quitar-abono]").forEach(function(b){
       b.addEventListener("click", function(){ quitarAbonoEc(b.dataset.quitarAbono); });
     });
@@ -4009,7 +4041,8 @@
         var a = p.estado.anio, m = p.estado.mes, base = ecPaqueteDe(persona, a, m, true).info.totalMostrado;
         var proy = p.items.length && p.items.every(function(it){ return it.proyectado; });
         return "<label style=\"display:flex;gap:8px;padding:3px 0;" + (proy ? "opacity:.65;" : "") + "\"><input type=\"checkbox\" data-deuda-mes=\"" + a + "-" + m + "\"" +
-          (esSel(a, m) ? " checked" : "") + "> " + escapeHtml(MESES_ES[m] + " " + a) + " — " + money(base) + (proy ? " (⏳ proyectado)" : "") + "</label>";
+          (esSel(a, m) ? " checked" : "") + "> " + escapeHtml(MESES_ES[m] + " " + a) + " — " + money(base) +
+          (ecEstadoPagado(persona, a, m).pagado ? " <span style=\"color:var(--ok)\">✔ marcado pagado</span>" : "") + (proy ? " (⏳ proyectado)" : "") + "</label>";
       }).join("") + "</div>" +
       "<h3 style=\"font-size:.95rem;margin:10px 0 4px;\">2. Anotar un abono</h3>" +
       "<div class=\"form-grid\"><div class=\"field small\"><label>Monto</label><input type=\"number\" id=\"deudaMonto\" min=\"1\" step=\"1\" placeholder=\"ej. 50000\"></div>" +
@@ -4172,6 +4205,7 @@
         return "<label style=\"display:flex; gap:8px; align-items:center; padding:5px 0;" + (proy ? " opacity:.65;" : "") + "\">" +
           "<input type=\"checkbox\" data-ec-pdf-mes=\"" + i + "\"" + (marcado ? " checked" : "") + "> " +
           escapeHtml(MESES_ES[p.estado.mes] + " " + p.estado.anio) + " — " + escapeHtml(money(p.info.totalMostrado)) +
+          (ecEstadoPagado(estado.nombre, p.estado.anio, p.estado.mes).pagado ? " <span style=\"color:var(--ok)\">✔ pagado</span>" : "") +
           (proy ? " <span class=\"hint\">(⏳ proyectado, todavía no llega el PDF)</span>" : "") + "</label>";
       }).join("") + "</div><p id=\"ecPdfTotal\" style=\"margin:10px 0 0;\"></p>" +
       "<div class=\"form-actions\"><button type=\"button\" class=\"btn-primary\" id=\"ecPdfGenerar\">Generar PDF</button>" +
@@ -9466,7 +9500,9 @@
             periodos_tarjeta: dbAll("SELECT anio, mes, tarjeta, desde, hasta FROM periodos_tarjeta ORDER BY anio, mes, tarjeta"),
             abonos: dbAll("SELECT uid, persona, anio, mes, fecha, monto, nota FROM abonos ORDER BY uid"),
             abonos_borrados: dbAll("SELECT uid, borrado_en FROM abonos_borrados ORDER BY uid"),
-            deudas_acumuladas: dbAll("SELECT persona, meses, actualizado_en FROM deudas_acumuladas ORDER BY persona")};
+            deudas_acumuladas: dbAll("SELECT persona, meses, actualizado_en FROM deudas_acumuladas ORDER BY persona"),
+            estados_pagados: dbAll("SELECT persona, anio, mes, pagado, actualizado_en FROM estados_pagados ORDER BY persona, anio, mes")
+              .map(function(r){ return {persona: r.persona, anio: r.anio, mes: r.mes, pagado: !!r.pagado, actualizado_en: r.actualizado_en}; })};
   }
 
   // ---- publicar el estado local en la carpeta ----
@@ -9814,6 +9850,15 @@
         });
 
         if(opciones.espejoEscritorio && limpiarCargosDelEscritorioQueSobran(data.gastos) > 0) huboCambios = true;
+        // estados de cuenta "pagado / no pagado": gana lo mas reciente
+        (data.estados_pagados || []).forEach(function(e){
+          if(!e || !e.persona || !e.anio || !e.mes) return;
+          var pag = e.pagado ? 1 : 0, ts = String(e.actualizado_en || "");
+          var local = dbGet("SELECT pagado, actualizado_en FROM estados_pagados WHERE persona=? COLLATE NOCASE AND anio=? AND mes=?", [e.persona, e.anio, e.mes]);
+          if(local && (local.actualizado_en >= ts || Number(local.pagado) === pag)) return;
+          db.run("INSERT OR REPLACE INTO estados_pagados (persona, anio, mes, pagado, actualizado_en) VALUES (?,?,?,?,?)", [e.persona, Number(e.anio), Number(e.mes), pag, ts]);
+          huboCambios = true;
+        });
         // que meses forman la cuenta de deuda de cada persona: gana lo mas reciente
         (data.deudas_acumuladas || []).forEach(function(d){
           if(!d || !d.persona) return;
