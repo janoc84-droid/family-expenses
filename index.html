@@ -6000,12 +6000,12 @@
     // -- compras con cobro diferido (estan en el PDF, la primera cuota se cobra mas adelante)
     filas = r.diferidas.map(function(d){
       var c = d.compra, pm = /^(\d{4})-(\d{2})$/.exec(c.primerCobro || "");
-      var primer = pm ? MESES_ES[Number(pm[2])].toLowerCase() + " " + pm[1] : "más adelante";
+      var primer = pm ? MESES_ES[Number(pm[2])].toLowerCase() + " " + pm[1] : "un mes posterior";
       var sec = "Compra con cobro diferido en el PDF · " + c.cuotasTotales + " cuotas de ~" + money(c.montoTotal / Math.max(c.cuotasTotales, 1)) +
-        " · primer cobro: " + primer + (c.montoOperacion && Math.abs(c.montoOperacion - c.montoTotal) > 0.5 ? " · monto de la operación " + money(c.montoOperacion) : "");
+        " · 1ª cuota en el estado de cuenta de " + primer + (c.montoOperacion && Math.abs(c.montoOperacion - c.montoTotal) > 0.5 ? " · monto de la operación " + money(c.montoOperacion) : "");
       var tn = concTextoNota(d.nota);
       return concFilaHtml(concLadoHtml("conc-estado", concFechaCorta(c.fecha) + "  " + c.descripcion, c.montoTotal, sec),
-        concLadoHtml("conc-nota", tn.principal, d.nota.monto, tn.secundario), "⏳ Se cobra desde " + primer, "mut", []);
+        concLadoHtml("conc-nota", tn.principal, d.nota.monto, tn.secundario), "⏳ 1ª cuota en el estado de " + primer, "mut", []);
     }).join("");
     html += concSeccionHtml("diferidas", "⏳ Está en el estado de cuenta, pero se empieza a cobrar más adelante", r.diferidas.length + " · " + money(t.diferido), "mut",
       "Compras que el PDF ya trae con «00/03» o similar: se compraron, pero la primera cuota se cobra en un mes posterior. Tu nota está bien; cuando llegue ese estado de cuenta aparecerá la cuota 1.",
