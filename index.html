@@ -3012,6 +3012,28 @@
                       inicio: proySumarMeses(meses[0][0], meses[0][1], -c.actual), termina: meses[meses.length - 1]});
       });
     });
+    // compras con cobro DIFERIDO del ultimo PDF ("00/03 nov-2026"): se proyectan desde su primer cobro (09-10-2026)
+    PROY_TARJETAS.forEach(function(t){
+      var b = bases[t[1]]; if(!b) return;
+      var clave = t[1] === "Líder" ? "LIDER" : "CMR";
+      dbAll("SELECT id, fecha, descripcion, monto_total, cuotas_totales, primer_cobro FROM compras_diferidas WHERE tarjeta=? AND anio=? AND mes=? ORDER BY fecha, id", [clave, b[0], b[1]])
+        .forEach(function(f){
+          var pm = /^(\d{4})-(\d{2})$/.exec(f.primer_cobro || ""), primer = pm ? [Number(pm[1]), Number(pm[2])] : proySumarMeses(b[0], b[1], 1);
+          if(proyClave(primer) <= proyClave(b)) return;
+          var n = Number(f.cuotas_totales), valor = Math.round(Number(f.monto_total) / Math.max(n, 1) * 100) / 100, meses = [];
+          for(var k = 0; k < n; k++) meses.push(proySumarMeses(primer[0], primer[1], k));
+          var ref = primer[0] + "-" + String(primer[1]).padStart(2, "0") + "-15", nombre = f.descripcion, reparto = {};
+          var nota = dbGet("SELECT id, detalle, monto FROM gastos_diarios WHERE cuotas_totales=? AND cuota_actual=1 AND ABS(monto-?) <= MAX(2, ?*0.03) " +
+            "AND fecha BETWEEN date(?, '-45 days') AND date(?, '+45 days') ORDER BY ABS(julianday(fecha)-julianday(?)) LIMIT 1", [n, valor, valor, ref, ref, ref]);
+          if(nota){
+            nombre = nota.detalle + " · " + f.descripcion;
+            var factor = nota.monto ? valor / nota.monto : 1;
+            dbAll("SELECT persona, monto FROM gasto_diario_persona WHERE gasto_diario_id=?", [nota.id]).forEach(function(r){ reparto[r.persona] = Math.round(Number(r.monto) * factor * 100) / 100; });
+          }
+          compras.push({tarjeta: t[1], detalle: nombre + " (cobro diferido)", valor: valor, actual: 0, total: n, meses: meses, reparto: reparto,
+                        inicio: meses[0], termina: meses[meses.length - 1]});
+        });
+    });
     var claves = Object.keys(bases).map(function(k){ return bases[k]; });
     var lista = [];
     if(claves.length){
@@ -6920,9 +6942,31 @@
     document.getElementById("gdMensaje").hidden = true;
   }
 
+  // Validaciones contra errores de tipeo (09-10-2026, pedido del usuario: "siempre validaciones, evitar el error humano")
+  function gdDiasDesdeHoy(fechaIso){
+    var h = new Date(), hoy = Date.UTC(h.getFullYear(), h.getMonth(), h.getDate());
+    var f = /^(\d{4})-(\d{2})-(\d{2})$/.exec(fechaIso); if(!f) return 0;
+    return Math.round((Date.UTC(+f[1], +f[2] - 1, +f[3]) - hoy) / 86400000);
+  }
+  function gdErrorDeFecha(fechaIso){
+    var anio = Number(String(fechaIso).slice(0, 4)), dias = gdDiasDesdeHoy(fechaIso);
+    if(anio < new Date().getFullYear() - 1 || dias > 400)
+      return "La fecha " + fechaIso.split("-").reverse().join("/") + " parece un error de tipeo (está muy lejos de hoy). Revísala.";
+    return null;
+  }
+  function gdPreguntaDeFecha(fechaIso){
+    var dias = gdDiasDesdeHoy(fechaIso), f = fechaIso.split("-").reverse().join("/");
+    if(dias > 3) return "La fecha " + f + " es FUTURA (" + dias + " días después de hoy).\n\n¿Está bien? (Si la compra fue hoy o antes, elige Cancelar y corrígela.)";
+    if(-dias > 90) return "La fecha " + f + " es de hace " + (-dias) + " días.\n\n¿Está bien? (Si fue un error al escribir el mes o el año, elige Cancelar y corrígela.)";
+    return null;
+  }
   function guardarGastoDiario(){
     var fecha = document.getElementById("gdFecha").value;
     if(!fecha){ mostrarMensajeGD("Elige una fecha.", "bad"); return; }
+    var errorFecha = gdErrorDeFecha(fecha);
+    if(errorFecha){ mostrarMensajeGD(errorFecha, "bad"); return; }
+    var preguntaFecha = editingGastoDiarioId ? null : gdPreguntaDeFecha(fecha);
+    if(preguntaFecha && !window.confirm(preguntaFecha)) return;
     var detalle = document.getElementById("gdDetalle").value.trim();
     if(!detalle){ mostrarMensajeGD("Escribe un detalle (ej. Café, Colación).", "bad"); return; }
     var categoriaNombre = document.getElementById("gdCategoria").value.trim();
@@ -6936,6 +6980,11 @@
 
     var idAntes = editingGastoDiarioId;
     if(!idAntes && cuotas > 1){
+      // confirmar ANTES de guardar: el Monto es el TOTAL de la compra (el error tipico: escribir el valor de UNA cuota)
+      var hasta = new Date(fecha + "T00:00:00"); hasta.setMonth(hasta.getMonth() + cuotas - 1);
+      if(!window.confirm("Compra de " + money(monto) + " en " + cuotas + " cuotas de " + money(monto / cuotas) + ", una por mes desde " +
+          fecha.slice(5, 7) + "/" + fecha.slice(0, 4) + " hasta " + String(hasta.getMonth() + 1).padStart(2, "0") + "/" + hasta.getFullYear() +
+          ".\n\nOjo: el Monto es el TOTAL de la compra. Si " + money(monto) + " es el valor de UNA cuota, elige Cancelar y escribe el total.\n\n¿Está correcto?")) return;
       var igualesCuotas = dupCompraCuotasIgual(detalle, monto, cuotas);
       if(igualesCuotas.length && !dupPreguntar("Esta compra en cuotas ya estaba cargada (desde " + igualesCuotas[0].fecha + ")", igualesCuotas.length, fecha, detalle, monto)) return;
     }else if(!idAntes){
