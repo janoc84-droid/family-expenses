@@ -1318,6 +1318,8 @@
     "  PRIMARY KEY (gasto_id, gasto_diario_id)",
     ");",
     "CREATE INDEX IF NOT EXISTS idx_conciliacion_diario_nota ON conciliacion_diario(gasto_diario_id);",
+    // revision de cargos repetidos al abrir (09-10-2026): sin este indice recorria la tabla entera por cada fila
+    "CREATE INDEX IF NOT EXISTS idx_gastos_firma ON gastos(fecha, detalle, monto_total);",
     // la MISMA compra anotada en varias notas (07-10-2026, igual que el escritorio): la principal en conciliacion_diario,
     // las demas aca, colgando del mismo cargo
     "CREATE TABLE IF NOT EXISTS conciliacion_notas_extra (",
