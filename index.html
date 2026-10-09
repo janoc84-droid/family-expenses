@@ -1033,6 +1033,7 @@
         <div class="field small"><label>Mes</label><select id="concMes"></select></div>
         <div class="field small"><label>Año</label><select id="concAnio"></select></div>
       </div>
+      <div id="concCierre" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:4px 0 8px;"></div>
       <div id="concResumen"></div>
       <div id="concCuerpo"></div>
     </div>
@@ -1477,6 +1478,30 @@
       "CREATE TRIGGER IF NOT EXISTS trg_reparto_manual_borrado AFTER DELETE ON gasto_persona WHEN " + NO_SYNC +
         " BEGIN UPDATE gastos SET actualizado_en = " + AHORA + " WHERE id = OLD.gasto_id AND UPPER(origen) = 'MANUAL'; END;"
     ].forEach(function(sql){ dbRef.run(sql); });
+
+    // Cerrar mes (09-10-2026, igual que el escritorio): un mes cerrado no deja cambiar sus montos ni repartos; lo
+    // bloquea la propia base. Lo que llega por sincronizacion SI entra (el escritorio manda: la web lo refleja).
+    dbRef.run("CREATE TABLE IF NOT EXISTS meses_cerrados (anio INTEGER NOT NULL, mes INTEGER NOT NULL, cerrado INTEGER NOT NULL DEFAULT 1, " +
+              "actualizado_en TEXT NOT NULL, PRIMARY KEY (anio, mes))");
+    var ERROR_CERRADO = "SELECT RAISE(ABORT, '" + MENSAJE_MES_CERRADO.replace(/'/g, "''") + "')";
+    function cerradoAM(a, m){ return "EXISTS (SELECT 1 FROM meses_cerrados mc WHERE mc.anio = " + a + " AND mc.mes = " + m + " AND mc.cerrado = 1)"; }
+    function cerradoG(gid){ return "EXISTS (SELECT 1 FROM gastos g JOIN meses_cerrados mc ON mc.anio = g.anio AND mc.mes = g.mes AND mc.cerrado = 1 WHERE g.id = " + gid + ")"; }
+    var PLATA = "(NEW.valor_cuota IS NOT OLD.valor_cuota OR NEW.monto_total IS NOT OLD.monto_total OR NEW.anio IS NOT OLD.anio OR NEW.mes IS NOT OLD.mes " +
+                "OR NEW.origen IS NOT OLD.origen OR NEW.proyectado IS NOT OLD.proyectado)";
+    var REPARTO = "(NEW.monto IS NOT OLD.monto OR NEW.persona_id IS NOT OLD.persona_id OR NEW.gasto_id IS NOT OLD.gasto_id)";
+    [
+      ["trg_cierre_gasto_nuevo", "BEFORE INSERT ON gastos WHEN " + NO_SYNC + " AND " + cerradoAM("NEW.anio", "NEW.mes")],
+      ["trg_cierre_gasto_borrado", "BEFORE DELETE ON gastos WHEN " + NO_SYNC + " AND " + cerradoAM("OLD.anio", "OLD.mes")],
+      ["trg_cierre_gasto_editado", "BEFORE UPDATE ON gastos WHEN " + NO_SYNC + " AND " + PLATA + " AND (" + cerradoAM("OLD.anio", "OLD.mes") +
+        " OR " + cerradoAM("NEW.anio", "NEW.mes") + ")"],
+      ["trg_cierre_reparto_nuevo", "BEFORE INSERT ON gasto_persona WHEN " + NO_SYNC + " AND " + cerradoG("NEW.gasto_id")],
+      ["trg_cierre_reparto_borrado", "BEFORE DELETE ON gasto_persona WHEN " + NO_SYNC + " AND " + cerradoG("OLD.gasto_id")],
+      ["trg_cierre_reparto_editado", "BEFORE UPDATE ON gasto_persona WHEN " + NO_SYNC + " AND " + REPARTO + " AND (" + cerradoG("OLD.gasto_id") +
+        " OR " + cerradoG("NEW.gasto_id") + ")"]
+    ].forEach(function(t){
+      dbRef.run("DROP TRIGGER IF EXISTS " + t[0]);
+      dbRef.run("CREATE TRIGGER " + t[0] + " " + t[1] + " BEGIN " + ERROR_CERRADO + "; END");
+    });
   }
 
   // ---------------------------------------------------------------- utiles
@@ -1567,7 +1592,7 @@
   function mostrarErrorFatal(msg){
     var banner = document.getElementById("fatalBanner");
     var text = document.getElementById("fatalBannerText");
-    text.textContent = "⚠ Ocurrió un problema: " + msg;
+    text.textContent = (String(msg).indexOf("Mes cerrado") === 0 ? "" : "⚠ Ocurrió un problema: ") + msg;
     banner.hidden = false;
     try{ console.error(msg); }catch(e){}
   }
@@ -5901,6 +5926,86 @@
     document.getElementById("concCobroCerrar").addEventListener("click", cerrarModal);
   }
 
+  // Cerrar mes (09-10-2026, igual que el escritorio, ver cierre_mes_service.py): revisa que todo cuadre y bloquea los
+  // montos y repartos del mes (en la propia base). Abonos, pagado, notas y categorias siguen funcionando.
+  var MENSAJE_MES_CERRADO = "Mes cerrado 🔒: este mes ya se revisó y se cerró, así que no se pueden cambiar sus montos ni " +
+    "repartos. Si de verdad hay que corregir algo, primero ábrelo con el botón «Reabrir mes» de la pestaña Conciliación.";
+  function mesCerradoInfo(anio, mes){
+    return dbGet("SELECT actualizado_en FROM meses_cerrados WHERE anio=? AND mes=? AND cerrado=1", [anio, mes]);
+  }
+  function revisarCierreMes(anio, mes){
+    var r = {bien: [], avisos: [], bloqueos: []};
+    var cargados = dbGet("SELECT COUNT(*) AS n FROM gastos WHERE anio=? AND mes=? AND COALESCE(proyectado,0)=0", [anio, mes]).n;
+    if(!cargados){ r.bloqueos.push(MESES_ES[mes] + " " + anio + " todavía no está cargado."); return r; }
+    var proy = dbGet("SELECT COUNT(*) AS n FROM gastos WHERE anio=? AND mes=? AND COALESCE(proyectado,0)=1", [anio, mes]).n;
+    if(proy) r.bloqueos.push("Tiene " + proy + " cuota(s) PROYECTADAS (calculadas, no del banco): falta cargar el estado de cuenta (PDF) de este mes.");
+    ["CMR", "LIDER"].forEach(function(t){
+      var c = concCuadreCobro(anio, mes, t);
+      if(!c || c.proyectado) return;
+      var nombre = CONC_ETIQUETA_TARJETA[t];
+      if(c.cuadrado) r.bien.push(nombre + ": todo lo del estado de cuenta (" + c.nCargos + " cargos, " + money(c.totalEstado) + ") quedó cobrado a alguien.");
+      else{
+        var det = [];
+        if(c.faltaCobrar) det.push("falta cobrar " + money(c.faltaCobrar));
+        if(c.cobradoDeMas) det.push("se cobra de más " + money(c.cobradoDeMas));
+        r.bloqueos.push(nombre + ": " + c.descuadrados.length + " cargo(s) no cuadran (" + det.join(", ") + ").");
+      }
+      var v = concCalcular(anio, mes, t);
+      if(!v.hayEstado) return;
+      var pend = [];
+      if(v.resultado.faltoAnotar.length) pend.push(v.resultado.faltoAnotar.length + " cargo(s) sin nota en Gastos Diarios (" + money(v.totales.faltoAnotar) + ")");
+      if(v.resultado.soloDiario.length) pend.push(v.resultado.soloDiario.length + " nota(s) que no aparecen en el estado de cuenta (" + money(v.totales.soloDiario) + ")");
+      if(v.totales.paresSinConfirmar.length) pend.push(v.totales.paresSinConfirmar.length + " par(es) propuesto(s) sin confirmar");
+      if(pend.length) r.avisos.push("Conciliación " + nombre + ": " + pend.join(" · ") + ".");
+      else r.bien.push("Conciliación " + nombre + ": todo revisado.");
+    });
+    return r;
+  }
+  function concGuardarCierre(anio, mes, cerrado){
+    dbRun("INSERT OR REPLACE INTO meses_cerrados (anio, mes, cerrado, actualizado_en) VALUES (?,?,?,?)",
+          [anio, mes, cerrado ? 1 : 0, new Date().toISOString().slice(0, 23).replace("T", " ")]);
+  }
+  function concDibujarCierre(anio, mes){
+    var el = document.getElementById("concCierre");
+    if(!el) return;
+    var info = mesCerradoInfo(anio, mes);
+    if(info){
+      el.innerHTML = "<b style=\"color:var(--ok)\">🔒 " + MESES_ES[mes] + " " + anio + " cerrado el " +
+        escapeHtml(String(info.actualizado_en).slice(0, 10).split("-").reverse().join("-")) + "</b>" +
+        "<button type=\"button\" class=\"btn-ghost\" id=\"concBtnCierre\">🔓 Reabrir mes</button>";
+      document.getElementById("concBtnCierre").addEventListener("click", function(){
+        var motivo = window.prompt("Al reabrir " + MESES_ES[mes] + " " + anio + " se pueden volver a cambiar sus montos y repartos.\n\n¿Qué hay que corregir?", "");
+        if(motivo === null) return;
+        concGuardarCierre(anio, mes, false);
+        renderConciliacion();
+      });
+    }else{
+      el.innerHTML = "<button type=\"button\" id=\"concBtnCierre\">🔒 Cerrar mes</button>";
+      document.getElementById("concBtnCierre").addEventListener("click", function(){ concDialogoCierre(anio, mes); });
+    }
+  }
+  function concDialogoCierre(anio, mes){
+    var r = revisarCierreMes(anio, mes);
+    function lista(marca, color, textos){
+      return textos.map(function(t){ return "<p style=\"margin:4px 0;color:" + color + "\">" + marca + " " + escapeHtml(t) + "</p>"; }).join("");
+    }
+    var pie = r.bloqueos.length ? "<p style=\"color:var(--alert,#e5484d)\"><b>Corrige lo marcado con ✖ y vuelve a intentar.</b></p>"
+            : (r.avisos.length ? "<p style=\"color:var(--warn)\"><b>Hay avisos ⚠: si ya los revisaste, puedes cerrar igual.</b></p>"
+            : "<p style=\"color:var(--ok)\"><b>Todo está en orden.</b></p>");
+    abrirModal("<h2>Cerrar " + MESES_ES[mes] + " " + anio + "</h2><p class=\"hint\">Al cerrar, los montos y repartos de este mes quedan BLOQUEADOS: " +
+      "nadie los puede cambiar por error. Abonos, «pagado», notas y categorías siguen funcionando. Si después hay que corregir algo, se puede reabrir.</p>" +
+      lista("✖", "var(--alert,#e5484d)", r.bloqueos) + lista("⚠", "var(--warn)", r.avisos) + lista("✔", "var(--ok)", r.bien) + pie +
+      "<div class=\"form-actions\">" + (r.bloqueos.length ? "" : "<button type=\"button\" id=\"concCierreSi\">🔒 Cerrar mes</button>") +
+      "<button type=\"button\" class=\"btn-ghost\" id=\"concCierreNo\">" + (r.bloqueos.length ? "Entendido" : "Cancelar") + "</button></div>");
+    document.getElementById("concCierreNo").addEventListener("click", cerrarModal);
+    var si = document.getElementById("concCierreSi");
+    if(si) si.addEventListener("click", function(){
+      concGuardarCierre(anio, mes, true);
+      cerrarModal();
+      renderConciliacion();
+    });
+  }
+
   function renderConciliacion(){
     var cont = document.getElementById("concCuerpo"), resEl = document.getElementById("concResumen");
     if(!cont || !db) return;
@@ -5908,6 +6013,7 @@
     var tarjeta = document.getElementById("concTarjeta").value || "CMR";
     var anio = Number(document.getElementById("concAnio").value), mes = Number(document.getElementById("concMes").value);
     if(!anio || !mes){ cont.innerHTML = ""; resEl.innerHTML = ""; return; }
+    concDibujarCierre(anio, mes);
     var vista = concCalcular(anio, mes, tarjeta);
     concUltimo = vista;
     if(!vista.hayEstado){
@@ -9686,7 +9792,9 @@
             deudas_acumuladas: dbAll("SELECT persona, meses, actualizado_en FROM deudas_acumuladas ORDER BY persona"),
             compras_diferidas: dbAll("SELECT tarjeta, anio, mes, fecha, descripcion, monto_operacion, monto_total, cuotas_totales, primer_cobro FROM compras_diferidas ORDER BY tarjeta, anio, mes, fecha"),
             estados_pagados: dbAll("SELECT persona, anio, mes, pagado, actualizado_en FROM estados_pagados ORDER BY persona, anio, mes")
-              .map(function(r){ return {persona: r.persona, anio: r.anio, mes: r.mes, pagado: !!r.pagado, actualizado_en: r.actualizado_en}; })};
+              .map(function(r){ return {persona: r.persona, anio: r.anio, mes: r.mes, pagado: !!r.pagado, actualizado_en: r.actualizado_en}; }),
+            meses_cerrados: dbAll("SELECT anio, mes, cerrado, actualizado_en FROM meses_cerrados ORDER BY anio, mes")
+              .map(function(r){ return {anio: r.anio, mes: r.mes, cerrado: !!r.cerrado, actualizado_en: r.actualizado_en}; })};
   }
 
   // ---- publicar el estado local en la carpeta ----
@@ -10040,6 +10148,15 @@
           db.run("INSERT OR IGNORE INTO compras_diferidas (tarjeta, anio, mes, fecha, descripcion, monto_operacion, monto_total, cuotas_totales, primer_cobro) VALUES (?,?,?,?,?,?,?,?,?)",
             [c.tarjeta, Number(c.anio), Number(c.mes), c.fecha, c.descripcion, c.monto_operacion === undefined ? null : c.monto_operacion, Number(c.monto_total), Number(c.cuotas_totales), c.primer_cobro || ""]);
           if(db.getRowsModified() > 0) huboCambios = true;
+        });
+        // meses cerrados / reabiertos: gana lo mas reciente
+        (data.meses_cerrados || []).forEach(function(m){
+          if(!m || !m.anio || !m.mes || !m.actualizado_en) return;
+          var cer = m.cerrado ? 1 : 0, ts = String(m.actualizado_en);
+          var local = dbGet("SELECT cerrado, actualizado_en FROM meses_cerrados WHERE anio=? AND mes=?", [Number(m.anio), Number(m.mes)]);
+          if(local && (local.actualizado_en >= ts || Number(local.cerrado) === cer)) return;
+          db.run("INSERT OR REPLACE INTO meses_cerrados (anio, mes, cerrado, actualizado_en) VALUES (?,?,?,?)", [Number(m.anio), Number(m.mes), cer, ts]);
+          huboCambios = true;
         });
         // estados de cuenta "pagado / no pagado": gana lo mas reciente
         (data.estados_pagados || []).forEach(function(e){
