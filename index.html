@@ -200,6 +200,12 @@
   .tab-btn.active{ background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
   /* colores por grupo (igual que el escritorio): la pestana abierta en un tono mas claro y con borde */
   .tab-btn.grupo-diario{ background:#1d5e3c; border-color:#1d5e3c; color:#fff; }
+  .tab-btn.grupo-inicio{ background:#7a5a12; border-color:#7a5a12; color:#fff; }
+  .tab-btn.grupo-inicio.active{ background:#c9952a; border-color:#fff; }
+  .ini-meses{ display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:8px; margin:6px 0; }
+  .ini-mes{ border:2px solid #3a3a3c; border-radius:10px; padding:8px 10px; cursor:pointer; background:var(--surface-2); }
+  .ini-mes b{ display:block; } .ini-mes .e{ font-weight:600; } .ini-mes .d{ font-size:.75rem; color:var(--text-dim); }
+  .ini-rec{ margin:3px 0; }
   .tab-btn.grupo-carga{ background:#5b3b7a; border-color:#5b3b7a; color:#fff; }
   .tab-btn.grupo-analisis{ background:#1b4c78; border-color:#1b4c78; color:#fff; }
   .tab-btn.grupo-diario.active{ background:#2fa866; border-color:#fff; }
@@ -595,6 +601,7 @@
       <span class="grupo-diario">Diario</span><span class="grupo-carga">Carga del mes</span><span class="grupo-analisis">Análisis y seguimiento</span>
     </div>
     <nav class="tabs" id="tabsNav">
+      <button class="tab-btn grupo-inicio" type="button" data-tab="inicio">Inicio</button>
       <button class="tab-btn grupo-diario" type="button" data-tab="gastosdiarios">Gastos Diarios</button>
       <button class="tab-btn grupo-diario" type="button" data-tab="paneldiario">Panel Diario</button>
       <button class="tab-btn grupo-carga" type="button" data-tab="cargarmes">Cargar mes</button>
@@ -612,6 +619,16 @@
 <main class="wrap">
 
   <!-- ======================= CARGAR MES ======================= -->
+  <!-- ======================= INICIO (10-10-2026, igual que el escritorio) ======================= -->
+  <section id="tab-inicio" class="tabpanel" hidden>
+    <div class="card">
+      <h2>Inicio</h2>
+      <p class="hint" id="iniHoy"></p>
+      <div class="form-grid"><div class="field small"><label>Año</label><select id="iniAnio"></select></div></div>
+      <div id="iniCuerpo"></div>
+    </div>
+  </section>
+
   <section id="tab-cargarmes" class="tabpanel" hidden>
     <div class="card">
       <h2>Cargar mes</h2>
@@ -1878,7 +1895,7 @@
 
   // ---------------------------------------------------------------- pestanas
 
-  var TAB_IDS = ["cargarmes","ingreso","resumen","estadocuenta","categorizar","gastosdiarios","paneldiario","checklist","conciliacion","proyectado"];
+  var TAB_IDS = ["inicio","cargarmes","ingreso","resumen","estadocuenta","categorizar","gastosdiarios","paneldiario","checklist","conciliacion","proyectado"];
   function activarTab(id){
     if(TAB_IDS.indexOf(id) === -1) id = "ingreso";
     document.querySelectorAll(".tabpanel").forEach(function(p){ p.hidden = (p.id !== "tab-" + id); });
@@ -1893,6 +1910,7 @@
     if(id==="paneldiario") renderPanelDiario();
     if(id==="conciliacion") renderConciliacion();
     if(id==="proyectado") renderProyectado();
+    if(id==="inicio") renderInicio();
   }
   document.querySelectorAll(".tab-btn").forEach(function(btn){
     btn.addEventListener("click", function(){ activarTab(btn.dataset.tab); });
@@ -6003,6 +6021,138 @@
       concGuardarCierre(anio, mes, true);
       cerrarModal();
       renderConciliacion();
+    });
+  }
+
+  // ---------------------------------------------------------------- Inicio (10-10-2026, igual que el escritorio:
+  // services/inicio_service.py). Mes M = estado de cuenta que cierra en M y se paga el 10 de M+1.
+  var INI_ESTADOS = {
+    CERRADO: ["🔒", "Cerrado", "var(--ok)"], LISTO: ["✔", "Listo para cerrar", "var(--accent)"],
+    PROBLEMAS: ["⚠", "Revisar", "var(--warn)"], FALTA_PDF: ["📄", "Falta cargar el PDF", "#9a6bd1"],
+    EN_CURSO: ["⏳", "En curso", "var(--text-dim)"], SIN_DATOS: ["—", "Sin datos", "var(--text-dim)"]
+  };
+  function iniHoyIso(){ return todayISO(); }
+  function iniFecha(iso){ return String(iso).slice(0, 10).split("-").reverse().join("-"); }
+  function iniDias(desdeIso, hastaIso){ return Math.round((Date.parse(hastaIso + "T00:00:00Z") - Date.parse(desdeIso + "T00:00:00Z")) / 86400000); }
+  function iniUltimoMes(tarjeta){
+    var sql = tarjeta ? CONC_ORIGENES_SQL[tarjeta] : "('IMPORTADO_PDF','CMR_PDF','LIDER')";
+    var f = dbGet("SELECT anio, mes FROM gastos WHERE COALESCE(proyectado,0)=0 AND UPPER(origen) IN " + sql + " ORDER BY anio DESC, mes DESC LIMIT 1");
+    return f ? [Number(f.anio), Number(f.mes)] : null;
+  }
+  function iniEstadoMes(anio, mes, hoy){
+    var info = mesCerradoInfo(anio, mes);
+    if(info) return {anio: anio, mes: mes, estado: "CERRADO", detalle: "Cerrado el " + iniFecha(info.actualizado_en)};
+    var corte = perPeriodo("CMR", anio, mes)[1];
+    if(hoy <= corte) return {anio: anio, mes: mes, estado: "EN_CURSO", detalle: "El estado de cuenta cierra el " + iniFecha(corte)};
+    var n = dbGet("SELECT COUNT(*) AS n, SUM(CASE WHEN COALESCE(proyectado,0)=1 THEN 1 ELSE 0 END) AS p FROM gastos WHERE anio=? AND mes=?", [anio, mes]);
+    if(!n.n) return {anio: anio, mes: mes, estado: "SIN_DATOS", detalle: "No hay nada cargado"};
+    var r = revisarCierreMes(anio, mes);
+    if(!r.bloqueos.length) return {anio: anio, mes: mes, estado: "LISTO", detalle: ""};
+    if(Number(n.p) > 0 || Number(n.p) === Number(n.n)) return {anio: anio, mes: mes, estado: "FALTA_PDF", detalle: r.bloqueos[0]};
+    return {anio: anio, mes: mes, estado: "PROBLEMAS", detalle: r.bloqueos[0]};
+  }
+  function iniCobros(anio, mes){
+    var personas = dbAll("SELECT DISTINCT p.nombre AS nombre FROM gasto_persona gp JOIN personas p ON p.id=gp.persona_id JOIN gastos g ON g.id=gp.gasto_id " +
+                         "WHERE g.anio=? AND g.mes=? UNION SELECT DISTINCT persona AS nombre FROM abonos WHERE anio=? AND mes=?", [anio, mes, anio, mes]);
+    var out = personas.map(function(p){
+      var paq = ecPaqueteDe(p.nombre, anio, mes, false);
+      var abonado = -paq.info.ajustes.filter(function(a){ return a.es_abono; }).reduce(function(s, a){ return s + Number(a.monto); }, 0);
+      return {persona: p.nombre, total: Math.round(paq.info.totalMostrado * 100) / 100, abonado: abonado,
+              pagado: ecEstadoPagado(p.nombre, anio, mes).pagado};
+    });
+    out.sort(function(a, b){ return (a.pagado - b.pagado) || (Math.abs(b.total) - Math.abs(a.total)) || a.persona.localeCompare(b.persona); });
+    return out;
+  }
+  function iniRecordatorios(hoy, ultimo, meses, cobros){
+    var r = [];
+    if(ultimo){
+      var ps = perMesSig(ultimo[0], ultimo[1]);
+      var pago = ps[0] + "-" + String(ps[1]).padStart(2, "0") + "-10", dias = iniDias(hoy, pago);
+      if(dias >= 0){
+        var pend = cobros.filter(function(c){ return !c.pagado && c.total > 1; });
+        var extra = pend.length ? " · " + pend.length + " persona(s) todavía no pagan (" + money(pend.reduce(function(s, c){ return s + c.total; }, 0)) + ")"
+                                : " · todas las personas ya pagaron";
+        r.push([dias <= 3 && pend.length ? "warn" : "info", "💳 El estado de " + MESES_ES[ultimo[1]] + " " + ultimo[0] + " se paga el " + iniFecha(pago) + ": " +
+          (dias === 0 ? "es HOY" : (dias === 1 ? "es mañana" : "faltan " + dias + " días")) + extra + "."]);
+      }
+    }
+    ["CMR", "LIDER"].forEach(function(t){
+      var u = iniUltimoMes(t);
+      if(!u) return;
+      var n = perMesSig(u[0], u[1]), corte = perPeriodo(t, n[0], n[1])[1];
+      if(hoy > corte) r.push(["info", "📄 " + CONC_ETIQUETA_TARJETA[t] + ": el estado de " + MESES_ES[n[1]] + " " + n[0] + " ya cerró (el " + iniFecha(corte) + "). Cuando lo tengas, cárgalo."]);
+      else r.push(["ok", "📄 " + CONC_ETIQUETA_TARJETA[t] + ": el estado de " + MESES_ES[n[1]] + " " + n[0] + " cierra el " + iniFecha(corte) + " (faltan " + iniDias(hoy, corte) + " días)."]);
+    });
+    meses.filter(function(e){ return e.estado === "PROBLEMAS"; }).slice(0, 4).forEach(function(e){
+      r.push(["warn", "⚠ " + MESES_ES[e.mes] + " " + e.anio + ": " + e.detalle]);
+    });
+    var listos = meses.filter(function(e){ return e.estado === "LISTO"; });
+    if(listos.length) r.push(["ok", "✔ Ya se pueden cerrar: " + listos.map(function(e){ return MESES_ES[e.mes]; }).join(", ") + " (Conciliación → «🔒 Cerrar mes»)."]);
+    return r;
+  }
+  function renderInicio(){
+    var cuerpo = document.getElementById("iniCuerpo"), selAnio = document.getElementById("iniAnio");
+    if(!cuerpo || !db) return;
+    var hoy = iniHoyIso(), anioHoy = Number(hoy.slice(0, 4));
+    if(!selAnio.options.length){
+      var anios = dbAll("SELECT DISTINCT anio FROM gastos ORDER BY anio DESC").map(function(r){ return Number(r.anio); });
+      if(anios.indexOf(anioHoy) === -1) anios.unshift(anioHoy);
+      selAnio.innerHTML = anios.map(function(a){ return "<option value=\"" + a + "\">" + a + "</option>"; }).join("");
+      selAnio.value = String(anioHoy);
+      selAnio.addEventListener("change", renderInicio);
+    }
+    var anio = Number(selAnio.value) || anioHoy;
+    var dias = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"], d = new Date();
+    document.getElementById("iniHoy").textContent = "Hoy es " + dias[d.getDay()] + " " + d.getDate() + " de " + MESES_ES[d.getMonth() + 1].toLowerCase() + " de " + d.getFullYear();
+    var meses = [];
+    for(var m = 1; m <= 12; m++) meses.push(iniEstadoMes(anio, m, hoy));
+    var ultimo = iniUltimoMes(null), cobros = ultimo ? iniCobros(ultimo[0], ultimo[1]) : [];
+    var todos = anio === anioHoy ? meses : (function(){ var x = []; for(var k = 1; k <= 12; k++) x.push(iniEstadoMes(anioHoy, k, hoy)); return x; })();
+    var colores = {ok: "var(--ok)", info: "var(--text)", warn: "var(--warn)"};
+    var h = "<h3>Qué hay que hacer</h3>" + iniRecordatorios(hoy, ultimo, todos, cobros).map(function(x){
+      return "<p class=\"ini-rec\" style=\"color:" + colores[x[0]] + "\">" + escapeHtml(x[1]) + "</p>"; }).join("");
+    h += "<h3>Meses de " + anio + " <span class=\"hint\">· toca un mes para revisarlo en Conciliación</span></h3><div class=\"ini-meses\">" +
+      meses.map(function(e){
+        var est = INI_ESTADOS[e.estado];
+        return "<div class=\"ini-mes\" data-anio=\"" + e.anio + "\" data-mes=\"" + e.mes + "\" style=\"border-color:" + est[2] + "\"><b>" + MESES_ES[e.mes] + "</b>" +
+          "<span class=\"e\" style=\"color:" + est[2] + "\">" + est[0] + " " + est[1] + "</span><div class=\"d\">" + escapeHtml(e.detalle) + "</div></div>";
+      }).join("") + "</div>";
+    if(ultimo){
+      var ps = perMesSig(ultimo[0], ultimo[1]), pendiente = 0, pagado = 0;
+      h += "<h3>Cobro de " + MESES_ES[ultimo[1]] + " " + ultimo[0] + " · se paga el 10-" + String(ps[1]).padStart(2, "0") + "-" + ps[0] + "</h3>" +
+        "<div class=\"table-wrap\"><table class=\"data-table\"><thead><tr><th>Persona</th><th>Le toca pagar</th><th>Abonó</th><th>Estado</th><th></th></tr></thead><tbody>" +
+        cobros.map(function(c){
+          var est;
+          if(c.pagado){ est = "<span style=\"color:var(--ok)\">✔ Pagado</span>"; pagado += Math.max(c.total, 0); }
+          else if(c.total < -1) est = "<span style=\"color:var(--accent)\">A favor " + money(-c.total) + "</span>";
+          else if(c.total <= 1) est = "<span style=\"color:var(--ok)\">✔ Nada pendiente</span>";
+          else{ est = "<span style=\"color:var(--warn)\">⏳ Pendiente</span>"; pendiente += c.total; }
+          return "<tr><td>" + escapeHtml(c.persona) + "</td><td class=\"money\">" + money(c.total) + "</td><td class=\"money\">" + (c.abonado ? money(c.abonado) : "—") +
+            "</td><td>" + est + "</td><td><button type=\"button\" class=\"btn-ghost ini-ver\" data-persona=\"" + escapeHtml(c.persona) + "\" style=\"padding:3px 10px;\">Ver</button></td></tr>";
+        }).join("") + "</tbody></table></div><p>Por cobrar: <b>" + money(pendiente) + "</b> · ya pagado: <b>" + money(pagado) + "</b></p>";
+    }
+    var desde = hoy.slice(0, 8) + "01", pa = perMesAnt(anioHoy, Number(hoy.slice(5, 7)));
+    var dm = dbGet("SELECT COALESCE(SUM(monto),0) AS t, COUNT(*) AS n FROM gastos_diarios WHERE fecha >= ? AND fecha <= ?", [desde, hoy]);
+    var da = dbGet("SELECT COALESCE(SUM(monto),0) AS t FROM gastos_diarios WHERE fecha >= ? AND fecha < ?", [pa[0] + "-" + String(pa[1]).padStart(2, "0") + "-01", desde]);
+    h += "<h3>Gastos Diarios</h3><p><b style=\"font-size:1.2rem\">" + MESES_ES[Number(hoy.slice(5, 7))] + " (hasta hoy): " + money(dm.t) + "</b> · " + dm.n +
+      " nota(s) · " + MESES_ES[pa[1]] + " completo: " + money(da.t) + "</p>";
+    cuerpo.innerHTML = h;
+    cuerpo.querySelectorAll(".ini-mes").forEach(function(el){
+      el.addEventListener("click", function(){
+        concPeriodoInicialListo = true;
+        document.getElementById("concAnio").value = el.dataset.anio;
+        document.getElementById("concMes").value = el.dataset.mes;
+        activarTab("conciliacion");
+      });
+    });
+    cuerpo.querySelectorAll(".ini-ver").forEach(function(b){
+      b.addEventListener("click", function(){
+        activarTab("estadocuenta");
+        var set = function(id, v){ var e = document.getElementById(id); if(!e) return; e.value = v; e.dispatchEvent(new Event("change", {bubbles: true})); };
+        set("ecAnio", String(ultimo[0])); set("ecMes", String(ultimo[1]));
+        var p = document.getElementById("ecPersona"); p.value = b.dataset.persona; p.dispatchEvent(new Event("input", {bubbles: true}));
+        renderEstadoCuenta();
+      });
     });
   }
 
