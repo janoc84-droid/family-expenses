@@ -229,6 +229,7 @@
 
   main{ padding-top:6px; }
   .tabpanel[hidden]{ display:none; }
+  #recordatorioPago[hidden]{ display:none !important; }
 
   /* ---------------- tarjetas ---------------- */
   .card{
@@ -564,6 +565,11 @@
   </div>
 </div>
 
+<div id="recordatorioPago" hidden style="background:#3a2a10;color:#f5a623;padding:8px 12px;font-size:.85rem;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+  <span id="recordatorioPagoTexto" style="flex:1 1 240px;"></span>
+  <button type="button" id="recordatorioPagoVer" class="btn-ghost" style="padding:3px 10px;">Ver en Inicio</button>
+  <button type="button" id="recordatorioPagoOcultar" class="btn-ghost" style="padding:3px 10px;">Ocultar hoy</button>
+</div>
 <div id="fatalBanner" hidden role="alert">
   <span id="fatalBannerText"></span>
   <button type="button" id="fatalBannerClose">Cerrar</button>
@@ -935,6 +941,11 @@
       <div class="sec-head-row" style="margin-bottom:8px;">
         <input type="text" id="gdBuscar" placeholder="Buscar por nombre, monto o fecha (ej. Café, 2500, 05/09)" style="flex:1 1 220px; margin:0;">
         <button type="button" class="btn-ghost cov-filtro-btn" id="gdSinAsignarBtn">Sin asignar</button>
+        <select id="gdOrden" style="flex:0 1 210px; margin:0;" title="Ordenar la lista">
+          <option value="fecha_desc">Fecha: recientes primero</option><option value="fecha_asc">Fecha: antiguas primero</option>
+          <option value="monto_desc">Monto: mayor primero</option><option value="monto_asc">Monto: menor primero</option>
+          <option value="nombre">Nombre: A → Z</option><option value="categoria">Categoría: A → Z</option>
+        </select>
       </div>
       <div class="cov-filtros" id="gdFiltroTarjeta" style="flex-wrap:wrap; margin-bottom:10px;" hidden></div>
       <div id="gdLista"></div>
@@ -2824,8 +2835,36 @@
     };
   }
 
+  // orden de la tabla del Estado de Cuenta (10-10-2026, igual que el escritorio): clic en el titulo de la columna
+  var ecOrden = {clave: "fecha", asc: true};
+  try{ var _eo = JSON.parse(localStorage.getItem("gf_ecOrden") || "null"); if(_eo && _eo.clave) ecOrden = _eo; }catch(e){}
+  function ecValorOrden(it, clave){
+    if(clave === "monto") return Number(it.monto) || 0;
+    if(clave === "cuota") return cuotaEstado(it.cuota) ? 0 : 1;
+    if(clave === "detalle") return String(it.detalleMostrado || it.detalle || "").toLocaleLowerCase("es");
+    if(clave === "empresa") return String(it.empresa || "").toLocaleLowerCase("es");
+    return String(it.fecha || "");
+  }
+  function ecTh(clave, titulo){
+    var activo = ecOrden.clave === clave;
+    return "<th data-ec-orden=\"" + clave + "\" style=\"cursor:pointer;" + (activo ? "color:var(--accent);" : "") + "\" title=\"Ordenar por esta columna\">" +
+      titulo + (activo ? (ecOrden.asc ? " ▲" : " ▼") : "") + "</th>";
+  }
+  document.addEventListener("click", function(ev){
+    var th = ev.target && ev.target.closest ? ev.target.closest("[data-ec-orden]") : null;
+    if(!th) return;
+    var clave = th.getAttribute("data-ec-orden");
+    ecOrden = ecOrden.clave === clave ? {clave: clave, asc: !ecOrden.asc} : {clave: clave, asc: true};
+    try{ localStorage.setItem("gf_ecOrden", JSON.stringify(ecOrden)); }catch(e){}
+    renderEstadoCuenta();
+  });
   function renderTablaEstadoCuenta(items, mensajeVacio){
     if(items.length === 0) return "<p class=\"hint\">" + escapeHtml(mensajeVacio || "Sin movimientos.") + "</p>";
+    items = items.slice().sort(function(a, b){
+      var x = ecValorOrden(a, ecOrden.clave), y = ecValorOrden(b, ecOrden.clave);
+      var r = typeof x === "number" ? x - y : String(x).localeCompare(String(y), "es");
+      return ecOrden.asc ? r : -r;
+    });
     var filas = items.map(function(it){
       return "<tr" + (it.proyectado ? " class=\"ec-proyectada\" title=\"Cuota proyectada: todavía no llega el PDF de este mes\"" : "") + "><td>" + it.fecha + "</td><td>" +
         (it.proyectado ? "⏳ " : "") + escapeHtml(it.detalleMostrado || it.detalle) + "</td><td>" + escapeHtml(it.empresa||"") +
@@ -2838,7 +2877,8 @@
           "<button type=\"button\" class=\"icon-btn danger\" data-ec-eliminar=\"" + it.gastoId + "\" title=\"Eliminar\">✕</button>" +
         "</div></td></tr>";
     }).join("");
-    return "<div class=\"table-wrap\"><table class=\"data-table\"><thead><tr><th>Fecha</th><th>Detalle</th><th>Empresa</th><th>Cuota</th><th>Monto</th><th></th></tr></thead><tbody>" +
+    return "<div class=\"table-wrap\"><table class=\"data-table\"><thead><tr>" + ecTh("fecha", "Fecha") + ecTh("detalle", "Detalle") +
+      ecTh("empresa", "Empresa") + ecTh("cuota", "Cuota") + ecTh("monto", "Monto") + "<th></th></tr></thead><tbody>" +
       filas + "</tbody></table></div>";
   }
 
@@ -6031,6 +6071,9 @@
     PROBLEMAS: ["⚠", "Revisar", "var(--warn)"], FALTA_PDF: ["📄", "Falta cargar el PDF", "#9a6bd1"],
     EN_CURSO: ["⏳", "En curso", "var(--text-dim)"], SIN_DATOS: ["—", "Sin datos", "var(--text-dim)"]
   };
+  // titular de TODAS las tarjetas (usuario, 10-10-2026): paga el banco y reparte; su parte no se le cobra a nadie
+  var TITULAR = "Alejandro";
+  function esTitular(n){ return String(n || "").trim().toLowerCase() === TITULAR.toLowerCase(); }
   function iniHoyIso(){ return todayISO(); }
   function iniFecha(iso){ return String(iso).slice(0, 10).split("-").reverse().join("-"); }
   function iniDias(desdeIso, hastaIso){ return Math.round((Date.parse(hastaIso + "T00:00:00Z") - Date.parse(desdeIso + "T00:00:00Z")) / 86400000); }
@@ -6058,9 +6101,9 @@
       var paq = ecPaqueteDe(p.nombre, anio, mes, false);
       var abonado = -paq.info.ajustes.filter(function(a){ return a.es_abono; }).reduce(function(s, a){ return s + Number(a.monto); }, 0);
       return {persona: p.nombre, total: Math.round(paq.info.totalMostrado * 100) / 100, abonado: abonado,
-              pagado: ecEstadoPagado(p.nombre, anio, mes).pagado};
+              pagado: ecEstadoPagado(p.nombre, anio, mes).pagado, titular: esTitular(p.nombre)};
     });
-    out.sort(function(a, b){ return (a.pagado - b.pagado) || (Math.abs(b.total) - Math.abs(a.total)) || a.persona.localeCompare(b.persona); });
+    out.sort(function(a, b){ return (a.titular - b.titular) || (a.pagado - b.pagado) || (Math.abs(b.total) - Math.abs(a.total)) || a.persona.localeCompare(b.persona); });
     return out;
   }
   function iniRecordatorios(hoy, ultimo, meses, cobros){
@@ -6069,7 +6112,7 @@
       var ps = perMesSig(ultimo[0], ultimo[1]);
       var pago = ps[0] + "-" + String(ps[1]).padStart(2, "0") + "-10", dias = iniDias(hoy, pago);
       if(dias >= 0){
-        var pend = cobros.filter(function(c){ return !c.pagado && c.total > 1; });
+        var pend = cobros.filter(function(c){ return !c.pagado && !c.titular && c.total > 1; });
         var extra = pend.length ? " · " + pend.length + " persona(s) todavía no pagan (" + money(pend.reduce(function(s, c){ return s + c.total; }, 0)) + ")"
                                 : " · todas las personas ya pagaron";
         r.push([dias <= 3 && pend.length ? "warn" : "info", "💳 El estado de " + MESES_ES[ultimo[1]] + " " + ultimo[0] + " se paga el " + iniFecha(pago) + ": " +
@@ -6090,6 +6133,39 @@
     if(listos.length) r.push(["ok", "✔ Ya se pueden cerrar: " + listos.map(function(e){ return MESES_ES[e.mes]; }).join(", ") + " (Conciliación → «🔒 Cerrar mes»)."]);
     return r;
   }
+  // Recordatorio de pago (10-10-2026, igual que el escritorio): del dia 5 al 10, quienes todavia no pagan el ultimo
+  // estado de cuenta (sin el titular). "Ocultar hoy" lo esconde hasta mañana.
+  function textoRecordatorioPago(hoy){
+    var dia = Number(hoy.slice(8, 10));
+    if(dia < 5 || dia > 10) return null;
+    var u = iniUltimoMes(null);
+    if(!u) return null;
+    var s = perMesSig(u[0], u[1]);
+    if(s[0] !== Number(hoy.slice(0, 4)) || s[1] !== Number(hoy.slice(5, 7))) return null;
+    var pend = iniCobros(u[0], u[1]).filter(function(c){ return !c.pagado && !c.titular && c.total > 1; });
+    if(!pend.length) return null;
+    var dias = 10 - dia;
+    var cuando = dias === 0 ? "HOY se paga" : (dias === 1 ? "Mañana se paga" : "Faltan " + dias + " días para pagar");
+    return "💳 " + cuando + " la tarjeta (estado de " + MESES_ES[u[1]] + ", el 10-" + hoy.slice(5, 7) + "): todavía no pagan " +
+      pend.slice(0, 6).map(function(c){ return c.persona + " (" + money(c.total) + ")"; }).join(", ") +
+      (pend.length > 6 ? " y " + (pend.length - 6) + " más" : "") + ".";
+  }
+  function mostrarRecordatorioPago(){
+    var el = document.getElementById("recordatorioPago");
+    if(!el || !db) return;
+    var hoy = iniHoyIso(), oculto = null;
+    try{ oculto = localStorage.getItem("gf_recordatorioOculto"); }catch(e){}
+    var texto = oculto === hoy ? null : textoRecordatorioPago(hoy);
+    el.hidden = !texto;
+    if(!texto) return;
+    document.getElementById("recordatorioPagoTexto").textContent = texto;
+    document.getElementById("recordatorioPagoVer").onclick = function(){ activarTab("inicio"); };
+    document.getElementById("recordatorioPagoOcultar").onclick = function(){
+      try{ localStorage.setItem("gf_recordatorioOculto", hoy); }catch(e){}
+      el.hidden = true;
+    };
+  }
+
   function renderInicio(){
     var cuerpo = document.getElementById("iniCuerpo"), selAnio = document.getElementById("iniAnio");
     if(!cuerpo || !db) return;
@@ -6118,18 +6194,20 @@
           "<span class=\"e\" style=\"color:" + est[2] + "\">" + est[0] + " " + est[1] + "</span><div class=\"d\">" + escapeHtml(e.detalle) + "</div></div>";
       }).join("") + "</div>";
     if(ultimo){
-      var ps = perMesSig(ultimo[0], ultimo[1]), pendiente = 0, pagado = 0;
+      var ps = perMesSig(ultimo[0], ultimo[1]), pendiente = 0, pagado = 0, propia = 0;
       h += "<h3>Cobro de " + MESES_ES[ultimo[1]] + " " + ultimo[0] + " · se paga el 10-" + String(ps[1]).padStart(2, "0") + "-" + ps[0] + "</h3>" +
         "<div class=\"table-wrap\"><table class=\"data-table\"><thead><tr><th>Persona</th><th>Le toca pagar</th><th>Abonó</th><th>Estado</th><th></th></tr></thead><tbody>" +
         cobros.map(function(c){
           var est;
-          if(c.pagado){ est = "<span style=\"color:var(--ok)\">✔ Pagado</span>"; pagado += Math.max(c.total, 0); }
+          if(c.titular){ est = "<span style=\"color:var(--text-dim)\">Titular: paga él</span>"; propia += c.total; }
+          else if(c.pagado){ est = "<span style=\"color:var(--ok)\">✔ Pagado</span>"; pagado += Math.max(c.total, 0); }
           else if(c.total < -1) est = "<span style=\"color:var(--accent)\">A favor " + money(-c.total) + "</span>";
           else if(c.total <= 1) est = "<span style=\"color:var(--ok)\">✔ Nada pendiente</span>";
           else{ est = "<span style=\"color:var(--warn)\">⏳ Pendiente</span>"; pendiente += c.total; }
           return "<tr><td>" + escapeHtml(c.persona) + "</td><td class=\"money\">" + money(c.total) + "</td><td class=\"money\">" + (c.abonado ? money(c.abonado) : "—") +
             "</td><td>" + est + "</td><td><button type=\"button\" class=\"btn-ghost ini-ver\" data-persona=\"" + escapeHtml(c.persona) + "\" style=\"padding:3px 10px;\">Ver</button></td></tr>";
-        }).join("") + "</tbody></table></div><p>Por cobrar: <b>" + money(pendiente) + "</b> · ya pagado: <b>" + money(pagado) + "</b></p>";
+        }).join("") + "</tbody></table></div><p>Por cobrar: <b>" + money(pendiente) + "</b> · ya pagado: <b>" + money(pagado) + "</b>" +
+        (propia ? " · parte de " + TITULAR + " (titular): <b>" + money(propia) + "</b>" : "") + "</p>";
     }
     var desde = hoy.slice(0, 8) + "01", pa = perMesAnt(anioHoy, Number(hoy.slice(5, 7)));
     var dm = dbGet("SELECT COALESCE(SUM(monto),0) AS t, COUNT(*) AS n FROM gastos_diarios WHERE fecha >= ? AND fecha <= ?", [desde, hoy]);
@@ -7389,6 +7467,30 @@
     });
   }
 
+  // orden de la lista de Gastos Diarios (10-10-2026): se recuerda en este navegador
+  function gdOrdenar(filas, orden){
+    function txt(v){ return String(v || "").toLocaleLowerCase("es"); }
+    var cmp = {
+      fecha_desc: function(a, b){ return a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : b.id - a.id; },
+      fecha_asc: function(a, b){ return a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : a.id - b.id; },
+      monto_desc: function(a, b){ return Number(b.monto) - Number(a.monto); },
+      monto_asc: function(a, b){ return Number(a.monto) - Number(b.monto); },
+      nombre: function(a, b){ return txt(a.detalle).localeCompare(txt(b.detalle), "es"); },
+      categoria: function(a, b){ return txt(a.categoria).localeCompare(txt(b.categoria), "es") || (a.fecha < b.fecha ? 1 : -1); }
+    }[orden] || null;
+    return cmp ? filas.slice().sort(cmp) : filas;
+  }
+  (function(){
+    var sel = document.getElementById("gdOrden");
+    if(!sel) return;
+    try{ var g = localStorage.getItem("gf_gdOrden"); if(g) sel.value = g; }catch(e){}
+    if(!sel.value) sel.value = "fecha_desc";
+    sel.addEventListener("change", function(){
+      try{ localStorage.setItem("gf_gdOrden", sel.value); }catch(e){}
+      renderListaGastosDiarios();
+    });
+  })();
+
   function renderListaGastosDiarios(){
     var anio = Number(document.getElementById("gdAnio").value);
     var mes = Number(document.getElementById("gdMes").value);
@@ -7430,6 +7532,7 @@
       filas = filas.filter(function(f){ return gdClaveTarjeta(f) === gdFiltroTarjeta; });
     }
     var hayFiltro = !!busqueda || gdSoloSinAsignar || gdFiltroTarjeta !== null;
+    filas = gdOrdenar(filas, document.getElementById("gdOrden").value);
 
     var cont = document.getElementById("gdLista");
     if(filas.length === 0){
@@ -10854,6 +10957,7 @@
   // comprobador de cobertura / reconciliacion de PDF para poder probarlas
   // desde headless sin simular un PDF real ni clicks de archivo.
   window.__gfPruebaDebug = {
+    textoRecordatorioPago: textoRecordatorioPago, mostrarRecordatorioPago: mostrarRecordatorioPago,
     dbAll: dbAll,
     dbGet: dbGet,
     dbRun: dbRun,
@@ -10969,6 +11073,7 @@
     // es para lo que mas se usa la web (anotar gastos del dia desde el
     // celular). Despues recuerda la ultima pestana usada, como siempre.
     activarTab(lastTab || "gastosdiarios");
+    try{ mostrarRecordatorioPago(); }catch(e){ console.error(e); }
 
     document.getElementById("appLoading").hidden = true;
 
