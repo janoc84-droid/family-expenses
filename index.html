@@ -1455,6 +1455,9 @@
     [["uid", "TEXT"], ["actualizado_en", "TEXT"], ["uid_heredado", "INTEGER NOT NULL DEFAULT 0"]].forEach(function(c){
       if(!tieneColumna("gastos_diarios", c[0])) dbRef.run("ALTER TABLE gastos_diarios ADD COLUMN " + c[0] + " " + c[1]);
     });
+    // fecha REAL de compra en las cuotas (19-10-2026, igual que el escritorio): como las apps de Falabella y Lider, la
+    // fecha de compra no cambia, solo avanza la cuota. La llena el escritorio; las compras nuevas de aca, al crearlas.
+    if(!tieneColumna("gastos_diarios", "fecha_compra")) dbRef.run("ALTER TABLE gastos_diarios ADD COLUMN fecha_compra TEXT");
     var sinUid = dbRef.exec("SELECT id, created_at FROM gastos_diarios WHERE uid IS NULL");
     if(sinUid.length){
       sinUid[0].values.forEach(function(v){
@@ -6990,8 +6993,8 @@
       plan.forEach(function(c){
         var d = new Date(c.fecha + "T00:00:00");
         db.run(
-          "INSERT INTO gastos_diarios (anio, mes, fecha, detalle, categoria_id, monto, prescindible, medio_pago, tipo_tarjeta, banco_tarjeta, monto_total, cuota_texto, cuota_actual, cuotas_totales, grupo_cuota_id, uid, actualizado_en) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-          [d.getFullYear(), d.getMonth() + 1, c.fecha, detalle, categoriaId, c.monto, prescindible ? 1 : 0, medioPago || null, tipoTarjeta || null, bancoTarjeta || null, montoTotal, c.cuotaTexto, c.cuotaActual, c.cuotasTotales, grupoCuotaId, gdNuevoUid(), gdAhora()]
+          "INSERT INTO gastos_diarios (anio, mes, fecha, detalle, categoria_id, monto, prescindible, medio_pago, tipo_tarjeta, banco_tarjeta, monto_total, cuota_texto, cuota_actual, cuotas_totales, grupo_cuota_id, uid, actualizado_en, fecha_compra) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          [d.getFullYear(), d.getMonth() + 1, c.fecha, detalle, categoriaId, c.monto, prescindible ? 1 : 0, medioPago || null, tipoTarjeta || null, bancoTarjeta || null, montoTotal, c.cuotaTexto, c.cuotaActual, c.cuotasTotales, grupoCuotaId, gdNuevoUid(), gdAhora(), fecha]
         );
         var nuevoId = lastId();
         if(primerId === null){ primerId = nuevoId; grupoCuotaId = nuevoId; }
@@ -7205,6 +7208,16 @@
     return lastId();
   }
 
+  // corrige la FECHA DE COMPRA de todas las cuotas de una compra (19-10-2026, igual que el escritorio): la cuota N queda
+  // N-1 meses despues de la compra
+  function gdCambiarFechaCompraGrupo(grupoId, fechaCompra){
+    dbAll("SELECT id, cuota_actual FROM gastos_diarios WHERE grupo_cuota_id=?", [grupoId]).forEach(function(r){
+      var f = sumarMeses(fechaCompra, Math.max(1, Number(r.cuota_actual) || 1) - 1);
+      db.run("UPDATE gastos_diarios SET fecha_compra=?, fecha=?, anio=?, mes=?, actualizado_en=? WHERE id=?",
+        [fechaCompra, f, Number(f.slice(0, 4)), Number(f.slice(5, 7)), gdAhora(), r.id]);
+    });
+    scheduleSave();
+  }
   function actualizarGastoDiario(id, fecha, detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta){
     var d = new Date(fecha + "T00:00:00");
     var anio = d.getFullYear();
@@ -7337,7 +7350,14 @@
       }
     }
     if(idAntes){
-      actualizarGastoDiario(idAntes, fecha, detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta);
+      var antes = dbGet("SELECT fecha, fecha_compra, grupo_cuota_id, cuotas_totales, detalle FROM gastos_diarios WHERE id=?", [idAntes]);
+      var esCuota = antes && antes.cuotas_totales > 1 && antes.grupo_cuota_id;
+      var compraAntes = antes ? (antes.fecha_compra || antes.fecha) : fecha;
+      if(esCuota && fecha !== compraAntes && !window.confirm("La fecha de compra pasa del " + compraAntes.split("-").reverse().join("/") + " al " +
+          fecha.split("-").reverse().join("/") + " en las " + antes.cuotas_totales + " cuotas de «" + antes.detalle +
+          "», y cada cuota se mueve al mes que le corresponde.\n\n¿Continuar?")) return;
+      actualizarGastoDiario(idAntes, esCuota ? antes.fecha : fecha, detalle, categoriaNombre, monto, prescindible, medioPago, tipoTarjeta, bancoTarjeta);
+      if(esCuota && fecha !== compraAntes) gdCambiarFechaCompraGrupo(antes.grupo_cuota_id, fecha);
     }else if(cuotas > 1){
       if(monto <= 0){ mostrarMensajeGD("El monto en cuotas debe ser mayor que 0.", "bad"); return; }
       insertarGastoDiarioConCuotas(fecha, detalle, categoriaNombre, monto, cuotas, prescindible, medioPago, tipoTarjeta, bancoTarjeta);
@@ -7366,7 +7386,7 @@
     var g = dbGet("SELECT * FROM gastos_diarios WHERE id=?", [id]);
     if(!g) return;
     editingGastoDiarioId = id;
-    document.getElementById("gdFecha").value = g.fecha;
+    document.getElementById("gdFecha").value = g.fecha_compra || g.fecha;   // en una cuota, la fecha de COMPRA
     document.getElementById("gdDetalle").value = g.detalle;
     var cat = g.categoria_id ? dbGet("SELECT nombre FROM categorias WHERE id=?", [g.categoria_id]) : null;
     document.getElementById("gdCategoria").value = cat ? cat.nombre : "";
@@ -7384,7 +7404,8 @@
       document.getElementById("gdCuotasField").hidden = true;
       hintEl.hidden = false;
       hintEl.textContent = "Cuota " + (g.cuota_texto || "") + " de un plan de " + g.cuotas_totales + " cuotas (total de la compra: " +
-        money(g.monto_total) + "). Editar acá solo cambia ESTA cuota -- para modificar el plan completo hay que borrar todas sus filas y volver a cargarlas.";
+        money(g.monto_total) + "). La fecha es la de COMPRA: si la cambias, cambia en todas las cuotas y cada una se va a su mes. " +
+        "El resto solo cambia ESTA cuota.";
     }else{
       document.getElementById("gdCuotasField").hidden = true;
       hintEl.hidden = true;
@@ -7472,8 +7493,8 @@
   function gdOrdenar(filas, orden){
     function txt(v){ return String(v || "").toLocaleLowerCase("es"); }
     var cmp = {
-      fecha_desc: function(a, b){ return a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : b.id - a.id; },
-      fecha_asc: function(a, b){ return a.fecha < b.fecha ? -1 : a.fecha > b.fecha ? 1 : a.id - b.id; },
+      fecha_desc: function(a, b){ var x = a.fecha_compra || a.fecha, y = b.fecha_compra || b.fecha; return x < y ? 1 : x > y ? -1 : b.id - a.id; },
+      fecha_asc: function(a, b){ var x = a.fecha_compra || a.fecha, y = b.fecha_compra || b.fecha; return x < y ? -1 : x > y ? 1 : a.id - b.id; },
       monto_desc: function(a, b){ return Number(b.monto) - Number(a.monto); },
       monto_asc: function(a, b){ return Number(a.monto) - Number(b.monto); },
       nombre: function(a, b){ return txt(a.detalle).localeCompare(txt(b.detalle), "es"); },
@@ -7548,7 +7569,7 @@
         var medio = etiquetaMedioPago(f.medio_pago, f.tipo_tarjeta, f.banco_tarjeta);
         // compra con CMR/Lider despues del corte: va en el estado de cuenta de OTRO mes (pedido 29-09-2026)
         var tarjNota = concTarjetaDeNota(f.medio_pago, f.tipo_tarjeta, f.banco_tarjeta);
-        if(tarjNota === "CMR" || tarjNota === "LIDER"){
+        if((tarjNota === "CMR" || tarjNota === "LIDER") && !f.fecha_compra){   // (una cuota ya esta en el mes que le toca)
           var mesEc = perMesDelEstado(tarjNota, f.fecha);
           if(mesEc[0] !== Number(String(f.fecha).slice(0, 4)) || mesEc[1] !== Number(String(f.fecha).slice(5, 7)))
             medio += " → estado de " + ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"][mesEc[1]];
@@ -7564,7 +7585,7 @@
           " · " + reparto.map(function(r){ return (r.pagado ? "✓ " : "⏳ ") + escapeHtml(r.persona); }).join(", ") : "";
         return "<div class=\"list-row\">" +
           "<div class=\"list-row-main\">" +
-            "<span class=\"list-fecha\">" + f.fecha + "</span>" +
+            "<span class=\"list-fecha\">" + (f.fecha_compra || f.fecha) + "</span>" +
             "<span class=\"list-detalle\"" + (colorCuota ? " style=\"color:" + colorCuota + "\"" : "") + ">" + marca + escapeHtml(f.detalle) + cuotaTxt + "</span>" +
             "<span class=\"list-nombres\">" + escapeHtml(f.categoria) + " · " + escapeHtml(medio) + repartoTxt + "</span>" +
           "</div>" +
@@ -8007,7 +8028,7 @@
   function filasGastoDiarioPersona(persona, anio, mes){
     if(!persona || persona === "Sin asignar") return [];
     return dbAll(
-      "SELECT gd.id AS gasto_diario_id, gd.fecha AS fecha, gd.detalle AS detalle, gp.monto AS monto, " +
+      "SELECT gd.id AS gasto_diario_id, COALESCE(gd.fecha_compra, gd.fecha) AS fecha, gd.detalle AS detalle, gp.monto AS monto, " +
       "COALESCE(c.nombre,'') AS categoria " +
       "FROM gasto_diario_persona gp JOIN gastos_diarios gd ON gd.id=gp.gasto_diario_id " +
       "LEFT JOIN categorias c ON c.id=gd.categoria_id " +
@@ -10076,7 +10097,8 @@
         uid: g.uid || "", actualizado_en: g.actualizado_en || "",
         // compra en cuotas (igual que el escritorio, 30-09-2026)
         cuota_texto: g.cuota_texto || "", cuota_actual: g.cuota_actual === undefined ? null : g.cuota_actual,
-        cuotas_totales: g.cuotas_totales === undefined ? null : g.cuotas_totales, monto_total: g.monto_total === undefined ? null : g.monto_total
+        cuotas_totales: g.cuotas_totales === undefined ? null : g.cuotas_totales, monto_total: g.monto_total === undefined ? null : g.monto_total,
+        fecha_compra: g.fecha_compra || ""
       };
     });
 
@@ -10213,13 +10235,21 @@
   // completan cuando aca faltan (una nota que viajo antes sin estos datos). Devuelve true si cambio algo.
   function gdAplicarCuotasDeNota(id, g, forzar){
     if(!id || !g || !("cuota_texto" in g)) return false;
+    var cambioFecha = false;
+    if(g.fecha_compra){   // fecha de compra (19-10-2026): la version mas nueva gana; si aca falta, se completa
+      var fc = dbGet("SELECT fecha_compra FROM gastos_diarios WHERE id=?", [id]);
+      if(fc && fc.fecha_compra !== g.fecha_compra && (forzar || !fc.fecha_compra)){
+        db.run("UPDATE gastos_diarios SET fecha_compra=? WHERE id=?", [g.fecha_compra, id]);
+        cambioFecha = true;
+      }
+    }
     var nuevo = [g.cuota_texto || null, g.cuota_actual === undefined ? null : g.cuota_actual,
                  g.cuotas_totales === undefined ? null : g.cuotas_totales, g.monto_total === undefined ? null : g.monto_total];
     var f = dbGet("SELECT cuota_texto, cuota_actual, cuotas_totales, monto_total FROM gastos_diarios WHERE id=?", [id]);
     if(!f) return false;
     var igual = String(f.cuota_texto || "") === String(nuevo[0] || "") && (f.cuota_actual || null) === (nuevo[1] || null) &&
                 (f.cuotas_totales || null) === (nuevo[2] || null) && Number(f.monto_total || 0) === Number(nuevo[3] || 0);
-    if(igual || (!forzar && f.cuota_texto)) return false;
+    if(igual || (!forzar && f.cuota_texto)) return cambioFecha;
     db.run("UPDATE gastos_diarios SET cuota_texto=?, cuota_actual=?, cuotas_totales=?, monto_total=? WHERE id=?", nuevo.concat([id]));
     return true;
   }
