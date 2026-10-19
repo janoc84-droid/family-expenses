@@ -559,6 +559,7 @@
     <p>Ingresa la clave para continuar</p>
     <form id="lockForm" autocomplete="off">
       <input type="password" id="lockClave" inputmode="numeric" placeholder="Clave" autofocus>
+      <input type="password" id="lockNube" placeholder="Clave de la nube (solo la primera vez en este equipo)" autocomplete="off" hidden style="margin-top:8px;">
       <button type="submit" class="btn-primary">Entrar</button>
     </form>
     <div id="lockError"></div>
@@ -10639,7 +10640,19 @@
   var SUPABASE_URL = "https://vwhkpcuckvkxjltotmna.supabase.co";
   var SUPABASE_ANON_KEY = "sb_publishable_iVD0jVoT2Kh66m3D6fseSg_6vaXZ5PA";
   var SUPABASE_EMAIL = "familia@gastos-familiares.app";
-  var SUPABASE_PASSWORD = "GX0gkx1U8CDagp674rFXBwxJJyI6hSDx";
+  // La contrasena de la nube YA NO va escrita aca: este repositorio es publico y cualquiera podia
+  // leerla (y con ella entrar a los datos de la familia). Se pide una sola vez en cada equipo, en la
+  // pantalla de la clave, y queda guardada solo en ese navegador (localStorage).
+  var NUBE_CLAVE_KEY = "gf_nubeClave";
+  function claveNubeGuardada(){
+    try{ return localStorage.getItem(NUBE_CLAVE_KEY) || ""; }catch(e){ return ""; }
+  }
+  function guardarClaveNube(valor){
+    try{
+      if(valor) localStorage.setItem(NUBE_CLAVE_KEY, valor);
+      else localStorage.removeItem(NUBE_CLAVE_KEY);
+    }catch(e){}
+  }
 
   var nubeAccessToken = null;
   var nubeRefreshToken = null;
@@ -10667,13 +10680,24 @@
 
   // ---- login/refresh contra GoTrue (auth de Supabase) ----
   function loginNube(){
+    var clave = claveNubeGuardada();
+    if(!clave){
+      return Promise.reject(new Error("falta la clave de la nube en este equipo: toca este aviso para ingresarla"));
+    }
     return fetch(SUPABASE_URL + "/auth/v1/token?grant_type=password", {
       method: "POST",
       headers: {"Content-Type": "application/json", "apikey": SUPABASE_ANON_KEY},
-      body: JSON.stringify({email: SUPABASE_EMAIL, password: SUPABASE_PASSWORD})
+      body: JSON.stringify({email: SUPABASE_EMAIL, password: clave})
     }).then(function(resp){
       if(!resp.ok){
-        return resp.text().then(function(t){ throw new Error("login nube " + resp.status + ": " + t); });
+        return resp.text().then(function(t){
+          // Clave equivocada (o cambiada): se olvida para volver a pedirla.
+          if(resp.status === 400 && /invalid/i.test(t)){
+            guardarClaveNube("");
+            throw new Error("la clave de la nube no es correcta: toca este aviso para escribirla de nuevo");
+          }
+          throw new Error("login nube " + resp.status + ": " + t);
+        });
       }
       return resp.json();
     }).then(function(json){
@@ -10781,7 +10805,25 @@
       el.textContent = "☁ Nube sin conexión" + (nubeUltimoError ? " (" + nubeUltimoError + ")" : "");
       el.className = "sync-status-text sync-status-bad";
     }
+    // Sin clave guardada, el aviso se puede tocar para escribirla.
+    el.style.cursor = claveNubeGuardada() ? "" : "pointer";
+    el.title = claveNubeGuardada() ? "" : "Toca para ingresar la clave de la nube";
   }
+
+  // Tocar el aviso de la nube cuando falta la clave: se pide, se guarda y se reintenta.
+  (function(){
+    var el = document.getElementById("syncNubeStatusText");
+    if(!el) return;
+    el.addEventListener("click", function(){
+      if(claveNubeGuardada()) return;
+      var valor = window.prompt("Clave de la nube (se guarda solo en este equipo):", "");
+      if(!valor) return;
+      guardarClaveNube(valor.trim());
+      nubeLoginPromise = null;
+      nubeUltimoError = null;
+      inicializarSyncNubeAlCargar().catch(function(e){ try{ console.warn(e); }catch(err){} });
+    });
+  })();
 
   // ---- publicar el estado local en sync_blob ----
   function exportarASyncNube(){
@@ -11155,10 +11197,14 @@
       mostrarApp();
       return;
     }
+    // Primera vez en este equipo: se pide tambien la clave de la nube (ya no va escrita en el codigo).
+    var campoNube = document.getElementById("lockNube");
+    if(campoNube && !claveNubeGuardada()) campoNube.hidden = false;
     document.getElementById("lockForm").addEventListener("submit", function(ev){
       ev.preventDefault();
       var valor = document.getElementById("lockClave").value;
       if(valor === LOCK_CLAVE){
+        if(campoNube && campoNube.value.trim()) guardarClaveNube(campoNube.value.trim());
         try{ sessionStorage.setItem(LOCK_SESSION_KEY, "1"); }catch(e){}
         mostrarApp();
       }else{
