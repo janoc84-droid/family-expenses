@@ -9911,26 +9911,70 @@
   }
 
   // ---- estado visible en el header ----
+  // Estado de la sincronizacion con la carpeta de OneDrive (desde que se retiro Supabase, 19-10-2026,
+  // es la unica): hora de la ultima revision y del ultimo guardado en la carpeta (de cualquier equipo).
+  function horaCorta(iso){
+    if(!iso) return "";
+    var d = new Date(iso);
+    if(isNaN(d.getTime())) return "";
+    var hhmm = d.toLocaleTimeString("es-CL", {hour:"2-digit", minute:"2-digit", hour12:false});
+    var hoy = new Date();
+    if(d.toDateString() === hoy.toDateString()) return hhmm;
+    var ayer = new Date(hoy.getTime() - 86400000);
+    if(d.toDateString() === ayer.toDateString()) return "ayer " + hhmm;
+    return d.toLocaleDateString("es-CL", {day:"2-digit", month:"2-digit"}) + " " + hhmm;
+  }
   function actualizarEstadoSyncUI(){
     var el = document.getElementById("syncStatusText");
     if(!el) return;
-    if(!syncDirHandle){
-      el.textContent = "";
+    el.style.cursor = "";
+    el.title = "";
+    el.className = "sync-status-text";
+    if(!fsaSupported()){
+      el.textContent = "☁ OneDrive: este navegador no sincroniza (usa Chrome o Edge en el computador)";
       return;
     }
-    var nombreCarpeta = "";
-    try{ nombreCarpeta = localStorage.getItem("gf_syncFolderName") || ""; }catch(e){}
-    var ultima = null;
-    try{ ultima = localStorage.getItem("gf_syncLastLocalExportAt"); }catch(e){}
-    var texto = "🔗 Sincronizando con " + (nombreCarpeta || "carpeta elegida");
-    if(ultima){
-      try{
-        var d = new Date(ultima);
-        texto += " -- último envío " + d.toLocaleTimeString("es-CL", {hour:"2-digit", minute:"2-digit"});
-      }catch(e){}
+    if(!syncDirHandle){
+      el.textContent = "☁ OneDrive sin conectar — toca aquí para elegir la carpeta FamilyExpensesSync";
+      el.className = "sync-status-text sync-status-bad";
+      el.style.cursor = "pointer";
+      el.title = "Elegir la carpeta de OneDrive";
+      return;
+    }
+    if(!document.getElementById("btnSyncReconectar").hidden){
+      el.textContent = "☁ OneDrive: falta dar permiso a la carpeta (botón rojo de al lado)";
+      el.className = "sync-status-text sync-status-bad";
+      return;
+    }
+    var nombreCarpeta = "", revisado = null, metaTxt = null;
+    try{
+      nombreCarpeta = localStorage.getItem("gf_syncFolderName") || "";
+      revisado = localStorage.getItem("gf_syncLastCheckAt");
+      metaTxt = localStorage.getItem("gf_syncRemoteMeta");
+    }catch(e){}
+    var texto = "☁ OneDrive" + (nombreCarpeta ? " (" + nombreCarpeta + ")" : "");
+    if(!revisado){
+      el.textContent = texto + " — revisando…";
+      return;
+    }
+    texto += " al día — revisado " + horaCorta(revisado);
+    var meta = null;
+    try{ meta = metaTxt ? JSON.parse(metaTxt) : null; }catch(e){}
+    if(meta && meta.updated_at){
+      var quien = String(meta.device || "").indexOf("desktop") === 0 ? "escritorio" : "web";
+      texto += " · último guardado " + horaCorta(meta.updated_at) + " (" + quien + ")";
     }
     el.textContent = texto;
+    el.className = "sync-status-text sync-status-ok";
   }
+  // Tocar el aviso cuando no hay carpeta: abre la eleccion de carpeta (mismo boton de sincronizacion).
+  (function(){
+    var el = document.getElementById("syncStatusText");
+    if(!el) return;
+    el.addEventListener("click", function(){
+      if(fsaSupported() && !syncDirHandle) document.getElementById("btnSync").click();
+    });
+  })();
   function mostrarBotonReconectar(){
     document.getElementById("btnSyncReconectar").hidden = false;
   }
@@ -10066,6 +10110,8 @@
       }).then(function(){
         try{
           localStorage.setItem("gf_syncLastLocalExportAt", ts);
+          localStorage.setItem("gf_syncRemoteMeta", JSON.stringify({updated_at: ts, device: device}));
+          localStorage.setItem("gf_syncLastCheckAt", ts);
           // esto es LO QUE ACABAMOS de publicar -- si despues lo releemos
           // (con el mismo device id) no hay que volver a "aplicarlo".
           localStorage.setItem("gf_syncLastAppliedRemoteUpdatedAt", ts);
@@ -10496,6 +10542,12 @@
     return verificarPermisoCarpeta(syncDirHandle, false).then(function(ok){
       if(!ok){ mostrarBotonReconectar(); return; }
       return leerArchivoDeCarpeta(syncDirHandle, SYNC_META_FILE).then(function(meta){
+        // la carpeta respondio: se anota la hora de la revision y el ultimo guardado (para el aviso de arriba)
+        try{
+          localStorage.setItem("gf_syncLastCheckAt", new Date().toISOString());
+          if(meta && meta.updated_at) localStorage.setItem("gf_syncRemoteMeta", JSON.stringify({updated_at: meta.updated_at, device: meta.device || ""}));
+        }catch(e){}
+        actualizarEstadoSyncUI();
         if(!meta || !meta.updated_at) return;
         var ultimaAplicada = null;
         try{ ultimaAplicada = localStorage.getItem("gf_syncLastAppliedRemoteUpdatedAt"); }catch(e){}
@@ -10505,7 +10557,7 @@
           var huboCambios = fusionarDatosRemotos(payload.data, {espejoEscritorio: String(payload.device || "").indexOf("desktop") === 0});
           try{ localStorage.setItem("gf_syncLastAppliedRemoteUpdatedAt", meta.updated_at); }catch(e){}
           actualizarEstadoSyncUI();
-          if(avisar && huboCambios) mostrarToast("Datos actualizados desde la nube.", "ok");
+          if(avisar && huboCambios) mostrarToast("Datos actualizados desde OneDrive.", "ok");
         });
       });
     }).catch(function(e){
@@ -10584,9 +10636,9 @@
 
   // ---- al cargar la app: si hay una carpeta guardada de una visita anterior ----
   function inicializarSyncAlCargar(){
-    if(!fsaSupported()) return Promise.resolve();
+    if(!fsaSupported()){ actualizarEstadoSyncUI(); return Promise.resolve(); }
     return idbGet(SYNC_HANDLE_KEY).then(function(handle){
-      if(!handle) return;
+      if(!handle){ actualizarEstadoSyncUI(); return; }
       syncDirHandle = handle;
       actualizarEstadoSyncUI();
       return verificarPermisoCarpeta(handle, false).then(function(ok){
@@ -10598,6 +10650,7 @@
           // usuario apenas carga la pagina -- mostramos el boton en vez de
           // fallar en silencio.
           mostrarBotonReconectar();
+          actualizarEstadoSyncUI();
         }
       });
     }).catch(function(e){
