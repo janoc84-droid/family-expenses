@@ -10640,6 +10640,10 @@
   var SUPABASE_URL = "https://vwhkpcuckvkxjltotmna.supabase.co";
   var SUPABASE_ANON_KEY = "sb_publishable_iVD0jVoT2Kh66m3D6fseSg_6vaXZ5PA";
   var SUPABASE_EMAIL = "familia@gastos-familiares.app";
+  // RETIRADA el 19-10-2026 (costos): la web ya no usa Supabase. Todo se sincroniza por la carpeta
+  // de OneDrive (boton de sincronizacion por carpeta, Chrome o Edge del computador), igual que el
+  // programa de escritorio. El codigo de la nube se conserva apagado.
+  var NUBE_RETIRADA = true;
   // La contrasena de la nube YA NO va escrita aca: este repositorio es publico y cualquiera podia
   // leerla (y con ella entrar a los datos de la familia). Se pide una sola vez en cada equipo, en la
   // pantalla de la clave, y queda guardada solo en ese navegador (localStorage).
@@ -10737,6 +10741,7 @@
   // abajo). Devuelve siempre la MISMA promesa mientras este en vuelo, para
   // que boot() pueda esperarla sin loguear dos veces.
   function iniciarLoginNube(){
+    if(NUBE_RETIRADA) return Promise.resolve();
     if(nubeLoginPromise) return nubeLoginPromise;
     nubeLoginPromise = loginNube().then(function(){
       actualizarEstadoSyncNubeUI();
@@ -10754,6 +10759,7 @@
   // refresca antes de seguir. Devuelve una promesa que resuelve a true/false
   // segun si quedo una sesion utilizable.
   function asegurarTokenNubeFresco(){
+    if(NUBE_RETIRADA) return Promise.resolve(false);
     if(!nubeAccessToken){
       return iniciarLoginNube().then(function(){ return !!nubeAccessToken; });
     }
@@ -10806,6 +10812,7 @@
       el.className = "sync-status-text sync-status-bad";
     }
     // Sin clave guardada, el aviso se puede tocar para escribirla.
+    if(NUBE_RETIRADA){ el.textContent = ""; el.style.cursor = ""; return; }
     el.style.cursor = claveNubeGuardada() ? "" : "pointer";
     el.title = claveNubeGuardada() ? "" : "Toca para ingresar la clave de la nube";
   }
@@ -10815,7 +10822,7 @@
     var el = document.getElementById("syncNubeStatusText");
     if(!el) return;
     el.addEventListener("click", function(){
-      if(claveNubeGuardada()) return;
+      if(NUBE_RETIRADA || claveNubeGuardada()) return;
       var valor = window.prompt("Clave de la nube (se guarda solo en este equipo):", "");
       if(!valor) return;
       guardarClaveNube(valor.trim());
@@ -10827,6 +10834,7 @@
 
   // ---- publicar el estado local en sync_blob ----
   function exportarASyncNube(){
+    if(NUBE_RETIRADA) return Promise.resolve();
     if(!db) return Promise.resolve(); // la base local todavia no esta lista
     if(nubeBusy) return Promise.resolve();
     nubeBusy = true;
@@ -10871,6 +10879,7 @@
 
   // ---- revisar si hay una version mas nueva en sync_blob y aplicarla ----
   function revisarActualizacionesRemotasNube(avisar){
+    if(NUBE_RETIRADA) return Promise.resolve();
     if(!db) return Promise.resolve();
     if(nubeBusy) return Promise.resolve();
     nubeBusy = true;
@@ -10953,6 +10962,7 @@
 
   // ---- al cargar la app: esperar el login (disparado en mostrarApp) y arrancar el ciclo ----
   function inicializarSyncNubeAlCargar(){
+    if(NUBE_RETIRADA) return Promise.resolve();
     return iniciarLoginNube().then(function(){
       if(!nubeAccessToken) return; // login fallo -- ya se avisó, la app sigue local nomas
       return revisarActualizacionesRemotasNube(false);
@@ -11199,7 +11209,7 @@
     }
     // Primera vez en este equipo: se pide tambien la clave de la nube (ya no va escrita en el codigo).
     var campoNube = document.getElementById("lockNube");
-    if(campoNube && !claveNubeGuardada()) campoNube.hidden = false;
+    if(campoNube && !claveNubeGuardada() && !NUBE_RETIRADA) campoNube.hidden = false;
     document.getElementById("lockForm").addEventListener("submit", function(ev){
       ev.preventDefault();
       var valor = document.getElementById("lockClave").value;
