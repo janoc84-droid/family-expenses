@@ -110,8 +110,16 @@
              ". Elige FamilyExpensesSync → espejo.json en tu OneDrive.", "warn");
     });
   }
+  // iPhone/iPad (usuario 05-11-2026: "solamente me deja foto, tomar una foto, grabar video o seleccionar archivo...
+  // deberia aparecer la opcion de abrir OneDrive"): pidiendo solo archivos .json, el iPhone salta el menu de fotos y
+  // camara y abre directo la app «Archivos», donde esta OneDrive. En Android no se filtra (algunos selectores
+  // esconden el .json de OneDrive si se filtra por tipo).
+  function esIos(){
+    return /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  }
   function abrirArchivo(){
     var i = el("espArchivo");
+    if(esIos()) i.setAttribute("accept", ".json,application/json,text/plain");
     i.value = "";
     i.click();
   }
@@ -206,6 +214,9 @@
       "<button type=\"button\" class=\"esp-btn pri\" id=\"espAbrir\">📂 Abrir mis datos</button>" +
       "<input type=\"file\" id=\"espArchivo\" hidden></div></div>" +
       "<div class=\"esp-estado\" id=\"espEstado\"></div>" +
+      "<div class=\"esp-sub\" id=\"espAyudaIos\" hidden>📱 En el iPhone: «📂 Abrir mis datos» → abajo «Explorar» → " +
+      "<b>OneDrive</b> → FamilyExpensesSync → espejo.json. ¿No aparece OneDrive? En «Explorar» toca <b>⋯</b> (arriba a la " +
+      "derecha) → «Editar» → activa <b>OneDrive</b> (con la app de OneDrive abierta una vez con tu cuenta).</div>" +
       "<div class=\"esp-tabs\" id=\"espTabs\">" +
       "<button type=\"button\" data-v=\"inicio\">Inicio</button>" +
       "<button type=\"button\" data-v=\"estado\">Estado de Cuenta</button>" +
@@ -227,6 +238,7 @@
     el("espFotoLista").addEventListener("click", function(){ if(fotoLista) enviarArchivo(fotoLista.archivo, fotoLista.texto); });
     el("espWhatsapp").addEventListener("click", compartirWhatsapp);
     el("espArchivo").addEventListener("change", function(){ leerArchivo(this.files && this.files[0]); });
+    el("espAyudaIos").hidden = !esIos();
     el("espConectar").addEventListener("click", function(){ cargar(true); });
     el("espCompleta").addEventListener("click", function(ev){
       ev.preventDefault();
@@ -259,7 +271,7 @@
       (ms ? "Toca «Entrar con mi cuenta Microsoft» y entra con la misma cuenta del OneDrive de los computadores."
           : fsa ? "Toca «Conectar la carpeta de OneDrive» y elige la carpeta <b>FamilyExpensesSync</b> dentro de tu OneDrive."
                 : "Toca «📂 Abrir mis datos» y elige, en tu <b>OneDrive</b>, la carpeta <b>FamilyExpensesSync</b> y " +
-                  "dentro el archivo <b>espejo.json</b>. En iPhone OneDrive aparece en «Explorar» → «Ubicaciones»; en " +
+                  "dentro el archivo <b>espejo.json</b>. En iPhone se abre la app «Archivos»: toca abajo «Explorar» → OneDrive; en " +
                   "Android, en el menú ☰ o «Examinar» (necesitas la app de OneDrive instalada).") +
       "</p><p class=\"dim\">Los datos los deja el programa de escritorio al cerrarse (archivo espejo.json).</p></div>";
   }
