@@ -21,7 +21,8 @@
                "Noviembre", "Diciembre"];
 
   var datos = null, fuente = "", vista = "inicio";
-  var sel = {persona: "", clave: "", personaCk: "", claveCk: ""};
+  var sel = {persona: "", clave: "", personaCk: "", claveCk: "", claveGd: "", personaGd: "", buscarGd: ""};
+  var fotoLista = null;        // foto ya armada, por si el telefono pide un segundo toque para enviarla
 
   // ------------------------------------------------------------ utilidades
   function pesos(n){
@@ -187,6 +188,11 @@
       "#espejo .esp-btn{padding:6px 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);cursor:pointer;}" +
       "#espejo .esp-btn.pri{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);}" +
       "#espejo .esp-pie{margin-top:18px;font-size:.8rem;color:var(--text-dim);}" +
+      "#espejo .esp-compartir{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:-4px 0 12px;}" +
+      "#espejo .esp-compartir .esp-msg{font-size:.85rem;flex-basis:100%;}" +
+      "#espejo input[type=search]{padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface-2);color:var(--text);min-width:0;flex:1 1 160px;}" +
+      "#espejo .esp-rep{font-size:.8rem;color:var(--text-dim);}" +
+      "#espejo .esp-foto-titulo{font-weight:700;font-size:1.05rem;margin:0 0 8px;padding:8px 6px 0;}" +
       "#espejo .esp-pie a{color:var(--text-dim);}" +
       "@media (max-width:600px){#espejo{padding:8px 10px 30px;} #espejo th.opc,#espejo td.opc{display:none;}}";
     document.head.appendChild(css);
@@ -203,7 +209,13 @@
       "<div class=\"esp-tabs\" id=\"espTabs\">" +
       "<button type=\"button\" data-v=\"inicio\">Inicio</button>" +
       "<button type=\"button\" data-v=\"estado\">Estado de Cuenta</button>" +
+      "<button type=\"button\" data-v=\"diarios\">Gastos Diarios</button>" +
       "<button type=\"button\" data-v=\"checklist\">Checklist</button></div>" +
+      "<div class=\"esp-compartir\" id=\"espCompartir\" hidden>" +
+      "<button type=\"button\" class=\"esp-btn pri\" id=\"espFoto\">📷 Enviar como foto</button>" +
+      "<button type=\"button\" class=\"esp-btn\" id=\"espWhatsapp\">💬 Enviar por WhatsApp</button>" +
+      "<button type=\"button\" class=\"esp-btn pri\" id=\"espFotoLista\" hidden>📤 Enviar la foto (ya está lista)</button>" +
+      "<div class=\"esp-msg\" id=\"espMsgComp\"></div></div>" +
       "<div id=\"espCuerpo\"></div>" +
       "<div class=\"esp-pie\">¿Emergencia sin computador? <a href=\"#\" id=\"espCompleta\">Abrir la versión completa</a> " +
       "(la de antes, que sí permite cambiar datos).</div>";
@@ -211,6 +223,9 @@
     document.body.classList.add("modo-espejo");
     el("espActualizar").addEventListener("click", function(){ if(soloArchivo()) abrirArchivo(); else cargar(true); });
     el("espAbrir").addEventListener("click", abrirArchivo);
+    el("espFoto").addEventListener("click", compartirFoto);
+    el("espFotoLista").addEventListener("click", function(){ if(fotoLista) enviarArchivo(fotoLista.archivo, fotoLista.texto); });
+    el("espWhatsapp").addEventListener("click", compartirWhatsapp);
     el("espArchivo").addEventListener("change", function(){ leerArchivo(this.files && this.files[0]); });
     el("espConectar").addEventListener("click", function(){ cargar(true); });
     el("espCompleta").addEventListener("click", function(ev){
@@ -254,8 +269,11 @@
       b.classList.toggle("on", b.dataset.v === vista);
     });
     el("espConectar").hidden = true;
+    el("espCompartir").hidden = !datos;
+    msgComp("", "");
     if(!datos){ dibujarSinDatos(); return; }
     if(vista === "estado") dibujarEstado();
+    else if(vista === "diarios") dibujarDiarios();
     else if(vista === "checklist") dibujarChecklist();
     else dibujarInicio();
   }
@@ -316,7 +334,7 @@
   function filtros(idP, idM, persona, clave, mapa){
     var meses = mesesDe(mapa, persona);
     if(meses.length && !meses.some(function(m){ return m[0] + "|" + m[1] === clave; })) clave = meses[0][0] + "|" + meses[0][1];
-    return {clave: clave, html: "<div class=\"esp-filtros\"><select id=\"" + idP + "\">" + (datos.personas || []).map(function(p){
+    return {clave: clave, html: "<div class=\"esp-filtros\" data-html2canvas-ignore><select id=\"" + idP + "\">" + (datos.personas || []).map(function(p){
       return "<option" + (p === persona ? " selected" : "") + ">" + esc(p) + "</option>";
     }).join("") + "</select><select id=\"" + idM + "\">" + meses.map(function(m){
       var k = m[0] + "|" + m[1];
@@ -395,6 +413,217 @@
     el("espCuerpo").innerHTML = h;
     el("espPersonaCk").addEventListener("change", function(){ sel.personaCk = this.value; dibujar(); });
     el("espMesCk").addEventListener("change", function(){ sel.claveCk = this.value; dibujar(); });
+  }
+
+  // ------------------------------------------------------------ Gastos Diarios (05-11-2026)
+  // Usuario: "tambien hay que dejar los gastos diarios. Y no solamente los del mes". Todas las notas, en el mes en
+  // que las muestra el escritorio (CMR/Lider despues del corte -> mes siguiente), con buscador y filtro por persona.
+  function hoyClave(){ var d = new Date(); return [d.getFullYear(), d.getMonth() + 1]; }
+  function mesesGd(){
+    return Object.keys(datos.diarios || {}).map(function(k){ var p = k.split("|"); return [Number(p[0]), Number(p[1])]; })
+      .sort(function(a, b){ return b[0] - a[0] || b[1] - a[1]; });
+  }
+  function personasGd(){
+    var vistas = {};
+    Object.keys(datos.diarios || {}).forEach(function(k){
+      datos.diarios[k].forEach(function(n){ (n.reparto || []).forEach(function(r){ vistas[r[0]] = 1; }); });
+    });
+    return Object.keys(vistas).sort(function(a, b){ return a.localeCompare(b, "es"); });
+  }
+  function etiquetaGd(){
+    if(sel.claveGd === "todos") return "Todos los meses";
+    var p = sel.claveGd.split("|");
+    return MESES[Number(p[1])] + " " + p[0];
+  }
+  function dibujarDiarios(){
+    var meses = mesesGd(), hoy = hoyClave();
+    if(!sel.claveGd){
+      var actual = meses.filter(function(m){ return m[0] < hoy[0] || (m[0] === hoy[0] && m[1] <= hoy[1]); })[0] || meses[0];
+      sel.claveGd = actual ? actual[0] + "|" + actual[1] : "todos";
+    }
+    var total = Object.keys(datos.diarios || {}).reduce(function(s, k){ return s + datos.diarios[k].length; }, 0);
+    var h = "<div class=\"esp-filtros\" data-html2canvas-ignore><select id=\"espMesGd\"><option value=\"todos\"" +
+      (sel.claveGd === "todos" ? " selected" : "") + ">Todos los meses (" + total + " notas)</option>" + meses.map(function(m){
+        var k = m[0] + "|" + m[1], futuro = m[0] > hoy[0] || (m[0] === hoy[0] && m[1] > hoy[1]);
+        return "<option value=\"" + k + "\"" + (k === sel.claveGd ? " selected" : "") + ">" + MESES[m[1]] + " " + m[0] +
+               " (" + datos.diarios[k].length + ")" + (futuro ? " · cuotas que vienen" : "") + "</option>";
+      }).join("") + "</select><select id=\"espPersonaGd\"><option value=\"\">Todas las personas</option>" +
+      personasGd().map(function(p){
+        return "<option" + (p === sel.personaGd ? " selected" : "") + ">" + esc(p) + "</option>";
+      }).join("") + "</select><input type=\"search\" id=\"espBuscarGd\" placeholder=\"Buscar (detalle o categoría)\" value=\"" +
+      esc(sel.buscarGd) + "\"></div><div id=\"espGdLista\"></div>";
+    el("espCuerpo").innerHTML = h;
+    el("espMesGd").addEventListener("change", function(){ sel.claveGd = this.value; listaDiarios(); });
+    el("espPersonaGd").addEventListener("change", function(){ sel.personaGd = this.value; listaDiarios(); });
+    el("espBuscarGd").addEventListener("input", function(){ sel.buscarGd = this.value; listaDiarios(); });
+    listaDiarios();
+  }
+  // las notas que pasan los filtros, por mes: [[clave, [nota...]]]; con persona, `monto` = SU parte
+  function notasGd(){
+    var hoy = hoyClave(), buscar = sel.buscarGd.trim().toLowerCase();
+    var claves = sel.claveGd === "todos" ? mesesGd().map(function(m){ return m[0] + "|" + m[1]; }) : [sel.claveGd];
+    // en "Todos": primero de este mes hacia atras; al final, los meses que vienen (solo cuotas ya programadas)
+    var esFuturo = function(k){ var p = k.split("|").map(Number); return p[0] > hoy[0] || (p[0] === hoy[0] && p[1] > hoy[1]); };
+    claves = claves.filter(function(k){ return !esFuturo(k); }).concat(claves.filter(esFuturo).reverse());
+    return claves.map(function(k){
+      var notas = ((datos.diarios || {})[k] || []).map(function(n){
+        if(!sel.personaGd) return n;
+        var r = (n.reparto || []).filter(function(x){ return x[0] === sel.personaGd; })[0];
+        return r ? Object.assign({}, n, {monto: r[1], pagadoPersona: r[2]}) : null;
+      }).filter(function(n){
+        return n && (!buscar || (n.detalle + " " + n.categoria).toLowerCase().indexOf(buscar) >= 0);
+      });
+      return [k, notas, esFuturo(k)];
+    }).filter(function(g){ return g[1].length; });
+  }
+  function listaDiarios(){
+    var grupos = notasGd(), h = "";
+    var suma = function(ns){ return ns.reduce(function(s, n){ return s + n.monto; }, 0); };
+    var cuantas = grupos.reduce(function(s, g){ return s + g[1].length; }, 0);
+    if(!grupos.length){
+      el("espGdLista").innerHTML = "<div class=\"esp-card dim\">No hay gastos diarios con ese filtro.</div>";
+      return;
+    }
+    if(grupos.length > 1){
+      h += "<div class=\"esp-card\"><b>" + cuantas + " notas · total " + pesos(grupos.reduce(function(s, g){ return s + suma(g[1]); }, 0)) +
+           "</b>" + (sel.personaGd ? " <span class=\"dim\">(la parte de " + esc(sel.personaGd) + ")</span>" : "") + "</div>";
+    }
+    var futuros = false;
+    grupos.forEach(function(g){
+      var p = g[0].split("|");
+      if(g[2] && !futuros){ futuros = true; h += "<h2 style=\"font-size:1rem;margin:16px 0 8px\">Meses que vienen (cuotas ya programadas)</h2>"; }
+      h += "<div class=\"esp-card\"><h2>" + MESES[Number(p[1])] + " " + p[0] + " · " + g[1].length + " notas · " + pesos(suma(g[1])) +
+           "</h2><table><thead><tr><th>Fecha</th><th>Detalle</th><th class=\"opc\">Medio de pago</th><th class=\"n\">Monto</th></tr>" +
+           "</thead><tbody>" + g[1].map(function(n){
+             var rep = (n.reparto || []).map(function(r){ return esc(r[0]) + " " + pesos(r[1]) + (r[2] ? " ✓" : ""); }).join(" · ");
+             return "<tr><td style=\"white-space:nowrap\">" + fechaCorta(n.fecha).slice(0, 5) + "</td><td>" + esc(n.detalle) +
+                    (n.cuota ? " <span class=\"dim\">(" + esc(n.cuota) + ")</span>" : "") +
+                    "<div class=\"esp-rep\">" + esc(n.categoria) + (rep ? " · 👥 " + rep : "") + "</div></td><td class=\"opc\">" +
+                    esc(n.medio) + "</td><td class=\"n\">" + pesos(n.monto) + "</td></tr>";
+           }).join("") + "</tbody></table></div>";
+    });
+    el("espGdLista").innerHTML = h;
+  }
+
+  // ------------------------------------------------------------ enviar: foto y WhatsApp (05-11-2026)
+  // Usuario: "no puedo modificar los datos, pero si puedo tener la opcion de enviarlo a traves de WhatsApp o a traves
+  // de una foto. Tal como lo hacemos con la aplicacion". Solo lee lo que esta en pantalla; nunca cambia datos.
+  function msgComp(texto, clase){
+    var m = el("espMsgComp");
+    if(!m) return;
+    m.textContent = texto;
+    m.className = "esp-msg " + (clase || "");
+    if(!texto) el("espFotoLista").hidden = true;
+  }
+  function estadoActual(){ return (datos.estados || {})[sel.persona + "|" + sel.clave]; }
+  function tituloVista(){
+    if(vista === "estado") return "Estado de cuenta de " + sel.persona + " — " + etiquetaClave(sel.clave);
+    if(vista === "checklist") return "Checklist de pagos de " + sel.personaCk + " — " + etiquetaClave(sel.claveCk);
+    if(vista === "diarios") return "Gastos diarios — " + etiquetaGd() + (sel.personaGd ? " — " + sel.personaGd : "");
+    return "Gastos Familiares — resumen";
+  }
+  function etiquetaClave(k){ var p = String(k || "").split("|"); return p.length > 1 ? MESES[Number(p[1])] + " " + p[0] : ""; }
+  function textoVista(){
+    var t = tituloVista(), lineas = [];
+    if(vista === "estado"){
+      var e = estadoActual();
+      if(e && e.mensaje) return e.mensaje.replace("en PDF", "en una foto");
+      return t;
+    }
+    if(vista === "checklist"){
+      ((datos.checklist || {})[sel.personaCk + "|" + sel.claveCk] || []).forEach(function(x){
+        lineas.push((x.pagado ? "✓ " : "⏳ ") + x.detalle + ": " + pesos(x.monto));
+      });
+    }else if(vista === "diarios"){
+      var tot = 0;
+      notasGd().forEach(function(g){
+        if(sel.claveGd === "todos") lineas.push("— " + etiquetaClave(g[0]));
+        g[1].forEach(function(n){ tot += n.monto; lineas.push(fechaCorta(n.fecha).slice(0, 5) + " " + n.detalle + ": " + pesos(n.monto)); });
+      });
+      lineas.push("Total: " + pesos(tot));
+    }else{
+      var u = (datos.inicio || {}).ultimo;
+      if(u) t = "Cobro de " + MESES[u[1]] + " " + u[0];
+      ((datos.inicio || {}).cobros || []).forEach(function(c){
+        if(c.titular) return;
+        lineas.push(c.persona + ": " + (c.pagado ? "✔ pagado" : c.total < -1 ? "a favor " + pesos(-c.total)
+                                        : c.total <= 1 ? "nada pendiente" : "debe " + pesos(c.total)));
+      });
+    }
+    var texto = t + "\n" + lineas.join("\n");
+    if(texto.length > 1800) texto = texto.slice(0, 1750).replace(/\n[^\n]*$/, "") + "\n… (el resto va en la foto)";
+    return texto;
+  }
+  function telefonoWa(){
+    var p = vista === "estado" ? sel.persona : vista === "checklist" ? sel.personaCk : vista === "diarios" ? sel.personaGd : "";
+    var tel = p ? String(((datos.telefonos || {})[p]) || "").replace(/\D/g, "") : "";
+    if(tel.length === 9 && tel.charAt(0) === "9") tel = "56" + tel;      // igual que normalizar_telefono_cl
+    return tel;
+  }
+  function compartirWhatsapp(){
+    var link = "https://wa.me/" + telefonoWa() + "?text=" + encodeURIComponent(textoVista());
+    window.open(link, "_blank");
+    msgComp("Se abrió WhatsApp con el mensaje listo" + (telefonoWa() ? "." : ": elige a quién mandarlo.") +
+            " Si quieres mandar también la foto, toca «📷 Enviar como foto».", "ok");
+  }
+  function nombreFoto(){
+    return tituloVista().replace(/[—]/g, "-").replace(/[^\wÁÉÍÓÚÑáéíóúñ -]+/g, "").replace(/\s+/g, "_") + ".png";
+  }
+  function capturar(){
+    if(typeof html2canvas !== "function") return Promise.reject(new Error("no se pudo cargar la librería de imagen"));
+    var cuerpo = el("espCuerpo");
+    var titulo = document.createElement("div");
+    titulo.className = "esp-foto-titulo";
+    titulo.textContent = tituloVista();
+    cuerpo.insertBefore(titulo, cuerpo.firstChild);
+    var alto = cuerpo.scrollHeight;
+    var escala = Math.min(2, 15000 / Math.max(alto, 1));
+    var fin = function(){ if(titulo.parentNode) titulo.parentNode.removeChild(titulo); };
+    if(escala < 0.8){ fin(); return Promise.reject(new Error("es demasiado larga para una foto: elige un solo mes o filtra por persona")); }
+    var fondo = getComputedStyle(document.body).backgroundColor || "#ffffff";
+    return html2canvas(cuerpo, {scale: escala, backgroundColor: fondo, useCORS: true}).then(function(canvas){
+      fin();
+      return new Promise(function(ok, mal){
+        canvas.toBlob(function(b){ if(b) ok(b); else mal(new Error("no se pudo armar la imagen")); }, "image/png");
+      });
+    }, function(e){ fin(); throw e; });
+  }
+  function enviarArchivo(archivo, texto){
+    var datosShare = {files: [archivo], title: tituloVista()};
+    if(texto) datosShare.text = texto;
+    return navigator.share(datosShare).then(function(){
+      fotoLista = null; msgComp("✔ Listo.", "ok");
+    }).catch(function(e){
+      if(e && e.name === "AbortError"){ msgComp("", ""); return; }
+      // el telefono a veces pide un toque nuevo porque armar la foto tomo unos segundos
+      fotoLista = {archivo: archivo, texto: texto};
+      el("espFotoLista").hidden = false;
+      msgComp("La foto está lista: toca «📤 Enviar la foto» y elige WhatsApp.", "ok");
+    });
+  }
+  function compartirFoto(){
+    msgComp("Preparando la foto…", "");
+    var texto = vista === "estado" && estadoActual() ? textoVista() : "";
+    capturar().then(function(blob){
+      var archivo = new File([blob], nombreFoto(), {type: "image/png"});
+      if(navigator.canShare && navigator.share && navigator.canShare({files: [archivo]})){
+        return enviarArchivo(archivo, texto);      // telefono: se abre el menu de compartir (WhatsApp, etc.)
+      }
+      // computador: se descarga y se copia al portapapeles para pegarla en WhatsApp con Ctrl+V
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob); a.download = archivo.name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function(){ URL.revokeObjectURL(a.href); }, 5000);
+      var copiar = (navigator.clipboard && window.ClipboardItem)
+        ? navigator.clipboard.write([new ClipboardItem({"image/png": blob})]).then(function(){ return true; }, function(){ return false; })
+        : Promise.resolve(false);
+      return copiar.then(function(copiada){
+        msgComp((copiada ? "✔ Foto copiada: pégala en el chat de WhatsApp con Ctrl+V. " : "") +
+                "También quedó descargada como «" + archivo.name + "».", "ok");
+      });
+    }).catch(function(e){
+      msgComp("No se pudo armar la foto: " + (e && e.message ? e.message : e) + ".", "warn");
+    });
   }
 
   // ------------------------------------------------------------ entrada
