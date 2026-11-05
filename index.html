@@ -1123,6 +1123,8 @@
 <script src="vendor/xlsx.full.min.js"></script>
 <script src="vendor/jspdf.umd.min.js"></script>
 <script src="vendor/html2canvas.min.js"></script>
+<script src="espejo_ms.js"></script>
+<script src="espejo.js"></script>
 <script>
 (function(){
   "use strict";
@@ -11275,6 +11277,14 @@
 
   function mostrarApp(){
     document.getElementById("lockScreen").hidden = true;
+    // modo espejo (05-11-2026, usuario: "en la web... no para modificarla, pero si para poder visualizarla"): por
+    // defecto la web solo DIBUJA lo que dejo el escritorio (espejo.js); la version completa queda para emergencias
+    if(window.GFEspejo && window.GFEspejo.activo()){
+      document.getElementById("appLoading").hidden = true;
+      window.GFEspejo.iniciar();
+      return;
+    }
+    if(window.GFEspejo) window.GFEspejo.botonVolver();
     iniciarAppReal();
     // Login contra Supabase para la sync en la nube: se dispara aca, en
     // paralelo con iniciarAppReal() (no depende de que la base local este
