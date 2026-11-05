@@ -92,6 +92,34 @@
     });
   }
 
+  // Opcion B (05-11-2026): el usuario elige espejo.json con el selector de archivos del telefono
+  // (OneDrive aparece ahi: en Android en «Examinar», en iPhone dentro de la app «Archivos»).
+  function esEspejo(d){ return d && typeof d === "object" && d.version && d.inicio && d.estados; }
+  function leerArchivo(archivo){
+    if(!archivo) return;
+    estado("Leyendo «" + archivo.name + "»…", "");
+    archivo.text().then(function(t){
+      var d = JSON.parse(t);
+      if(!esEspejo(d)) throw new Error("no es el archivo espejo.json del programa");
+      fuente = "el archivo que elegiste (" + archivo.name + ")";
+      idbSet(CLAVE_CACHE, d);
+      usar(d);
+    }).catch(function(e){
+      estado("Ese archivo no sirvió: " + (e && e.message ? e.message : e) +
+             ". Elige FamilyExpensesSync → espejo.json en tu OneDrive.", "warn");
+    });
+  }
+  function abrirArchivo(){
+    var i = el("espArchivo");
+    i.value = "";
+    i.click();
+  }
+  // en el telefono no hay ni carpeta ni cuenta Microsoft: «Actualizar» = volver a elegir el archivo
+  function soloArchivo(){
+    var ms = window.GFEspejoMicrosoft && window.GFEspejoMicrosoft.disponible && window.GFEspejoMicrosoft.disponible();
+    return !ms && typeof window.showDirectoryPicker !== "function";
+  }
+
   function cargar(pedirPermiso){
     estado("Buscando los datos…", "");
     var intento = (window.GFEspejoMicrosoft && window.GFEspejoMicrosoft.leer)
@@ -123,7 +151,8 @@
     if(ultimo && !sel.clave) sel.clave = ultimo[0] + "|" + ultimo[1];
     if(ultimo && !sel.claveCk) sel.claveCk = ultimo[0] + "|" + ultimo[1];
     estado("Datos del escritorio «" + (d.equipo || "?") + "», guardados el " + fechaCorta(d.generado_en) +
-           " · leídos desde " + fuente + ".", "ok");
+           " · leídos desde " + fuente + "." +
+           (fuente.indexOf("última copia") >= 0 ? " Para ver lo más nuevo toca «📂 Abrir mis datos»." : ""), "ok");
     dibujar();
   }
 
@@ -167,7 +196,9 @@
       "<div class=\"esp-top\"><div><h1>🏠 Gastos Familiares</h1>" +
       "<div class=\"esp-sub\">Modo espejo: aquí solo se mira. Todo se carga en los computadores.</div></div>" +
       "<div><button type=\"button\" class=\"esp-btn\" id=\"espActualizar\">↻ Actualizar</button> " +
-      "<button type=\"button\" class=\"esp-btn\" id=\"espConectar\" hidden>Conectar…</button></div></div>" +
+      "<button type=\"button\" class=\"esp-btn\" id=\"espConectar\" hidden>Conectar…</button> " +
+      "<button type=\"button\" class=\"esp-btn pri\" id=\"espAbrir\">📂 Abrir mis datos</button>" +
+      "<input type=\"file\" id=\"espArchivo\" hidden></div></div>" +
       "<div class=\"esp-estado\" id=\"espEstado\"></div>" +
       "<div class=\"esp-tabs\" id=\"espTabs\">" +
       "<button type=\"button\" data-v=\"inicio\">Inicio</button>" +
@@ -178,7 +209,9 @@
       "(la de antes, que sí permite cambiar datos).</div>";
     document.body.appendChild(raiz);
     document.body.classList.add("modo-espejo");
-    el("espActualizar").addEventListener("click", function(){ cargar(true); });
+    el("espActualizar").addEventListener("click", function(){ if(soloArchivo()) abrirArchivo(); else cargar(true); });
+    el("espAbrir").addEventListener("click", abrirArchivo);
+    el("espArchivo").addEventListener("change", function(){ leerArchivo(this.files && this.files[0]); });
     el("espConectar").addEventListener("click", function(){ cargar(true); });
     el("espCompleta").addEventListener("click", function(ev){
       ev.preventDefault();
@@ -210,7 +243,9 @@
     el("espCuerpo").innerHTML = "<div class=\"esp-card\"><h2>Conectar con los datos</h2><p>" +
       (ms ? "Toca «Entrar con mi cuenta Microsoft» y entra con la misma cuenta del OneDrive de los computadores."
           : fsa ? "Toca «Conectar la carpeta de OneDrive» y elige la carpeta <b>FamilyExpensesSync</b> dentro de tu OneDrive."
-                : "En este teléfono todavía no se puede leer OneDrive: falta activar la entrada con la cuenta Microsoft.") +
+                : "Toca «📂 Abrir mis datos» y elige, en tu <b>OneDrive</b>, la carpeta <b>FamilyExpensesSync</b> y " +
+                  "dentro el archivo <b>espejo.json</b>. En iPhone OneDrive aparece en «Explorar» → «Ubicaciones»; en " +
+                  "Android, en el menú ☰ o «Examinar» (necesitas la app de OneDrive instalada).") +
       "</p><p class=\"dim\">Los datos los deja el programa de escritorio al cerrarse (archivo espejo.json).</p></div>";
   }
 
